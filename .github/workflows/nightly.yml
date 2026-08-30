@@ -1,0 +1,101 @@
+name: Windows Nightly Release
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build-and-release:
+    name: Build & Publish Windows Setup Nightly
+    runs-on: windows-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Rust Toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: stable
+          components: rustfmt, clippy
+
+      - name: Rust Cache
+        uses: Swatinem/rust-cache@v2
+
+      - name: Build Release Binary
+        run: cargo build --release --bin vespetrel
+
+      - name: Stage Distribution Files
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path dist
+          New-Item -ItemType Directory -Force -Path staging\vespetrel
+          Copy-Item target\release\vespetrel.exe staging\vespetrel\
+          Copy-Item README.md staging\vespetrel\
+          Copy-Item LICENSE staging\vespetrel\
+          Compress-Archive -Path staging\vespetrel\* -DestinationPath dist\vespetrel-windows-x86_64.zip -Force
+
+      - name: Build Windows Setup Installer (NSIS)
+        shell: pwsh
+        run: |
+          if (!(Get-Command makensis -ErrorAction SilentlyContinue)) {
+            $nsisDefault = "C:\Program Files (x86)\NSIS\makensis.exe"
+            if (Test-Path $nsisDefault) {
+              Set-Alias -Name makensis -Value $nsisDefault
+            } else {
+              choco install nsis -y --no-progress
+              $env:PATH += ";C:\Program Files (x86)\NSIS"
+            }
+          }
+          makensis .github/installer.nsi
+          Copy-Item vespetrel-setup-windows-x86_64.exe dist\
+
+      - name: Generate Checksums
+        shell: pwsh
+        run: |
+          Set-Location dist
+          Get-FileHash -Algorithm SHA256 * | ForEach-Object { "$($_.Hash)  $($_.Path | Split-Path -Leaf)" } | Out-File -Encoding ascii SHA256SUMS.txt
+          Get-Content SHA256SUMS.txt
+
+      - name: Update Nightly Git Tag
+        shell: pwsh
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git tag -f nightly
+          git push -f origin nightly
+
+      - name: Publish or Update Nightly Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: nightly
+          name: "Vespetrel Windows Nightly Build"
+          body: |
+            ## 🕊️ Vespetrel Nightly (Windows x86_64)
+
+            Automated rolling pre-release built from the latest `main` commit (`${{ github.sha }}`).
+
+            ### 📦 Downloads
+            - **Windows Installer:** [`vespetrel-setup-windows-x86_64.exe`](https://github.com/${{ github.repository }}/releases/download/nightly/vespetrel-setup-windows-x86_64.exe)
+            - **Portable Zip:** [`vespetrel-windows-x86_64.zip`](https://github.com/${{ github.repository }}/releases/download/nightly/vespetrel-windows-x86_64.zip)
+            - **Checksums:** [`SHA256SUMS.txt`](https://github.com/${{ github.repository }}/releases/download/nightly/SHA256SUMS.txt)
+
+            ### ⚙️ Build Information
+            - **Commit:** `${{ github.sha }}`
+            - **Branch:** `${{ github.ref_name }}`
+            - **Rust Edition:** `2024`
+            - **Target:** `x86_64-pc-windows-msvc`
+          prerelease: true
+          make_latest: false
+          files: |
+            dist/vespetrel-setup-windows-x86_64.exe
+            dist/vespetrel-windows-x86_64.zip
+            dist/SHA256SUMS.txt
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

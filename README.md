@@ -8,6 +8,7 @@
 [![Rust](https://img.shields.io/badge/rust-stable-brightgreen.svg?style=flat-square&logo=rust)](https://www.rust-lang.org)
 [![GPUI](https://img.shields.io/badge/GUI-GPUI%20(Zed)-blueviolet.svg?style=flat-square)](https://github.com/zed-industries/zed)
 [![License: MIT OR Apache-2.0](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg?style=flat-square)](LICENSE)
+[![Nightly](https://img.shields.io/github/v/release/SV-stark/Vespetrel?include_prereleases&label=Windows%20Nightly&logo=windows&color=blue)](https://github.com/SV-stark/Vespetrel/releases/tag/nightly)
 [![Search](https://img.shields.io/badge/search-SQLite%20FTS5%20(BM25)-orange.svg?style=flat-square)](https://www.sqlite.org/fts5.html)
 [![Tests](https://img.shields.io/badge/tests-passing-brightgreen.svg?style=flat-square)](https://github.com/SV-stark/Vespetrel/actions)
 [![PRs Welcome](https://img.shields.io/badge/PRs-welcome-brightgreen.svg?style=flat-square)](https://github.com/SV-stark/Vespetrel/pulls)
@@ -162,10 +163,24 @@ vespetrel/
   * **Linux**: `libx11-dev`, `libwayland-dev`, `libxkbcommon-dev`, `libvulkan-dev`
   * **Windows**: Visual Studio 2022 C++ Build Tools
 
-### Building & Running
+### 📥 Downloads (Windows Nightly)
+
+Pre-built rolling releases are built and published on every push to `main`:
+
+| Package | Format | Direct Download |
+|---|---|---|
+| **Windows Setup Installer** | `.exe` (NSIS) | [**`vespetrel-setup-windows-x86_64.exe`**](https://github.com/SV-stark/Vespetrel/releases/download/nightly/vespetrel-setup-windows-x86_64.exe) |
+| **Portable Archive** | `.zip` | [**`vespetrel-windows-x86_64.zip`**](https://github.com/SV-stark/Vespetrel/releases/download/nightly/vespetrel-windows-x86_64.zip) |
+| **Checksums** | `SHA256` | [**`SHA256SUMS.txt`**](https://github.com/SV-stark/Vespetrel/releases/download/nightly/SHA256SUMS.txt) |
+
+---
+
+### Building from Source
+
+Ensure you have Rust (>= 1.85 / 2024 edition) installed:
 
 ```bash
-# Clone repository
+# Clone the repository
 git clone https://github.com/SV-stark/Vespetrel.git
 cd Vespetrel
 

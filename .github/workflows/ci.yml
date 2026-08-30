@@ -1,0 +1,90 @@
+name: CI
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+    branches: [main, master]
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  fmt:
+    name: fmt
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - run: cargo fmt --all -- --check
+
+  clippy:
+    name: clippy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: Install system deps (Linux)
+        run: sudo apt-get update && sudo apt-get install -y libsqlite3-dev pkg-config
+      - run: cargo clippy --workspace --all-targets --all-features -- -D warnings
+
+  check:
+    name: check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Install system deps (Linux)
+        run: sudo apt-get update && sudo apt-get install -y libsqlite3-dev pkg-config libssl-dev
+      - run: cargo check --workspace --all-targets
+
+  test:
+    name: test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Install system deps (Linux)
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y libsqlite3-dev pkg-config libssl-dev
+      - name: Install system deps (macOS)
+        if: runner.os == 'macOS'
+        run: brew install sqlite pkg-config openssl || true
+      - run: cargo test --workspace --all-features
+      - name: Headless smoke (vespetrel-app)
+        run: cargo run -p vespetrel-app -- --help || cargo run -p vespetrel-app 2>&1 | head -n 20
+
+  build:
+    name: build
+    runs-on: ubuntu-latest
+    needs: [fmt, clippy, check, test]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Install system deps
+        run: sudo apt-get update && sudo apt-get install -y libsqlite3-dev pkg-config
+      - run: cargo build --workspace --release --verbose
+      - name: Upload artifact (vespetrel binary)
+        uses: actions/upload-artifact@v4
+        with:
+          name: vespetrel-ubuntu
+          path: target/release/vespetrel*
+          if-no-files-found: warn
