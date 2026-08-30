@@ -106,9 +106,7 @@ impl AccountWorker {
                     &rf.path,
                 );
                 let _ = conn
-                    .interact(move |c| {
-                        vespetrel_storage::repo::upsert_folder(c, &folder_record)
-                    })
+                    .interact(move |c| vespetrel_storage::repo::upsert_folder(c, &folder_record))
                     .await;
             }
         }
@@ -134,9 +132,7 @@ impl AccountWorker {
                             );
                             summaries.push(msg.summary());
                             let _ = conn
-                                .interact(move |c| {
-                                    vespetrel_storage::repo::insert_message(c, &msg)
-                                })
+                                .interact(move |c| vespetrel_storage::repo::insert_message(c, &msg))
                                 .await;
                         }
                     } else {
