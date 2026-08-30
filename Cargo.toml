@@ -63,7 +63,7 @@ zeroize = { version = "1.8", features = ["zeroize_derive"] }
 
 # HTML Sanitization
 ammonia = "4.0"
-lol_html = "2.0"
+lol_html = "3.0"
 
 # Serialization & Utils
 serde = { version = "1.0", features = ["derive"] }
