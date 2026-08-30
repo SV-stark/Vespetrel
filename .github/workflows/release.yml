@@ -13,6 +13,9 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
+env:
+  ACTIONS_ALLOW_USE_UNSECURE_NODE_VERSION: "true"
+
 jobs:
   build-windows:
     name: Build Windows Setup & Portable
@@ -81,9 +84,21 @@ jobs:
       - name: Generate Checksums
         shell: pwsh
         run: |
-          Set-Location dist
-          Get-ChildItem -File -Exclude "*.txt" | Get-FileHash -Algorithm SHA256 | ForEach-Object { "$($_.Hash)  $($_.Name)" } | Out-File -Encoding ascii SHA256SUMS.txt
-          Get-Content SHA256SUMS.txt
+          $files = Get-ChildItem -Path dist -File | Where-Object { $_.Name -ne 'SHA256SUMS.txt' }
+          if ($files.Count -eq 0) {
+            throw "No release files found in dist directory"
+          }
+          $lines = foreach ($file in $files) {
+            $hash = (Get-FileHash -Algorithm SHA256 $file.FullName).Hash.ToLower()
+            "$hash  $($file.Name)"
+          }
+          $lines | Set-Content -Path dist\SHA256SUMS.txt -Encoding utf8
+          $size = (Get-Item dist\SHA256SUMS.txt).Length
+          if ($size -eq 0) {
+            throw "SHA256SUMS.txt was generated with 0 bytes"
+          }
+          Write-Host "Generated SHA256SUMS.txt ($size bytes):"
+          Get-Content dist\SHA256SUMS.txt
 
       - name: Upload Windows Artifacts
         uses: actions/upload-artifact@v4
