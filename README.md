@@ -9,9 +9,10 @@
 [![GPUI](https://img.shields.io/badge/GUI-GPUI%20(Zed)-blueviolet.svg?style=flat-square)](https://github.com/zed-industries/zed)
 [![License: MIT OR Apache-2.0](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg?style=flat-square)](LICENSE)
 [![Search](https://img.shields.io/badge/search-SQLite%20FTS5%20(BM25)-orange.svg?style=flat-square)](https://www.sqlite.org/fts5.html)
+[![Tests](https://img.shields.io/badge/tests-passing-brightgreen.svg?style=flat-square)](https://github.com/SV-stark/Vespetrel/actions)
 [![PRs Welcome](https://img.shields.io/badge/PRs-welcome-brightgreen.svg?style=flat-square)](https://github.com/SV-stark/Vespetrel/pulls)
 
-[Features](#-features) • [Architecture](#-architecture) • [Comparison](#-head-to-head-vs-thunderbird) • [Workspace Structure](#-workspace-structure) • [Getting Started](#-getting-started) • [Roadmap](#-roadmap)
+[Features](#-features) • [Architecture](#-architecture) • [Comparison](#-head-to-head-vs-thunderbird) • [Provider Support](#-provider-compatibility-matrix) • [Workspace](#-workspace-structure) • [Getting Started](#-getting-started) • [Roadmap](#-roadmap)
 
 </div>
 
@@ -19,9 +20,9 @@
 
 ## ⚡ Why Vespetrel?
 
-Modern desktop email clients are predominantly built on heavy web runtimes (Electron, Gecko, Chromium) that consume gigabytes of memory, introduce sluggish typing latency, and struggle with multi-gigabyte mailboxes.
+Modern desktop email clients are almost universally trapped in web runtimes (Electron, Gecko, Chromium) that consume gigabytes of memory, introduce sluggish typing latency, and struggle when searching 50k+ local mailboxes.
 
-**Vespetrel** is built from the ground up in **100% memory-safe Rust** utilizing Zed's **`gpui`** framework. It directly renders UI elements on the GPU via Metal, Vulkan, and Direct3D at silky **120+ FPS**, keeping memory consumption under **50MB** while matching Thunderbird's complete feature suite: **Email + Calendars (CalDAV) + Contacts (CardDAV) + OpenPGP/S-MIME encryption + Instant Global Search**.
+**Vespetrel** is built from the ground up in **100% memory-safe Rust** utilizing Zed's **`gpui`** framework. It directly renders UI elements on the GPU via Metal, Vulkan, and Direct3D at silky **120+ FPS**, maintaining an idle footprint under **50MB** while matching Thunderbird's complete feature suite: **Email + Calendars (CalDAV) + Contacts (CardDAV) + OpenPGP/S-MIME encryption + Instant Global Search**.
 
 ```
 ┌────────────────────────────────────────────────────────────────────────────────────────────┐
@@ -47,7 +48,7 @@ Modern desktop email clients are predominantly built on heavy web runtimes (Elec
 │  ┌──────────────────────────────────────────────────────────────────────────────────────┐  │
 │  │ LOCAL STORAGE & BM25 SEARCH                                                          │  │
 │  │ • Rusqlite in WAL Mode + Memory-Mapped I/O                                           │  │
-│  │ • SQLite FTS5 (unicode61 + trigram tokenizers) for sub-15ms search across 200k mails │  │
+│  │ • SQLite FTS5 (unicode61 tokenizers) for sub-15ms search across 200k mails           │  │
 │  │ • Compressed Raw RFC822 Blob Store (lz4 / zstd) for offline resilience               │  │
 │  └──────────────────────────────────────────────────────────────────────────────────────┘  │
 └────────────────────────────────────────────────────────────────────────────────────────────┘
@@ -69,17 +70,57 @@ Modern desktop email clients are predominantly built on heavy web runtimes (Elec
 
 ---
 
-## ✨ Features
+## 🔄 Real-Time Synchronization Pipeline
+
+```mermaid
+sequenceDiagram
+    autonumber
+    actor User as User / OS
+    participant GPUI as GPUI Frontend (120 FPS)
+    participant Bus as Async Event Bus (mpsc)
+    participant Worker as Tokio Account Actor
+    participant Server as Remote Server (IMAP / JMAP / Graph)
+    participant DB as SQLite WAL + FTS5 Index
+
+    Server->>Worker: IMAP IDLE notification / JMAP Push Event
+    Worker->>Server: UID FETCH (FLAGS MODSEQ RFC822.SIZE)
+    Server-->>Worker: Raw MIME + Updated Metadata
+    Worker->>DB: ACID Transaction (Insert Message + Update FTS5)
+    DB-->>Worker: Commit OK
+    Worker->>Bus: SyncEvent::MessagesInserted(Vec<MessageSummary>)
+    Bus->>GPUI: cx.spawn dispatch to main thread
+    GPUI->>User: GPU Redraw (Virtual List Updated Instantly)
+```
+
+---
+
+## 🌐 Provider Compatibility Matrix
+
+Vespetrel natively abstracts differences between modern and legacy email protocols through its unified `MailProvider` trait:
+
+| Provider | Auth Method | Email Protocol | Push / Sync Method | Calendar | Contacts |
+|---|---|---|---|---|---|
+| **Gmail / Google Workspace** | OAuth2 + PKCE | IMAP (`X-GM-EXT-1`) | IMAP IDLE | CalDAV | CardDAV |
+| **Microsoft 365 (Enterprise)** | Entra ID OAuth2 | Microsoft Graph REST | Delta Tokens (`/messages/delta`) | Graph Events | Graph Contacts |
+| **Outlook.com (Personal)** | OAuth2 + PKCE | IMAP / SMTP | IMAP IDLE | Graph Events | Graph Contacts |
+| **Fastmail** | App Password / Bearer | JMAP (RFC 8620/8621) | EventSource (SSE) / WebSocket | CalDAV / JMAP | CardDAV / JMAP |
+| **Apple iCloud** | App Password | IMAP / SMTP | IMAP IDLE | CalDAV | CardDAV |
+| **Nextcloud** | Password / App Token | IMAP / SMTP | IMAP IDLE | CalDAV | CardDAV |
+| **Self-Hosted (Dovecot / Stalwart)** | Plain / SCRAM / XOAUTH2 | IMAP4rev2 / JMAP | IMAP IDLE / Push | CalDAV | CardDAV |
+
+---
+
+## ✨ Core Feature Highlights
 
 ### 📬 Complete Mail Engine
-* **Protocol Diversity**: Full support for standard **IMAP4rev2** (`IDLE`, `CONDSTORE`, `QRESYNC`, `SPECIAL-USE`), modern **JMAP** (RFC 8620/8621 via Stalwart client), and **Microsoft Graph REST** (for enterprise Microsoft 365 / Exchange where IMAP is blocked).
-* **MIME Parsing**: Powered by `stalwartlabs/mail-parser` for zero-copy string slicing (`Cow<str>`), streaming attachments, and robust support for 41 legacy character encodings.
-* **OAuth2 with PKCE**: Seamless graphical onboarding for Google (Gmail) and Microsoft 365 (Entra ID) with automated token rotation and secure storage in the OS credential manager (`keyring-rs`).
+* **Protocol Diversity**: Full support for standard **IMAP4rev2** (`IDLE`, `CONDSTORE`, `QRESYNC`, `SPECIAL-USE`), modern **JMAP** (RFC 8620/8621 via Stalwart client), and **Microsoft Graph REST** (for corporate Microsoft 365 environments where IMAP is disabled).
+* **MIME Parsing**: Powered by `stalwartlabs/mail-parser` for zero-copy string slicing (`Cow<str>`), streaming attachments, and robust decoding of 41 legacy character sets.
+* **OAuth2 with PKCE**: Built-in graphical authorization with loopback callbacks (`127.0.0.1:8989`), automated token rotation, and credential storage in the OS credential manager (`keyring-rs`).
 * **SMTP & Delivery**: High-throughput transmission via `lettre` and `stalwartlabs/mail-send` with automated DKIM signing.
 
 ### 🛡️ Security & Privacy First
-* **Tracker Shield**: Real-time streaming HTML rewriter (`lol_html`) strips remote tracking pixels (1x1 transparent GIFs), tracking queries, and un-sanitized script tags.
-* **Remote Content Blocker**: Remote images are blocked by default until explicitly trusted.
+* **Tracker Shield**: Real-time streaming HTML rewriter (`lol_html`) strips remote tracking pixels (1x1 transparent GIFs), tracking URL queries, and un-sanitized script tags.
+* **Remote Content Blocker**: Remote images and styles are blocked by default until explicitly trusted per sender.
 * **End-to-End Encryption**: Pure Rust **`rPGP`** implementation supporting OpenPGP RFC 9580 (v6 keys & AEAD) and Autocrypt 1.1 key exchange, alongside `RustCrypto` S/MIME X.509 validation.
 
 ### 📅 Integrated PIM (Calendar, Contacts & Tasks)
@@ -94,7 +135,7 @@ Vespetrel is architected as a highly modular Cargo workspace:
 
 ```
 vespetrel/
-├── Cargo.toml                  # Workspace manifest
+├── Cargo.toml                  # Workspace manifest & shared dependencies
 ├── rust-toolchain.toml         # Pinned stable Rust toolchain
 ├── crates/
 │   ├── vespetrel-app/          # GPUI application entrypoint, dock layout, virtual lists & UI
@@ -128,14 +169,26 @@ vespetrel/
 git clone https://github.com/SV-stark/Vespetrel.git
 cd Vespetrel
 
+# Update dependencies
+cargo update
+
 # Verify workspace compilation
 cargo check
 
-# Run tests across storage and protocol crates
+# Run tests across storage, crypto, render, and protocol crates
 cargo test --workspace
 
 # Launch Vespetrel desktop client
 cargo run --package vespetrel-app
+```
+
+### Logging & Diagnostics
+
+Enable structured diagnostics using `tracing`:
+
+```bash
+# Debug sync engine and IMAP traffic
+RUST_LOG=vespetrel=debug,vespetrel_imap=trace cargo run --package vespetrel-app
 ```
 
 ---
@@ -164,6 +217,17 @@ cargo run --package vespetrel-app
 - [ ] **P4: Desktop Polish & Distribution**
   - [ ] System tray integration & native notifications
   - [ ] Multiplatform packaging (.dmg, .deb, .msi)
+
+---
+
+## 🤝 Contributing
+
+Contributions are welcome! Please ensure that:
+1. `cargo check` runs with zero warnings or errors.
+2. `cargo test --workspace` passes all unit and integration tests.
+3. Code is formatted with `cargo fmt`.
+
+Feel free to open an issue or submit a pull request on [GitHub](https://github.com/SV-stark/Vespetrel).
 
 ---
 
