@@ -31,7 +31,7 @@ wry = "0.41"
 anyhow = "1.0"
 
 # Database & Storage
-rusqlite = { version = "0.31", features = ["bundled", "chrono", "serde_json"] }
+rusqlite = { version = "0.40", features = ["bundled", "chrono", "serde_json"] }
 deadpool-sqlite = "0.8"
 lz4_flex = "0.11"
 zstd = "0.13"
