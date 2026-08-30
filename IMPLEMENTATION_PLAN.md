@@ -386,14 +386,14 @@ impl MessageListView {
 │  ├── [x] Zero-copy stalwartlabs/mail-parser MIME pipeline              │
 │  └── [x] Compressed raw message blob store (lz4_flex + zstd)           │
 │                                                                        │
-│  Phase 1: GPUI 3-Pane UI Shell & Reader (IN PROGRESS)                  │
+│  Phase 1: GPUI 3-Pane UI Shell & Reader (COMPLETE)                     │
 │  ├── [x] 3-Pane dock state model & view logic                          │
 │  ├── [x] HTML sanitizer (ammonia) & tracker stripper (lol_html)        │
 │  ├── [x] Sandboxed HTML viewport with Content-Security-Policy (CSP)    │
-│  ├── [ ] 120 FPS Virtualized message list (gpui-component)             │
-│  └── [ ] Sandboxed HTML message reader (wry webview)                   │
+│  ├── [x] 120 FPS Virtualized message list & JWZ thread tree model      │
+│  └── [x] Sandboxed HTML message reader (wry bridge / security badges)  │
 │                                                                        │
-│  Phase 2: Authentication, Multi-Provider & Sending (GMAIL READY)       │
+│  Phase 2: Authentication, Multi-Provider & Sending (COMPLETE)          │
 │  ├── [x] OAuth2 PKCE engine + Loopback TCP server (127.0.0.1:8989)     │
 │  ├── [x] Google OAuth2 access token auto-refresh routine               │
 │  ├── [x] OS Keyring token storage (keyring-rs v3)                      │
@@ -402,15 +402,16 @@ impl MessageListView {
 │  ├── [x] JMAP client adapter (Fastmail / Stalwart RFC 8620/8621)       │
 │  ├── [x] Microsoft Graph REST engine (Exchange Online)                 │
 │  ├── [x] SMTP submit engine + Lettre live relay (send_live)            │
-│  └── [ ] Interactive GUI login wizard modal & compose view             │
+│  └── [x] Interactive GUI login wizard modal & compose view             │
 │                                                                        │
-│  Phase 3: PIM (Calendar, Contacts, Tasks) & Encryption                 │
+│  Phase 3: PIM (Calendar, Contacts, Tasks) & Encryption (COMPLETE)      │
 │  ├── [x] CalDAV / CardDAV sync client foundation (libdav, icalendar)   │
 │  ├── [x] rPGP OpenPGP armor detector & Autocrypt 1.1 engine            │
-│  └── [ ] Calendar grid views & contact address book                    │
+│  └── [x] Calendar grid views & contact address book                    │
 │                                                                        │
-│  Phase 4: Polish, Windows Hardening & Distribution                     │
-│  ├── [x] Headless testable runner (VespetrelApp)                       │
+│  Phase 4: Polish, Windows Hardening & Distribution (IN PROGRESS)       │
+│  ├── [x] Headless testable runner & robust crash-resilient startup     │
+│  ├── [x] Release profile optimization (opt-level=3, thin LTO, strip)   │
 │  ├── [ ] Windows Direct3D / IME stabilization                          │
 │  └── [ ] Native OS packaging (.dmg, .deb, .rpm, .msi)                  │
 └────────────────────────────────────────────────────────────────────────┘

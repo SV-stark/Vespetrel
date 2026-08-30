@@ -199,3 +199,219 @@ pub fn list_messages_in_folder(
     })?;
     rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
 }
+
+pub fn update_message_flags(
+    conn: &Connection,
+    message_id: &str,
+    is_read: Option<bool>,
+    is_flagged: Option<bool>,
+) -> anyhow::Result<()> {
+    if let Some(read) = is_read {
+        conn.execute(
+            "UPDATE messages SET is_read = ?1 WHERE id = ?2",
+            params![if read { 1 } else { 0 }, message_id],
+        )?;
+    }
+    if let Some(flagged) = is_flagged {
+        conn.execute(
+            "UPDATE messages SET is_flagged = ?1 WHERE id = ?2",
+            params![if flagged { 1 } else { 0 }, message_id],
+        )?;
+    }
+    Ok(())
+}
+
+pub fn delete_message(conn: &Connection, message_id: &str) -> anyhow::Result<()> {
+    conn.execute("DELETE FROM messages WHERE id = ?1", params![message_id])?;
+    Ok(())
+}
+
+pub fn upsert_thread(conn: &Connection, thread: &vespetrel_core::Thread) -> anyhow::Result<()> {
+    conn.execute(
+        r#"INSERT INTO threads (id, account_id, subject, last_message_at, message_count, unread_count, snippet)
+           VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+           ON CONFLICT(id) DO UPDATE SET
+             subject=excluded.subject, last_message_at=excluded.last_message_at,
+             message_count=excluded.message_count, unread_count=excluded.unread_count, snippet=excluded.snippet"#,
+        params![
+            thread.id,
+            thread.account_id,
+            thread.subject,
+            thread.last_message_at.timestamp(),
+            thread.message_count,
+            thread.unread_count,
+            thread.snippet,
+        ],
+    )?;
+    Ok(())
+}
+
+pub fn list_threads(
+    conn: &Connection,
+    account_id: &str,
+) -> anyhow::Result<Vec<vespetrel_core::Thread>> {
+    let mut stmt = conn.prepare("SELECT id, account_id, subject, last_message_at, message_count, unread_count, snippet FROM threads WHERE account_id = ?1 ORDER BY last_message_at DESC")?;
+    let rows = stmt.query_map(params![account_id], |row| {
+        Ok(vespetrel_core::Thread {
+            id: row.get(0)?,
+            account_id: row.get(1)?,
+            subject: row.get(2)?,
+            last_message_at: DateTime::from_timestamp(row.get::<_, i64>(3)?, 0)
+                .unwrap_or_else(Utc::now),
+            message_count: row.get(4)?,
+            unread_count: row.get(5)?,
+            snippet: row.get(6)?,
+        })
+    })?;
+    rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+}
+
+pub fn upsert_contact(
+    conn: &Connection,
+    account_id: &str,
+    contact: &vespetrel_core::Contact,
+) -> anyhow::Result<()> {
+    conn.execute(
+        r#"INSERT INTO contacts (id, account_id, remote_id, display_name, email, vcard_data)
+           VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+           ON CONFLICT(id) DO UPDATE SET
+             display_name=excluded.display_name, email=excluded.email, vcard_data=excluded.vcard_data"#,
+        params![
+            contact.id,
+            account_id,
+            contact.id,
+            contact.display_name,
+            contact.email,
+            contact.vcard_data,
+        ],
+    )?;
+    Ok(())
+}
+
+pub fn list_contacts(
+    conn: &Connection,
+    account_id: &str,
+) -> anyhow::Result<Vec<vespetrel_core::Contact>> {
+    let mut stmt = conn.prepare("SELECT id, display_name, email, vcard_data FROM contacts WHERE account_id = ?1 ORDER BY display_name ASC")?;
+    let rows = stmt.query_map(params![account_id], |row| {
+        Ok(vespetrel_core::Contact {
+            id: row.get(0)?,
+            display_name: row.get(1)?,
+            email: row.get(2)?,
+            vcard_data: row.get(3)?,
+        })
+    })?;
+    rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+}
+
+pub fn upsert_calendar_event(
+    conn: &Connection,
+    event: &vespetrel_core::CalendarEvent,
+) -> anyhow::Result<()> {
+    conn.execute(
+        r#"INSERT INTO calendar_events (id, calendar_id, ical_uid, title, description, start_at, end_at, location, raw_ical)
+           VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+           ON CONFLICT(id) DO UPDATE SET
+             title=excluded.title, description=excluded.description, start_at=excluded.start_at,
+             end_at=excluded.end_at, location=excluded.location, raw_ical=excluded.raw_ical"#,
+        params![
+            event.id,
+            event.calendar_id,
+            event.ical_uid,
+            event.title,
+            event.description,
+            event.start.timestamp(),
+            event.end.timestamp(),
+            event.location,
+            "",
+        ],
+    )?;
+    Ok(())
+}
+
+pub fn list_calendar_events(
+    conn: &Connection,
+    calendar_id: &str,
+) -> anyhow::Result<Vec<vespetrel_core::CalendarEvent>> {
+    let mut stmt = conn.prepare("SELECT id, calendar_id, ical_uid, title, description, start_at, end_at, location FROM calendar_events WHERE calendar_id = ?1 ORDER BY start_at ASC")?;
+    let rows = stmt.query_map(params![calendar_id], |row| {
+        Ok(vespetrel_core::CalendarEvent {
+            id: row.get(0)?,
+            calendar_id: row.get(1)?,
+            ical_uid: row.get(2)?,
+            title: row.get(3)?,
+            description: row.get(4)?,
+            start: DateTime::from_timestamp(row.get::<_, i64>(5)?, 0).unwrap_or_else(Utc::now),
+            end: DateTime::from_timestamp(row.get::<_, i64>(6)?, 0).unwrap_or_else(Utc::now),
+            location: row.get(7)?,
+        })
+    })?;
+    rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::db::open_in_memory;
+    use vespetrel_core::{Account, Contact, Folder, Message};
+
+    #[test]
+    fn test_repo_crud() {
+        let conn = open_in_memory().unwrap();
+
+        // 1. Account
+        let acct = Account::new(
+            "Alice",
+            "alice@example.com",
+            vespetrel_core::ProviderType::Imap,
+        );
+        upsert_account(&conn, &acct).unwrap();
+        let accts = list_accounts(&conn).unwrap();
+        assert_eq!(accts.len(), 1);
+        assert_eq!(accts[0].email, "alice@example.com");
+
+        // 2. Folder
+        let folder = Folder::new(&acct.id, "INBOX", "Inbox", "INBOX");
+        upsert_folder(&conn, &folder).unwrap();
+        let folders = list_folders(&conn, &acct.id).unwrap();
+        assert_eq!(folders.len(), 1);
+        assert_eq!(folders[0].name, "Inbox");
+
+        // 3. Message
+        let msg = Message::new(
+            &acct.id,
+            &folder.id,
+            1,
+            "Hello",
+            "bob@example.com",
+            vec!["alice@example.com".into()],
+        );
+        insert_message(&conn, &msg).unwrap();
+        let msgs = list_messages_in_folder(&conn, &folder.id, 10, 0).unwrap();
+        assert_eq!(msgs.len(), 1);
+        assert_eq!(msgs[0].subject.as_deref(), Some("Hello"));
+
+        // 4. Update flag
+        update_message_flags(&conn, &msg.id, Some(true), Some(true)).unwrap();
+        let updated = list_messages_in_folder(&conn, &folder.id, 10, 0).unwrap();
+        assert!(updated[0].is_read);
+        assert!(updated[0].is_flagged);
+
+        // 5. Contact
+        let contact = Contact {
+            id: "c1".into(),
+            display_name: Some("Bob".into()),
+            email: "bob@example.com".into(),
+            vcard_data: None,
+        };
+        upsert_contact(&conn, &acct.id, &contact).unwrap();
+        let contacts = list_contacts(&conn, &acct.id).unwrap();
+        assert_eq!(contacts.len(), 1);
+        assert_eq!(contacts[0].email, "bob@example.com");
+
+        // 6. Delete message
+        delete_message(&conn, &msg.id).unwrap();
+        let empty_msgs = list_messages_in_folder(&conn, &folder.id, 10, 0).unwrap();
+        assert_eq!(empty_msgs.len(), 0);
+    }
+}
