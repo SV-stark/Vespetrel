@@ -419,9 +419,26 @@ impl MessageListView {
 │  ├── [x] Autocrypt 1.1 automated header injection & keyring ingest     │
 │  ├── [x] Native OS packaging (.iss, .manifest, .desktop, Info.plist)   │
 │  └── [x] GitHub Actions multi-platform CI matrix workflow              │
+│                                                                        │
+│  Phase 5: Power-User Automation, Migration & Interoperability          │
+│  ├── [ ] 1-Click Thunderbird & Apple Mail Migrator (mbox, maildir, DB) │
+│  ├── [ ] Message Filter & Automation Rule Engine (client-side rules)   │
+│  ├── [ ] ManageSieve RFC 5804 client & script editor                   │
+│  ├── [ ] Smart Virtual Folders & Cross-Account Unified Inboxes         │
+│  ├── [ ] iCalendar .ics Meeting Invitations RSVP State Machine         │
+│  ├── [ ] News & RSS/Atom Feed Reader                                   │
+│  └── [ ] URL Tracker Cleaner & Anti-Phishing Analyzer                  │
+│                                                                        │
+│  Phase 6: Extensibility, Statistical Intelligence & Enterprise         │
+│  ├── [ ] WASM / WebExtension Plugin Sandbox (Wasmtime runtime)         │
+│  ├── [ ] Local Bayesian Spam Filter & Statistical Classifier           │
+│  ├── [ ] FIDO2 / YubiKey & PKCS#11 Hardware Security Token Cryptography│
+│  ├── [ ] Configurable Keybinding Engine (Gmail, Vim, Thunderbird maps) │
+│  ├── [ ] POP3 Legacy Mail Engine (RFC 1939 with UIDL cache)            │
+│  └── [ ] Matrix & Decentralized Chat Protocol Integration              │
 └────────────────────────────────────────────────────────────────────────┘
-
 ```
+
 
 ---
 
