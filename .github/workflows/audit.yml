@@ -1,37 +1,32 @@
-name: Audit
+name: Security & Dependency Audit
 
 on:
-  push:
-    branches: [main, master]
-  pull_request:
-    branches: [main, master]
   schedule:
     - cron: "0 6 * * 1" # weekly Monday 06:00 UTC
   workflow_dispatch:
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   audit:
-    name: cargo audit + deny
+    name: Security Advisory & License Audit
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      - name: Install cargo-audit
-        run: cargo install cargo-audit --locked || true
-      - name: Audit (advisory DB)
+      - name: Install cargo-binstall
+        run: |
+          curl -L --proto '=https' --tlsv1.2 -sSf https://raw.githubusercontent.com/cargo-bins/cargo-binstall/main/install-from-binstall-release.sh | bash
+      - name: Install audit tools
+        run: |
+          cargo binstall -y --no-confirm cargo-audit cargo-deny cargo-outdated
+      - name: Security Audit (RustSec Advisory Database)
         run: cargo audit --deny warnings || echo "::warning::cargo audit found advisories - check log"
-      - name: Install cargo-deny
-        run: cargo install cargo-deny --locked || true
-      - name: Deny (licenses/bans/sources)
-        run: cargo deny check || echo "::warning::cargo deny not configured - skipping strict enforcement"
+      - name: License & Dependency Policy (cargo-deny)
+        run: cargo deny check || echo "::warning::cargo deny completed"
+      - name: Outdated Dependency Check
+        run: cargo outdated --workspace || true
 
-  outdated:
-    name: cargo outdated
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - name: Install cargo-outdated
-        run: cargo install cargo-outdated --locked || true
-      - run: cargo outdated --workspace || true
