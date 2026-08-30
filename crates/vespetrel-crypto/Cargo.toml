@@ -19,3 +19,4 @@ zeroize = { workspace = true }
 rustls = { workspace = true }
 reqwest = { workspace = true }
 chrono = { workspace = true }
+anyhow = { workspace = true }

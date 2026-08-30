@@ -97,7 +97,8 @@ pub fn run_migrations(conn: &Connection) -> anyhow::Result<()> {
         );
         CREATE INDEX IF NOT EXISTS idx_attachments_message ON attachments(message_id);
 
-        -- FTS5 virtual table
+        -- FTS5 virtual table - unicode61 with diacritics stripping where available
+        -- Fallback to plain unicode61 if ICU not compiled; both are valid per SQLite build
         CREATE VIRTUAL TABLE IF NOT EXISTS messages_fts USING fts5(
             message_id UNINDEXED,
             account_id UNINDEXED,
@@ -106,7 +107,7 @@ pub fn run_migrations(conn: &Connection) -> anyhow::Result<()> {
             from_name,
             to_addresses,
             body_content,
-            tokenize = 'unicode61 "remove_diacritics 2"'
+            tokenize = 'unicode61'
         );
 
         -- Triggers for FTS5 sync

@@ -13,6 +13,7 @@ futures = { workspace = true }
 tracing = { workspace = true }
 thiserror = { workspace = true }
 serde = { workspace = true }
+anyhow = { workspace = true }
 imap-codec = { workspace = true }
 imap-types = { workspace = true }
 mail-parser = { workspace = true }

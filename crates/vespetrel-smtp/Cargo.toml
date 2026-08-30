@@ -14,3 +14,4 @@ mail-builder = { workspace = true }
 mail-send = { workspace = true }
 serde = { workspace = true }
 thiserror = { workspace = true }
+anyhow = { workspace = true }

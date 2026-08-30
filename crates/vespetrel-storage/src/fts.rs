@@ -34,29 +34,31 @@ pub fn search_messages(
     };
 
     let mut stmt = conn.prepare(sql)?;
-    let rows = if let Some(aid) = account_id {
-        stmt.query_map(params![query, aid, limit as i64], |row| {
-            Ok(SearchResult {
-                message_id: row.get(0)?,
-                subject: row.get(1)?,
-                snippet: row.get(2)?,
-                rank: row.get(3)?,
-            })
-        })?
-    } else {
-        stmt.query_map(params![query, limit as i64], |row| {
-            Ok(SearchResult {
-                message_id: row.get(0)?,
-                subject: row.get(1)?,
-                snippet: row.get(2)?,
-                rank: row.get(3)?,
-            })
-        })?
-    };
-
     let mut results = Vec::new();
-    for r in rows {
-        results.push(r?);
+    if let Some(aid) = account_id {
+        let rows = stmt.query_map(params![query, aid, limit as i64], |row| {
+            Ok(SearchResult {
+                message_id: row.get(0)?,
+                subject: row.get(1)?,
+                snippet: row.get(2)?,
+                rank: row.get(3)?,
+            })
+        })?;
+        for r in rows {
+            results.push(r?);
+        }
+    } else {
+        let rows = stmt.query_map(params![query, limit as i64], |row| {
+            Ok(SearchResult {
+                message_id: row.get(0)?,
+                subject: row.get(1)?,
+                snippet: row.get(2)?,
+                rank: row.get(3)?,
+            })
+        })?;
+        for r in rows {
+            results.push(r?);
+        }
     }
     Ok(results)
 }

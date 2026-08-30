@@ -27,6 +27,8 @@ tracing-subscriber = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 chrono = { workspace = true }
-anyhow = "1.0"
+anyhow = { workspace = true }
+rusqlite = { workspace = true }
+uuid = { workspace = true }
 # wry / gpui are intentionally NOT listed here to keep `cargo check` offline-friendly.
 # To enable: add `wry = { workspace = true, optional = true }` and gpui git deps, then set `gpui = ["dep:wry"]`

@@ -1,4 +1,4 @@
-use mail_parser::MessageParser;
+use mail_parser::{MessageParser, MimeHeaders};
 
 /// Parsed mail view model for rendering §5.1
 #[derive(Debug, Clone)]
@@ -33,13 +33,23 @@ impl ParsedMail {
         let text_body = msg.body_text(0).map(|cow| cow.into_owned());
         let html_body = msg.body_html(0).map(|cow| cow.into_owned());
 
-        let attachments = msg.attachments().map(|iter| {
-            iter.map(|a| AttachmentInfo {
+        let attachments = msg
+            .attachments()
+            .map(|a| AttachmentInfo {
                 filename: a.attachment_name().unwrap_or("untitled").to_string(),
-                content_type: a.content_type().map(|ct| format!("{}/{}", ct.c_type, ct.c_subtype)).unwrap_or("application/octet-stream".into()),
+                content_type: a
+                    .content_type()
+                    .map(|ct| {
+                        format!(
+                            "{}/{}",
+                            ct.c_type,
+                            ct.c_subtype.as_deref().unwrap_or("octet-stream")
+                        )
+                    })
+                    .unwrap_or_else(|| "application/octet-stream".into()),
                 size: a.contents().len(),
-            }).collect()
-        }).unwrap_or_default();
+            })
+            .collect::<Vec<_>>();
 
         Some(Self { subject, from, to, date, text_body, html_body, attachments })
     }

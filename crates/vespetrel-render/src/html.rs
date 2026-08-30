@@ -78,7 +78,8 @@ fn ammonia_clean(html: &str) -> String {
     builder
         .add_tags(["video", "audio", "source", "table", "thead", "tbody", "tr", "th", "td"])
         .link_rel(Some("noopener noreferrer"))
-        .add_generic_attributes(["data-blocked-src"]);
+        .add_generic_attributes(["data-blocked-src"])
+        .add_url_schemes(["blob", "cid", "data"]);
 
     // Enforce allowlist - ammonia does this by default (removes script etc.)
     builder.clean(html).to_string()
@@ -102,7 +103,10 @@ mod tests {
         let opts = SanitizeOptions { rewrite: RewriteOptions { block_remote_images: true, rewrite_cid: false } };
         let out = sanitize(html, &opts).unwrap();
         assert!(out.contains("data-blocked-src"));
-        assert!(!out.contains("src=\"https://tracker"));
+        // Ensure original src attribute is removed (not just renamed) - check for ` src="https://` with leading space
+        assert!(!out.contains(" src=\"https://tracker"));
+        // Also ensure data-blocked-src is present and holds the original URL
+        assert!(out.contains("https://tracker.example.com/pixel.png"));
     }
 
     #[test]
