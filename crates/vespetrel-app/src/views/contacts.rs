@@ -19,21 +19,30 @@ impl ContactsView {
     }
 
     pub fn set_search(&mut self, query: impl Into<String>) {
-        self.search_query = query.into().trim().to_lowercase();
+        self.search_query = query.into().trim().to_string();
     }
 
     pub fn filtered_contacts(&self) -> Vec<&Contact> {
-        if self.search_query.is_empty() {
+        let q_bytes = self.search_query.as_bytes();
+        if q_bytes.is_empty() {
             self.contacts.iter().collect()
         } else {
             self.contacts
                 .iter()
                 .filter(|c| {
-                    c.email.to_lowercase().contains(&self.search_query)
-                        || c.display_name
-                            .as_deref()
-                            .map(|n| n.to_lowercase().contains(&self.search_query))
-                            .unwrap_or(false)
+                    crate::views::message_list::contains_ignore_case_ascii(
+                        c.email.as_bytes(),
+                        q_bytes,
+                    ) || c
+                        .display_name
+                        .as_deref()
+                        .map(|n| {
+                            crate::views::message_list::contains_ignore_case_ascii(
+                                n.as_bytes(),
+                                q_bytes,
+                            )
+                        })
+                        .unwrap_or(false)
                 })
                 .collect()
         }
@@ -56,18 +65,24 @@ impl ContactsView {
 
     /// Autocomplete helper for compose recipient chips
     pub fn autocomplete(&self, prefix: &str) -> Vec<&Contact> {
-        let prefix = prefix.trim().to_lowercase();
-        if prefix.is_empty() {
+        let p_bytes = prefix.trim().as_bytes();
+        if p_bytes.is_empty() {
             return Vec::new();
         }
         self.contacts
             .iter()
             .filter(|c| {
-                c.email.to_lowercase().starts_with(&prefix)
-                    || c.display_name
-                        .as_deref()
-                        .map(|n| n.to_lowercase().starts_with(&prefix))
-                        .unwrap_or(false)
+                let email_match = c.email.len() >= p_bytes.len()
+                    && c.email.as_bytes()[..p_bytes.len()].eq_ignore_ascii_case(p_bytes);
+                let name_match = c
+                    .display_name
+                    .as_deref()
+                    .map(|n| {
+                        n.len() >= p_bytes.len()
+                            && n.as_bytes()[..p_bytes.len()].eq_ignore_ascii_case(p_bytes)
+                    })
+                    .unwrap_or(false);
+                email_match || name_match
             })
             .take(10)
             .collect()

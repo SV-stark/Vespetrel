@@ -13,3 +13,6 @@ uuid = { workspace = true }
 thiserror = { workspace = true }
 anyhow = { workspace = true }
 async-trait = { workspace = true }
+ahash = { workspace = true }
+memchr = { workspace = true }
+

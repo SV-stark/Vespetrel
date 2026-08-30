@@ -67,7 +67,9 @@ fn rewrite_html(input: &str, opts: &RewriteOptions) -> anyhow::Result<String> {
         .end()
         .map_err(|e| anyhow::anyhow!("lol_html end: {e}"))?;
 
-    Ok(String::from_utf8(output)?)
+    let s = simdutf8::basic::from_utf8(&output)
+        .map_err(|e| anyhow::anyhow!("UTF-8 validation error: {e}"))?;
+    Ok(s.to_string())
 }
 
 fn ammonia_clean(html: &str) -> String {

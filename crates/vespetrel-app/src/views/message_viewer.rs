@@ -114,10 +114,26 @@ impl Default for MessageViewer {
     }
 }
 
-fn html_escape(s: &str) -> String {
-    s.replace('&', "&amp;")
-        .replace('<', "&lt;")
-        .replace('>', "&gt;")
+pub fn html_escape(s: &str) -> String {
+    let bytes = s.as_bytes();
+    let mut out = String::with_capacity(s.len() + 16);
+    let mut last = 0;
+
+    for (i, &b) in bytes.iter().enumerate() {
+        let replacement = match b {
+            b'&' => "&amp;",
+            b'<' => "&lt;",
+            b'>' => "&gt;",
+            b'"' => "&quot;",
+            b'\'' => "&#39;",
+            _ => continue,
+        };
+        out.push_str(&s[last..i]);
+        out.push_str(replacement);
+        last = i + 1;
+    }
+    out.push_str(&s[last..]);
+    out
 }
 
 #[cfg(test)]

@@ -30,5 +30,9 @@ chrono = { workspace = true }
 anyhow = { workspace = true }
 rusqlite = { workspace = true }
 uuid = { workspace = true }
+memchr = { workspace = true }
+ahash = { workspace = true }
+simdutf8 = { workspace = true }
+
 # wry / gpui are intentionally NOT listed here to keep `cargo check` offline-friendly.
 # To enable: add `wry = { workspace = true, optional = true }` and gpui git deps, then set `gpui = ["dep:wry"]`

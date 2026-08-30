@@ -19,3 +19,6 @@ anyhow = { workspace = true }
 lz4_flex = { workspace = true }
 zstd = { workspace = true }
 uuid = { workspace = true }
+simdutf8 = { workspace = true }
+ahash = { workspace = true }
+

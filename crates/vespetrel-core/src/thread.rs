@@ -1,6 +1,6 @@
+use ahash::AHashMap;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Thread {
@@ -47,6 +47,7 @@ pub struct ThreadTree {
 
 impl ThreadTree {
     /// Build thread trees from a flat slice of messages using RFC 5322 In-Reply-To & References
+    /// Uses AHashMap for hardware-accelerated (AES-NI) hashing
     pub fn build(messages: &[crate::Message]) -> Self {
         if messages.is_empty() {
             return Self {
@@ -55,8 +56,9 @@ impl ThreadTree {
         }
 
         // Map: message_id_header -> index in table
-        let mut id_to_msg: HashMap<String, &crate::Message> = HashMap::new();
-        let mut child_to_parent: HashMap<String, String> = HashMap::new();
+        let mut id_to_msg: AHashMap<String, &crate::Message> =
+            AHashMap::with_capacity(messages.len());
+        let mut child_to_parent: AHashMap<String, String> = AHashMap::with_capacity(messages.len());
 
         for msg in messages {
             let key = msg
@@ -78,7 +80,8 @@ impl ThreadTree {
         }
 
         // Build child adjacency
-        let mut parent_to_children: HashMap<String, Vec<String>> = HashMap::new();
+        let mut parent_to_children: AHashMap<String, Vec<String>> =
+            AHashMap::with_capacity(messages.len());
         let mut root_keys = Vec::new();
 
         for msg in messages {
@@ -102,8 +105,8 @@ impl ThreadTree {
 
         fn build_node(
             key: &str,
-            id_to_msg: &HashMap<String, &crate::Message>,
-            parent_to_children: &HashMap<String, Vec<String>>,
+            id_to_msg: &AHashMap<String, &crate::Message>,
+            parent_to_children: &AHashMap<String, Vec<String>>,
         ) -> Option<ThreadNode> {
             let msg = id_to_msg.get(key)?;
             let mut children = Vec::new();
@@ -161,6 +164,7 @@ impl ThreadTree {
 }
 
 /// Helper to normalize email subjects by stripping Re:, Fwd:, etc.
+/// Uses memchr for fast delimiter scanning
 pub fn normalize_subject(subject: &str) -> String {
     let mut s = subject.trim();
     loop {
@@ -170,7 +174,9 @@ pub fn normalize_subject(subject: &str) -> String {
         } else if lower.starts_with("fwd:") {
             s = s[4..].trim();
         } else if lower.starts_with("re[") || lower.starts_with("fw[") {
-            if let Some(idx) = s.find(']').filter(|&idx| s[idx + 1..].starts_with(':')) {
+            if let Some(idx) =
+                memchr::memchr(b']', s.as_bytes()).filter(|&idx| s[idx + 1..].starts_with(':'))
+            {
                 s = s[idx + 2..].trim();
                 continue;
             }

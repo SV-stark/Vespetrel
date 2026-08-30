@@ -43,6 +43,15 @@ impl BlobStore {
             .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string()))
     }
 
+    /// Read blob as UTF-8 string with SIMD validation
+    pub fn read_utf8(&self, id: &str) -> std::io::Result<String> {
+        let raw = self.read(id)?;
+        // Vectorized SIMD UTF-8 validation (AVX2/NEON/SSE4)
+        simdutf8::basic::from_utf8(&raw)
+            .map(|s| s.to_string())
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string()))
+    }
+
     pub fn delete(&self, id: &str) -> std::io::Result<()> {
         let path = self.blob_path(id);
         if path.exists() {

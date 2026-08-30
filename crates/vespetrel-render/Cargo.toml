@@ -12,3 +12,6 @@ lol_html = { workspace = true }
 mail-parser = { workspace = true }
 serde = { workspace = true }
 anyhow = { workspace = true }
+simdutf8 = { workspace = true }
+memchr = { workspace = true }
+

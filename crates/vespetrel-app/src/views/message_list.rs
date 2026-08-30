@@ -42,10 +42,13 @@ impl MessageListView {
     }
 
     pub fn set_search(&mut self, query: impl Into<String>) {
-        self.search_query = query.into().trim().to_lowercase();
+        self.search_query = query.into().trim().to_string();
     }
 
     pub fn filtered_messages(&self) -> Vec<&MessageSummary> {
+        let query_bytes = self.search_query.as_bytes();
+        let is_empty_query = query_bytes.is_empty();
+
         self.messages
             .iter()
             .filter(|m| {
@@ -60,22 +63,23 @@ impl MessageListView {
                     return false;
                 }
 
-                // Apply search filter
-                if !self.search_query.is_empty() {
+                // Apply zero-allocation case-insensitive search filter
+                if !is_empty_query {
                     let subject_match = m
                         .subject
                         .as_deref()
-                        .map(|s| s.to_lowercase().contains(&self.search_query))
+                        .map(|s| contains_ignore_case_ascii(s.as_bytes(), query_bytes))
                         .unwrap_or(false);
-                    let from_match = m.from_address.to_lowercase().contains(&self.search_query)
-                        || m.from_name
-                            .as_deref()
-                            .map(|n| n.to_lowercase().contains(&self.search_query))
-                            .unwrap_or(false);
+                    let from_match =
+                        contains_ignore_case_ascii(m.from_address.as_bytes(), query_bytes)
+                            || m.from_name
+                                .as_deref()
+                                .map(|n| contains_ignore_case_ascii(n.as_bytes(), query_bytes))
+                                .unwrap_or(false);
                     let snippet_match = m
                         .snippet
                         .as_deref()
-                        .map(|s| s.to_lowercase().contains(&self.search_query))
+                        .map(|s| contains_ignore_case_ascii(s.as_bytes(), query_bytes))
                         .unwrap_or(false);
 
                     subject_match || from_match || snippet_match
@@ -84,6 +88,19 @@ impl MessageListView {
                 }
             })
             .collect()
+    }
+
+    /// Computes cumulative row height prefix sums for virtual list scrollbar mapping
+    pub fn calculate_row_prefix_sums(&self, default_row_height: f32) -> Vec<f32> {
+        let filtered = self.filtered_messages();
+        let mut prefix_sums = Vec::with_capacity(filtered.len() + 1);
+        prefix_sums.push(0.0);
+        let mut acc = 0.0;
+        for _ in filtered {
+            acc += default_row_height;
+            prefix_sums.push(acc);
+        }
+        prefix_sums
     }
 
     pub fn visible(&self) -> Vec<&MessageSummary> {
@@ -153,6 +170,44 @@ impl MessageListView {
             self
         })
     }
+}
+
+/// Zero-allocation case-insensitive ASCII substring search using sliding window
+#[inline]
+pub fn contains_ignore_case_ascii(haystack: &[u8], needle: &[u8]) -> bool {
+    if needle.is_empty() {
+        return true;
+    }
+    if haystack.len() < needle.len() {
+        return false;
+    }
+
+    let first_lower = needle[0].to_ascii_lowercase();
+    let first_upper = needle[0].to_ascii_uppercase();
+
+    // Use memchr to fast-skip to first matching character
+    let mut offset = 0;
+    while offset + needle.len() <= haystack.len() {
+        let remaining = &haystack[offset..];
+        let found = remaining
+            .iter()
+            .position(|&b| b == first_lower || b == first_upper);
+        match found {
+            Some(idx) => {
+                let check_start = offset + idx;
+                if check_start + needle.len() > haystack.len() {
+                    return false;
+                }
+                let candidate = &haystack[check_start..check_start + needle.len()];
+                if candidate.eq_ignore_ascii_case(needle) {
+                    return true;
+                }
+                offset = check_start + 1;
+            }
+            None => return false,
+        }
+    }
+    false
 }
 
 #[cfg(test)]
