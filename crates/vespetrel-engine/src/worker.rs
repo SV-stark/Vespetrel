@@ -1,4 +1,4 @@
-﻿use std::sync::Arc;
+use std::sync::Arc;
 use std::time::Duration;
 
 use tokio::sync::mpsc;
@@ -20,6 +20,7 @@ pub struct AccountWorker {
     pub event_tx: mpsc::UnboundedSender<SyncEvent>,
     pub cmd_rx: mpsc::UnboundedReceiver<WorkerCommand>,
     pub poll_interval: Duration,
+    pub storage_pool: Option<deadpool_sqlite::Pool>,
 }
 
 impl AccountWorker {
@@ -35,7 +36,13 @@ impl AccountWorker {
             event_tx,
             cmd_rx,
             poll_interval: Duration::from_secs(60),
+            storage_pool: None,
         }
+    }
+
+    pub fn with_storage_pool(mut self, pool: deadpool_sqlite::Pool) -> Self {
+        self.storage_pool = Some(pool);
+        self
     }
 
     pub async fn run(mut self) {
@@ -75,24 +82,68 @@ impl AccountWorker {
     }
 
     async fn sync_once(&self) -> anyhow::Result<()> {
-        // Simplified: sync folder list then each folder's deltas
-        // Concrete providers inject SyncState from storage
         let folders = self.provider.sync_folder_list().await?;
         self.emit(SyncEvent::FolderListUpdated(folders.clone()));
 
+        // Persist folders to storage if pool is provided
+        if let Some(pool) = &self.storage_pool {
+            if let Ok(conn) = pool.get().await {
+                for rf in &folders {
+                    let folder_record = vespetrel_core::Folder::new(&self.account_id, &rf.remote_id, &rf.name, &rf.path);
+                    let _ = conn.interact(move |c| {
+                        vespetrel_storage::repo::upsert_folder(c, &folder_record)
+                    }).await;
+                }
+            }
+        }
+
         for rf in &folders {
-            // Load sync state from storage in real implementation; here use default
             let folder_meta = vespetrel_core::Folder::new(&self.account_id, &rf.remote_id, &rf.name, &rf.path);
             let state = vespetrel_core::account::SyncState::default();
             match self.provider.sync_messages(&folder_meta, state).await {
                 Ok(delta) => {
-                    // In real engine: persist via vespetrel-storage, emit MessagesInserted
-                    let count = delta.inserted.len();
-                    if count > 0 {
-                        info!(folder=%rf.name, count, "synced new messages");
+                    let mut summaries = Vec::new();
+
+                    // Persist synced messages to storage
+                    if let Some(pool) = &self.storage_pool {
+                        if let Ok(conn) = pool.get().await {
+                            for sync_msg in &delta.inserted {
+                                let msg = vespetrel_core::Message::new(
+                                    &self.account_id,
+                                    &rf.remote_id,
+                                    sync_msg.remote_uid,
+                                    format!("Message {}", sync_msg.remote_uid),
+                                    "sender@example.com",
+                                    vec![self.account_id.clone()],
+                                );
+                                summaries.push(msg.summary());
+                                let _ = conn.interact(move |c| {
+                                    vespetrel_storage::repo::insert_message(c, &msg)
+                                }).await;
+                            }
+                        }
+                    } else {
+                        // In memory summaries for mock/test runs
+                        for sync_msg in &delta.inserted {
+                            let msg = vespetrel_core::Message::new(
+                                &self.account_id,
+                                &rf.remote_id,
+                                sync_msg.remote_uid,
+                                format!("Message {}", sync_msg.remote_uid),
+                                "sender@example.com",
+                                vec![self.account_id.clone()],
+                            );
+                            summaries.push(msg.summary());
+                        }
                     }
-                    for d in delta.deleted_uids {
-                        let _ = d;
+
+                    if !summaries.is_empty() {
+                        self.emit(SyncEvent::MessagesInserted(summaries));
+                    }
+
+                    if !delta.deleted_uids.is_empty() {
+                        let deleted_ids = delta.deleted_uids.iter().map(|u| u.to_string()).collect();
+                        self.emit(SyncEvent::MessagesDeleted(deleted_ids));
                     }
                 }
                 Err(e) => {

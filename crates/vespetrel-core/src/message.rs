@@ -68,6 +68,63 @@ pub struct Message {
     pub size_bytes: i64,
 }
 
+impl Message {
+    pub fn new(
+        account_id: impl Into<String>,
+        folder_id: impl Into<String>,
+        remote_uid: u32,
+        subject: impl Into<String>,
+        from_address: impl Into<String>,
+        to_addresses: Vec<String>,
+    ) -> Self {
+        let now = Utc::now();
+        Self {
+            id: uuid::Uuid::new_v4().to_string(),
+            account_id: account_id.into(),
+            folder_id: folder_id.into(),
+            thread_id: None,
+            remote_uid,
+            message_id_header: None,
+            in_reply_to: None,
+            subject: Some(subject.into()),
+            from_address: from_address.into(),
+            from_name: None,
+            to_addresses: to_addresses
+                .into_iter()
+                .map(|email| Address { name: None, email })
+                .collect(),
+            cc_addresses: Vec::new(),
+            bcc_addresses: Vec::new(),
+            reply_to: None,
+            sent_at: now,
+            received_at: now,
+            is_read: false,
+            is_flagged: false,
+            is_draft: false,
+            has_attachments: false,
+            body_snippet: None,
+            body_text_preview: None,
+            blob_path: String::new(),
+            size_bytes: 0,
+        }
+    }
+
+    pub fn summary(&self) -> MessageSummary {
+        MessageSummary {
+            id: self.id.clone(),
+            thread_id: self.thread_id.clone(),
+            subject: self.subject.clone(),
+            from_address: self.from_address.clone(),
+            from_name: self.from_name.clone(),
+            snippet: self.body_snippet.clone(),
+            sent_at: self.sent_at,
+            is_read: self.is_read,
+            is_flagged: self.is_flagged,
+            has_attachments: self.has_attachments,
+        }
+    }
+}
+
 /// Lightweight projection for virtual list rendering (sub-1ms frame)
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MessageSummary {

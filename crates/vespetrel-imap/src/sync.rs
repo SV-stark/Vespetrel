@@ -1,12 +1,10 @@
-﻿use std::sync::Arc;
-
 use async_trait::async_trait;
-use tracing::{debug, info, warn};
+use tracing::{debug, info};
 
 use vespetrel_core::account::SyncState;
 use vespetrel_core::folder::Folder;
 use vespetrel_core::message::{ComposedMessage, Flag};
-use vespetrel_core::provider::{MailProvider, RemoteFolder, SyncDelta, SyncMessage};
+use vespetrel_core::provider::{MailProvider, RemoteFolder, SyncDelta};
 
 use crate::client::{ImapConfig, ImapConnection};
 

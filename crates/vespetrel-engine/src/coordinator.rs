@@ -1,4 +1,4 @@
-﻿use std::collections::HashMap;
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use tokio::sync::mpsc;
@@ -13,6 +13,8 @@ pub struct SyncCoordinator {
     workers: HashMap<String, mpsc::UnboundedSender<WorkerCommand>>,
     /// UI event sender (Tokio mpsc -> GPUI)
     event_tx: mpsc::UnboundedSender<SyncEvent>,
+    /// Optional shared SQLite storage pool
+    storage_pool: Option<deadpool_sqlite::Pool>,
 }
 
 impl SyncCoordinator {
@@ -20,8 +22,17 @@ impl SyncCoordinator {
     /// The UI should own the receiver and forward SyncEvent into GPUI via cx.spawn.
     pub fn create() -> (Self, mpsc::UnboundedReceiver<SyncEvent>) {
         let (tx, rx) = mpsc::unbounded_channel();
-        let coord = Self { workers: HashMap::new(), event_tx: tx };
+        let coord = Self {
+            workers: HashMap::new(),
+            event_tx: tx,
+            storage_pool: None,
+        };
         (coord, rx)
+    }
+
+    pub fn with_storage_pool(mut self, pool: deadpool_sqlite::Pool) -> Self {
+        self.storage_pool = Some(pool);
+        self
     }
 
     pub fn event_sender(&self) -> mpsc::UnboundedSender<SyncEvent> {
@@ -31,10 +42,13 @@ impl SyncCoordinator {
     pub fn spawn_worker(&mut self, account_id: impl Into<String>, provider: Arc<dyn MailProvider>) {
         let account_id = account_id.into();
         let (cmd_tx, cmd_rx) = mpsc::unbounded_channel();
-        let worker = AccountWorker::new(account_id.clone(), provider, self.event_tx.clone(), cmd_rx);
+        let mut worker = AccountWorker::new(account_id.clone(), provider, self.event_tx.clone(), cmd_rx);
+        if let Some(pool) = &self.storage_pool {
+            worker = worker.with_storage_pool(pool.clone());
+        }
         tokio::spawn(worker.run());
         self.workers.insert(account_id.clone(), cmd_tx);
-        info!(account_id=%account_id, "spawned worker");
+        info!(account_id=%account_id, "spawned worker with storage wiring");
     }
 
     pub fn trigger_sync(&self, account_id: &str) {
@@ -59,6 +73,10 @@ impl SyncCoordinator {
 impl Default for SyncCoordinator {
     fn default() -> Self {
         let (tx, _rx) = mpsc::unbounded_channel();
-        Self { workers: HashMap::new(), event_tx: tx }
+        Self {
+            workers: HashMap::new(),
+            event_tx: tx,
+            storage_pool: None,
+        }
     }
 }

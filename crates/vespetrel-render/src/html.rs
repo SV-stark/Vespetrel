@@ -85,6 +85,42 @@ fn ammonia_clean(html: &str) -> String {
     builder.clean(html).to_string()
 }
 
+/// Wrap sanitized email HTML into a full sandboxed HTML document with Content Security Policy (CSP)
+pub fn render_sandboxed_document(clean_body: &str, dark_mode: bool) -> String {
+    let bg_color = if dark_mode { "#18181b" } else { "#ffffff" };
+    let text_color = if dark_mode { "#f4f4f5" } else { "#18181b" };
+    let link_color = if dark_mode { "#60a5fa" } else { "#2563eb" };
+
+    format!(
+        r#"<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="utf-8">
+    <meta http-equiv="Content-Security-Policy" content="default-src 'none'; img-src 'self' blob: data: https:; style-src 'unsafe-inline'; font-src 'self' data:;">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <style>
+        body {{
+            background-color: {bg_color};
+            color: {text_color};
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+            font-size: 14px;
+            line-height: 1.6;
+            margin: 0;
+            padding: 16px;
+            word-wrap: break-word;
+        }}
+        a {{ color: {link_color}; text-decoration: underline; }}
+        img {{ max-width: 100%; height: auto; }}
+        table {{ max-width: 100%; border-collapse: collapse; }}
+    </style>
+</head>
+<body>
+    {clean_body}
+</body>
+</html>"#
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -122,5 +158,14 @@ mod tests {
         let html = r#"<img src="https://example.com/pixel.gif" width="1" height="1">"#;
         let out = sanitize(html, &SanitizeOptions::default()).unwrap();
         assert!(!out.contains("pixel.gif"));
+    }
+
+    #[test]
+    fn generates_sandboxed_document_with_csp() {
+        let doc = render_sandboxed_document("<p>Clean Content</p>", true);
+        assert!(doc.contains("Content-Security-Policy"));
+        assert!(doc.contains("default-src 'none'"));
+        assert!(doc.contains("Clean Content"));
+        assert!(doc.contains("#18181b")); // Dark mode background
     }
 }

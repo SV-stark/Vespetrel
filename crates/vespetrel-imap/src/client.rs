@@ -1,4 +1,3 @@
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tracing::{debug, info};
 
 #[derive(Debug, Clone)]
@@ -83,7 +82,7 @@ impl ImapConnection {
         format!("SELECT \"{}\"", mailbox.replace('"', "\\\""))
     }
 
-    pub fn cmd_uid_fetch_changed_since(&self, uid_next: u32, mod_seq: u64) -> String {
+    pub fn cmd_uid_fetch_changed_since(&self, _uid_next: u32, mod_seq: u64) -> String {
         format!("UID FETCH 1:* (UID FLAGS MODSEQ) (CHANGEDSINCE {mod_seq})")
     }
 

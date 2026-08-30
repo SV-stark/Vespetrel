@@ -1,7 +1,7 @@
-﻿//! Vespetrel Graph - Microsoft Graph REST for Mail/Calendar/Contacts §4.4
+//! Vespetrel Graph - Microsoft Graph REST for Mail/Calendar/Contacts §4.4
 
 use async_trait::async_trait;
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 use tracing::{debug, info};
 
 use vespetrel_core::account::SyncState;
@@ -35,6 +35,7 @@ impl GraphConfig {
     }
 }
 
+#[allow(dead_code)]
 #[derive(Debug, Deserialize)]
 struct GraphFolder {
     id: String,
@@ -44,6 +45,7 @@ struct GraphFolder {
     child_folder_count: Option<i32>,
 }
 
+#[allow(dead_code)]
 #[derive(Debug, Deserialize)]
 struct GraphFolderList {
     value: Vec<GraphFolder>,
@@ -58,6 +60,10 @@ impl GraphProvider {
     pub fn new(config: GraphConfig) -> Self {
         let http = reqwest::Client::builder().user_agent("Vespetrel/0.1 Graph").build().unwrap_or_else(|_| reqwest::Client::new());
         Self { config, http }
+    }
+
+    pub fn client(&self) -> &reqwest::Client {
+        &self.http
     }
 }
 

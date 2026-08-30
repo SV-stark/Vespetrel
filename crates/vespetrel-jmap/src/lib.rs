@@ -1,4 +1,4 @@
-﻿//! Vespetrel JMAP - RFC 8620/8621 via stalwart jmap-client
+//! Vespetrel JMAP - RFC 8620/8621 via stalwart jmap-client
 
 use async_trait::async_trait;
 use tracing::{debug, info};
@@ -33,6 +33,10 @@ impl JmapProvider {
             .build()
             .unwrap_or_else(|_| reqwest::Client::new());
         Self { config, http }
+    }
+
+    pub fn client(&self) -> &reqwest::Client {
+        &self.http
     }
 
     /// Build JMAP request body - single roundtrip multi-call §4.3

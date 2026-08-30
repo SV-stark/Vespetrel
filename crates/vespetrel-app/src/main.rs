@@ -1,4 +1,4 @@
-﻿use tracing_subscriber::EnvFilter;
+use tracing_subscriber::EnvFilter;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -15,7 +15,7 @@ async fn main() -> anyhow::Result<()> {
     println!("✓ Storage schema OK ({} PRAGMAs applied)", vespetrel_storage::db::PRAGMAS.len());
 
     // Demonstrate sync coordinator + tokio bridge
-    let (mut coordinator, mut rx) = vespetrel_engine::SyncCoordinator::create();
+    let (coordinator, mut rx) = vespetrel_engine::SyncCoordinator::create();
     println!("✓ SyncCoordinator created - event channel ready");
 
     // Spawn a dummy sync event producer to show bridge (would be real ImapProvider in prod)

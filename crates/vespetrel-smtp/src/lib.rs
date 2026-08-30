@@ -1,4 +1,4 @@
-﻿//! Vespetrel SMTP - lettre + mail-send with DKIM & XOAUTH2 §5
+//! Vespetrel SMTP - lettre + mail-send with DKIM & XOAUTH2 §5
 
 use vespetrel_core::message::ComposedMessage;
 use tracing::{debug, info};
@@ -41,7 +41,7 @@ impl SmtpClient {
     pub fn build_rfc822(&self, msg: &ComposedMessage) -> anyhow::Result<Vec<u8>> {
         // Real implementation uses mail-builder::MessageBuilder
         // For now construct minimally with lettre::Message
-        use lettre::message::{header, Message as LettreMessage};
+        use lettre::message::Message as LettreMessage;
 
         let mut builder = LettreMessage::builder()
             .from(format!("{} <{}>", msg.from.name.as_deref().unwrap_or(""), msg.from.email).parse()?)

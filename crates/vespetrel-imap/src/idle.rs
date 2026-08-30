@@ -1,5 +1,5 @@
 use std::time::Duration;
-use tracing::{debug, info, warn};
+use tracing::{debug, info};
 
 /// IMAP IDLE loop - §4.2
 /// Real implementation runs on Tokio task with raw TcpStream

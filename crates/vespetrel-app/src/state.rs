@@ -1,5 +1,4 @@
-﻿use vespetrel_core::{Folder, MessageSummary};
-use tokio::sync::mpsc;
+use vespetrel_core::{Folder, MessageSummary};
 
 /// Application state shared between Tokio engine and UI
 #[derive(Debug, Clone)]
@@ -39,8 +38,11 @@ impl AppState {
             vespetrel_core::provider::SyncEvent::MessagesDeleted(ids) => {
                 self.messages.retain(|m| !ids.contains(&m.id));
             }
-            vespetrel_core::provider::SyncEvent::FolderListUpdated(_folders) => {
-                // Would update nav tree
+            vespetrel_core::provider::SyncEvent::FolderListUpdated(remote_folders) => {
+                self.folders = remote_folders
+                    .into_iter()
+                    .map(|rf| vespetrel_core::Folder::new("default", &rf.remote_id, &rf.name, &rf.path))
+                    .collect();
             }
             _ => {}
         }

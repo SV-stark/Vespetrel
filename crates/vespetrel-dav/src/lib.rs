@@ -1,5 +1,5 @@
-﻿//! Vespetrel DAV - CalDAV / CardDAV sync §4 PIM
-use tracing::{debug, info};
+//! Vespetrel DAV - CalDAV / CardDAV sync §4 PIM
+use tracing::debug;
 
 #[derive(Debug, Clone)]
 pub struct DavConfig {
@@ -25,6 +25,10 @@ impl DavClient {
     pub fn new(config: DavConfig) -> Self {
         let http = reqwest::Client::builder().user_agent("Vespetrel/0.1 DAV").build().unwrap_or_else(|_| reqwest::Client::new());
         Self { config, http }
+    }
+
+    pub fn client(&self) -> &reqwest::Client {
+        &self.http
     }
 
     pub async fn list_calendars(&self) -> anyhow::Result<Vec<RemoteCalendar>> {
