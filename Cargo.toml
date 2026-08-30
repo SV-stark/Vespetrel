@@ -44,7 +44,7 @@ lettre = { version = "0.11", default-features = false, features = ["tokio1-rustl
 jmap-client = "0.4"
 imap-codec = "2.0.0-alpha.9"
 imap-types = "2.0.0-alpha.7"
-reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+reqwest = { version = "0.13", default-features = false, features = ["json", "rustls-tls"] }
 
 # PIM (Calendar & Contacts)
 libdav = "0.10"
