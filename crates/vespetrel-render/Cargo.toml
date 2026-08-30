@@ -1,0 +1,13 @@
+﻿[package]
+name = "vespetrel-render"
+version = "0.1.0"
+edition = "2021"
+description = "HTML sanitization, tracker stripping, markdown render pipeline"
+license = "MIT OR Apache-2.0"
+
+[dependencies]
+tracing = { workspace = true }
+ammonia = { workspace = true }
+lol_html = { workspace = true }
+mail-parser = { workspace = true }
+serde = { workspace = true }

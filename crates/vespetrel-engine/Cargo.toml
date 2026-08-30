@@ -1,0 +1,19 @@
+﻿[package]
+name = "vespetrel-engine"
+version = "0.1.0"
+edition = "2021"
+description = "Tokio sync coordinator and account worker actors"
+license = "MIT OR Apache-2.0"
+
+[dependencies]
+vespetrel-core = { path = "../vespetrel-core" }
+vespetrel-storage = { path = "../vespetrel-storage" }
+tokio = { workspace = true }
+async-trait = { workspace = true }
+futures = { workspace = true }
+tracing = { workspace = true }
+thiserror = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+chrono = { workspace = true }
+deadpool-sqlite = { workspace = true }

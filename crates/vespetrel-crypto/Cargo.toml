@@ -1,0 +1,21 @@
+﻿[package]
+name = "vespetrel-crypto"
+version = "0.1.0"
+edition = "2021"
+description = "rPGP OpenPGP RFC9580, S/MIME, OAuth2 PKCE, keyring"
+license = "MIT OR Apache-2.0"
+
+[dependencies]
+tokio = { workspace = true }
+tracing = { workspace = true }
+serde = { workspace = true }
+thiserror = { workspace = true }
+oauth2 = { workspace = true }
+keyring = { workspace = true }
+rpgp = { workspace = true }
+x509-cert = { workspace = true }
+cms = { workspace = true }
+zeroize = { workspace = true }
+rustls = { workspace = true }
+reqwest = { workspace = true }
+chrono = { workspace = true }

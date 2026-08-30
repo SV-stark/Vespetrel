@@ -1,0 +1,20 @@
+﻿[package]
+name = "vespetrel-storage"
+version = "0.1.0"
+edition = "2021"
+description = "Rusqlite storage + FTS5 + blob store for Vespetrel"
+license = "MIT OR Apache-2.0"
+
+[dependencies]
+vespetrel-core = { path = "../vespetrel-core" }
+rusqlite = { workspace = true }
+deadpool-sqlite = { workspace = true }
+tokio = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+chrono = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+lz4_flex = { workspace = true }
+zstd = { workspace = true }
+uuid = { workspace = true }

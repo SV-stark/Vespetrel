@@ -1,0 +1,16 @@
+﻿[package]
+name = "vespetrel-jmap"
+version = "0.1.0"
+edition = "2021"
+description = "Stalwart JMAP client adapter RFC8620/8621"
+license = "MIT OR Apache-2.0"
+
+[dependencies]
+vespetrel-core = { path = "../vespetrel-core" }
+tokio = { workspace = true }
+async-trait = { workspace = true }
+tracing = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+reqwest = { workspace = true }
+jmap-client = { workspace = true }

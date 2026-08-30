@@ -1,0 +1,19 @@
+﻿[package]
+name = "vespetrel-dav"
+version = "0.1.0"
+edition = "2021"
+description = "CalDAV & CardDAV sync via libdav, icalendar, vcard4"
+license = "MIT OR Apache-2.0"
+
+[dependencies]
+vespetrel-core = { path = "../vespetrel-core" }
+tokio = { workspace = true }
+tracing = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+reqwest = { workspace = true }
+libdav = { workspace = true }
+icalendar = { workspace = true }
+vcard4 = { workspace = true }
+chrono = { workspace = true }
+thiserror = { workspace = true }

@@ -1,0 +1,16 @@
+﻿[package]
+name = "vespetrel-smtp"
+version = "0.1.0"
+edition = "2021"
+description = "SMTP submission with lettre + mail-send + DKIM + XOAUTH2"
+license = "MIT OR Apache-2.0"
+
+[dependencies]
+vespetrel-core = { path = "../vespetrel-core" }
+tokio = { workspace = true }
+tracing = { workspace = true }
+lettre = { workspace = true }
+mail-builder = { workspace = true }
+mail-send = { workspace = true }
+serde = { workspace = true }
+thiserror = { workspace = true }

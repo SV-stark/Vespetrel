@@ -1,0 +1,32 @@
+﻿[package]
+name = "vespetrel-app"
+version = "0.1.0"
+edition = "2021"
+description = "GPUI desktop frontend for Vespetrel - 3-pane layout, virtual list, reader, compose"
+license = "MIT OR Apache-2.0"
+
+[[bin]]
+name = "vespetrel"
+path = "src/main.rs"
+
+[features]
+default = []
+# Enable when real UI deps are available (requires adding gpui git deps):
+# gpui = ["dep:wry"]
+gpui = []
+
+[dependencies]
+vespetrel-core = { path = "../vespetrel-core" }
+vespetrel-storage = { path = "../vespetrel-storage" }
+vespetrel-engine = { path = "../vespetrel-engine" }
+vespetrel-render = { path = "../vespetrel-render" }
+vespetrel-crypto = { path = "../vespetrel-crypto" }
+tokio = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+chrono = { workspace = true }
+anyhow = "1.0"
+# wry / gpui are intentionally NOT listed here to keep `cargo check` offline-friendly.
+# To enable: add `wry = { workspace = true, optional = true }` and gpui git deps, then set `gpui = ["dep:wry"]`
