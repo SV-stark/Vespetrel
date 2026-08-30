@@ -14,4 +14,6 @@ serde = { workspace = true }
 anyhow = { workspace = true }
 simdutf8 = { workspace = true }
 memchr = { workspace = true }
+ahash = { workspace = true }
+
 

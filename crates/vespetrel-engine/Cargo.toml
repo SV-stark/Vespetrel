@@ -20,4 +20,6 @@ deadpool-sqlite = { workspace = true }
 anyhow = { workspace = true }
 flume = { workspace = true }
 parking_lot = { workspace = true }
+uuid = { workspace = true }
+
 

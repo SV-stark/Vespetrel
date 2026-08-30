@@ -2,10 +2,15 @@
 
 pub mod coordinator;
 pub mod event_bus;
+pub mod filter;
 pub mod worker;
 
 pub use coordinator::SyncCoordinator;
 pub use event_bus::{EventBus, EventReceiver, EventSender};
+pub use filter::{
+    ConditionCombinator, FilterAction, FilterCondition, FilterEngine, FilterField, FilterPredicate,
+    FilterRule,
+};
 pub use worker::{AccountWorker, WorkerCommand};
 
 #[cfg(test)]
