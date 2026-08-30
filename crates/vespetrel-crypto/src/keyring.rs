@@ -14,7 +14,11 @@ pub struct Keyring {
 }
 
 impl Keyring {
-    pub fn new(service: impl Into<String>) -> Self { Self { service: service.into() } }
+    pub fn new(service: impl Into<String>) -> Self {
+        Self {
+            service: service.into(),
+        }
+    }
 
     fn entry(&self, key: &str) -> Result<keyring::Entry, KeyringError> {
         keyring::Entry::new(&self.service, key).map_err(|e| KeyringError::Backend(e.to_string()))
@@ -22,16 +26,19 @@ impl Keyring {
 
     pub fn set(&self, key: &str, secret: &str) -> Result<(), KeyringError> {
         let e = self.entry(key)?;
-        e.set_password(secret).map_err(|e| KeyringError::Backend(e.to_string()))
+        e.set_password(secret)
+            .map_err(|e| KeyringError::Backend(e.to_string()))
     }
 
     pub fn get(&self, key: &str) -> Result<String, KeyringError> {
         let e = self.entry(key)?;
-        e.get_password().map_err(|e| KeyringError::Backend(e.to_string()))
+        e.get_password()
+            .map_err(|e| KeyringError::Backend(e.to_string()))
     }
 
     pub fn delete(&self, key: &str) -> Result<(), KeyringError> {
         let e = self.entry(key)?;
-        e.delete_credential().map_err(|e| KeyringError::Backend(e.to_string()))
+        e.delete_credential()
+            .map_err(|e| KeyringError::Backend(e.to_string()))
     }
 }

@@ -29,7 +29,11 @@ impl AppState {
                 // Prepend to virtual list (newest first) - splice 0..0 pattern from spec §6.2
                 self.messages.splice(0..0, new_msgs);
             }
-            vespetrel_core::provider::SyncEvent::MessageFlagsUpdated { id, is_read, is_flagged } => {
+            vespetrel_core::provider::SyncEvent::MessageFlagsUpdated {
+                id,
+                is_read,
+                is_flagged,
+            } => {
                 if let Some(msg) = self.messages.iter_mut().find(|m| m.id == id) {
                     msg.is_read = is_read;
                     msg.is_flagged = is_flagged;
@@ -41,7 +45,9 @@ impl AppState {
             vespetrel_core::provider::SyncEvent::FolderListUpdated(remote_folders) => {
                 self.folders = remote_folders
                     .into_iter()
-                    .map(|rf| vespetrel_core::Folder::new("default", &rf.remote_id, &rf.name, &rf.path))
+                    .map(|rf| {
+                        vespetrel_core::Folder::new("default", &rf.remote_id, &rf.name, &rf.path)
+                    })
                     .collect();
             }
             _ => {}
@@ -50,5 +56,7 @@ impl AppState {
 }
 
 impl Default for AppState {
-    fn default() -> Self { Self::new() }
+    fn default() -> Self {
+        Self::new()
+    }
 }

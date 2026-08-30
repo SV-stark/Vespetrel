@@ -12,7 +12,10 @@ async fn main() -> anyhow::Result<()> {
     // Headless quick-start check: verify storage schema without UI
     let app = vespetrel_app::app::VespetrelApp::new("./vespetrel.db");
     app.init_storage().await?;
-    println!("✓ Storage schema OK ({} PRAGMAs applied)", vespetrel_storage::db::PRAGMAS.len());
+    println!(
+        "✓ Storage schema OK ({} PRAGMAs applied)",
+        vespetrel_storage::db::PRAGMAS.len()
+    );
 
     // Demonstrate sync coordinator + tokio bridge
     let (coordinator, mut rx) = vespetrel_engine::SyncCoordinator::create();
@@ -21,9 +24,9 @@ async fn main() -> anyhow::Result<()> {
     // Spawn a dummy sync event producer to show bridge (would be real ImapProvider in prod)
     tokio::spawn(async move {
         // Simulate incoming sync events
-        use vespetrel_core::provider::SyncEvent;
-        use vespetrel_core::MessageSummary;
         use chrono::Utc;
+        use vespetrel_core::MessageSummary;
+        use vespetrel_core::provider::SyncEvent;
         tokio::time::sleep(std::time::Duration::from_millis(10)).await;
         let msgs = vec![MessageSummary {
             id: uuid::Uuid::new_v4().to_string(),
@@ -37,7 +40,9 @@ async fn main() -> anyhow::Result<()> {
             is_flagged: false,
             has_attachments: false,
         }];
-        let _ = coordinator.event_sender().send(SyncEvent::MessagesInserted(msgs));
+        let _ = coordinator
+            .event_sender()
+            .send(SyncEvent::MessagesInserted(msgs));
     });
 
     // Headless consume one event to prove tokio->GPUI pattern works
@@ -53,7 +58,9 @@ async fn main() -> anyhow::Result<()> {
 
     #[cfg(not(feature = "gpui"))]
     {
-        println!("Tip: build with --features gpui to launch GPU window (requires enabling gpui git deps in Cargo.toml).");
+        println!(
+            "Tip: build with --features gpui to launch GPU window (requires enabling gpui git deps in Cargo.toml)."
+        );
         println!("Headless check passed. Exiting.");
     }
 

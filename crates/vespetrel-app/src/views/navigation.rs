@@ -1,4 +1,4 @@
-﻿use vespetrel_core::{Folder, FolderRole};
+use vespetrel_core::{Folder, FolderRole};
 
 pub struct NavigationTree {
     pub folders: Vec<Folder>,
@@ -6,10 +6,16 @@ pub struct NavigationTree {
 }
 
 impl NavigationTree {
-    pub fn new(folders: Vec<Folder>) -> Self { Self { folders, selected: None } }
+    pub fn new(folders: Vec<Folder>) -> Self {
+        Self {
+            folders,
+            selected: None,
+        }
+    }
 
     pub fn accounts_grouped(&self) -> std::collections::HashMap<String, Vec<&Folder>> {
-        let mut map: std::collections::HashMap<String, Vec<&Folder>> = std::collections::HashMap::new();
+        let mut map: std::collections::HashMap<String, Vec<&Folder>> =
+            std::collections::HashMap::new();
         for f in &self.folders {
             map.entry(f.account_id.clone()).or_default().push(f);
         }

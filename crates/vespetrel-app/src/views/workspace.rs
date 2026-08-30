@@ -12,7 +12,10 @@ pub struct WorkspaceView {
 
 impl WorkspaceView {
     pub fn new(state: AppState) -> Self {
-        Self { state, panes: [0.22, 0.38, 0.40] }
+        Self {
+            state,
+            panes: [0.22, 0.38, 0.40],
+        }
     }
 
     pub fn set_panes(&mut self, panes: [f32; 3]) {
@@ -22,7 +25,9 @@ impl WorkspaceView {
     pub fn description(&self) -> String {
         format!(
             "Workspace left={:.0}% center={:.0}% right={:.0}% | {} msgs | folder={:?}",
-            self.panes[0]*100.0, self.panes[1]*100.0, self.panes[2]*100.0,
+            self.panes[0] * 100.0,
+            self.panes[1] * 100.0,
+            self.panes[2] * 100.0,
             self.state.messages.len(),
             self.state.selected_folder
         )

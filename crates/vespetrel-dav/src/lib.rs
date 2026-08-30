@@ -9,11 +9,23 @@ pub struct DavConfig {
 }
 
 impl DavConfig {
-    pub fn new(base_url: impl Into<String>, username: impl Into<String>, token: impl Into<String>) -> Self {
-        Self { base_url: base_url.into(), username: username.into(), password_or_token: token.into() }
+    pub fn new(
+        base_url: impl Into<String>,
+        username: impl Into<String>,
+        token: impl Into<String>,
+    ) -> Self {
+        Self {
+            base_url: base_url.into(),
+            username: username.into(),
+            password_or_token: token.into(),
+        }
     }
-    pub fn calendar_home(&self) -> String { format!("{}/calendars/{}", self.base_url, self.username) }
-    pub fn addressbook_home(&self) -> String { format!("{}/addressbooks/{}", self.base_url, self.username) }
+    pub fn calendar_home(&self) -> String {
+        format!("{}/calendars/{}", self.base_url, self.username)
+    }
+    pub fn addressbook_home(&self) -> String {
+        format!("{}/addressbooks/{}", self.base_url, self.username)
+    }
 }
 
 pub struct DavClient {
@@ -23,7 +35,10 @@ pub struct DavClient {
 
 impl DavClient {
     pub fn new(config: DavConfig) -> Self {
-        let http = reqwest::Client::builder().user_agent("Vespetrel/0.1 DAV").build().unwrap_or_else(|_| reqwest::Client::new());
+        let http = reqwest::Client::builder()
+            .user_agent("Vespetrel/0.1 DAV")
+            .build()
+            .unwrap_or_else(|_| reqwest::Client::new());
         Self { config, http }
     }
 
@@ -34,13 +49,24 @@ impl DavClient {
     pub async fn list_calendars(&self) -> anyhow::Result<Vec<RemoteCalendar>> {
         debug!(url=%self.config.calendar_home(), "PROPFIND calendars");
         // Real: use libdav to PROPFIND with Depth 1, parse multistatus
-        Ok(vec![RemoteCalendar{ id: "personal".into(), name: "Personal".into(), color: Some("#3b82f6".into()) }])
+        Ok(vec![RemoteCalendar {
+            id: "personal".into(),
+            name: "Personal".into(),
+            color: Some("#3b82f6".into()),
+        }])
     }
 
-    pub async fn sync_calendar(&self, calendar_id: &str, sync_token: Option<&str>) -> anyhow::Result<CalendarSyncResult> {
+    pub async fn sync_calendar(
+        &self,
+        calendar_id: &str,
+        sync_token: Option<&str>,
+    ) -> anyhow::Result<CalendarSyncResult> {
         debug!(calendar_id, token=?sync_token, "CalDAV sync-collection REPORT");
         // Real: REPORT sync-collection with sync-token
-        Ok(CalendarSyncResult{ events: vec![], new_sync_token: Some("stub-token".into()) })
+        Ok(CalendarSyncResult {
+            events: vec![],
+            new_sync_token: Some("stub-token".into()),
+        })
     }
 
     pub async fn list_contacts(&self) -> anyhow::Result<Vec<RemoteContact>> {
@@ -50,16 +76,31 @@ impl DavClient {
 }
 
 #[derive(Debug, Clone)]
-pub struct RemoteCalendar { pub id: String, pub name: String, pub color: Option<String> }
+pub struct RemoteCalendar {
+    pub id: String,
+    pub name: String,
+    pub color: Option<String>,
+}
 
 #[derive(Debug, Clone)]
-pub struct CalendarSyncResult { pub events: Vec<CalendarEventRaw>, pub new_sync_token: Option<String> }
+pub struct CalendarSyncResult {
+    pub events: Vec<CalendarEventRaw>,
+    pub new_sync_token: Option<String>,
+}
 
 #[derive(Debug, Clone)]
-pub struct CalendarEventRaw { pub href: String, pub etag: String, pub ical: String }
+pub struct CalendarEventRaw {
+    pub href: String,
+    pub etag: String,
+    pub ical: String,
+}
 
 #[derive(Debug, Clone)]
-pub struct RemoteContact { pub href: String, pub etag: String, pub vcard: String }
+pub struct RemoteContact {
+    pub href: String,
+    pub etag: String,
+    pub vcard: String,
+}
 
 /// Simple iCalendar parsing helper using `icalendar` crate
 pub fn parse_ical(ical_str: &str) -> anyhow::Result<Vec<icalendar::Calendar>> {

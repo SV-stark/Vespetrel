@@ -1,4 +1,4 @@
-﻿use vespetrel_core::message::{Address, ComposedMessage};
+use vespetrel_core::message::{Address, ComposedMessage};
 
 pub struct ComposeState {
     pub draft: ComposedMessage,
@@ -25,7 +25,9 @@ impl ComposeState {
         }
     }
 
-    pub fn set_subject(&mut self, s: impl Into<String>) { self.draft.subject = s.into(); }
+    pub fn set_subject(&mut self, s: impl Into<String>) {
+        self.draft.subject = s.into();
+    }
     pub fn set_body(&mut self, text: impl Into<String>, html: Option<String>) {
         self.draft.body_text = text.into();
         self.draft.body_html = html;

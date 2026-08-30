@@ -15,7 +15,9 @@ pub enum PgpError {
 pub struct PgpEngine;
 
 impl PgpEngine {
-    pub fn new() -> Self { Self }
+    pub fn new() -> Self {
+        Self
+    }
 
     /// Check if a raw body string contains OpenPGP ASCII armor
     pub fn is_armored_pgp(&self, text: &str) -> bool {
@@ -37,7 +39,9 @@ impl PgpEngine {
         if has_header && has_footer {
             Ok("valid_armor_detected".into())
         } else {
-            Err(PgpError::InvalidArmor("malformed armor block boundaries".into()))
+            Err(PgpError::InvalidArmor(
+                "malformed armor block boundaries".into(),
+            ))
         }
     }
 
@@ -58,11 +62,18 @@ impl PgpEngine {
 
     /// Generate compliant Autocrypt 1.1 header (addr=...; prefer-encrypt=mutual; keydata=...)
     pub fn autocrypt_header(&self, email: &str, public_key_base64: &str) -> String {
-        format!("addr={}; prefer-encrypt=mutual; keydata={}", email, public_key_base64)
+        format!(
+            "addr={}; prefer-encrypt=mutual; keydata={}",
+            email, public_key_base64
+        )
     }
 }
 
-impl Default for PgpEngine { fn default() -> Self { Self::new() } }
+impl Default for PgpEngine {
+    fn default() -> Self {
+        Self::new()
+    }
+}
 
 #[cfg(test)]
 mod tests {

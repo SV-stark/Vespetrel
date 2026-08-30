@@ -59,7 +59,12 @@ pub struct Folder {
 }
 
 impl Folder {
-    pub fn new(account_id: impl Into<String>, remote_id: impl Into<String>, name: impl Into<String>, path: impl Into<String>) -> Self {
+    pub fn new(
+        account_id: impl Into<String>,
+        remote_id: impl Into<String>,
+        name: impl Into<String>,
+        path: impl Into<String>,
+    ) -> Self {
         let name_s = name.into();
         let path_s = path.into();
         Self {

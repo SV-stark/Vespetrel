@@ -1,4 +1,4 @@
-﻿use vespetrel_render::{sanitize, SanitizeOptions, RewriteOptions};
+use vespetrel_render::{RewriteOptions, SanitizeOptions, sanitize};
 
 pub struct MessageViewer {
     pub raw_html: Option<String>,
@@ -7,12 +7,23 @@ pub struct MessageViewer {
 }
 
 impl MessageViewer {
-    pub fn new() -> Self { Self { raw_html: None, plain_text: None, sanitized_html: None } }
+    pub fn new() -> Self {
+        Self {
+            raw_html: None,
+            plain_text: None,
+            sanitized_html: None,
+        }
+    }
 
     pub fn load_html(&mut self, html: impl Into<String>, block_remote: bool) {
         let html = html.into();
         self.raw_html = Some(html.clone());
-        let opts = SanitizeOptions { rewrite: RewriteOptions { block_remote_images: block_remote, rewrite_cid: true } };
+        let opts = SanitizeOptions {
+            rewrite: RewriteOptions {
+                block_remote_images: block_remote,
+                rewrite_cid: true,
+            },
+        };
         self.sanitized_html = sanitize(&html, &opts).ok();
     }
 
@@ -34,10 +45,16 @@ impl MessageViewer {
     }
 }
 
-impl Default for MessageViewer { fn default() -> Self { Self::new() } }
+impl Default for MessageViewer {
+    fn default() -> Self {
+        Self::new()
+    }
+}
 
 fn html_escape(s: &str) -> String {
-    s.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;")
+    s.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
 }
 
 // #[cfg(feature = "gpui")]

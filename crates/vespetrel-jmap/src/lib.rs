@@ -16,8 +16,16 @@ pub struct JmapConfig {
 }
 
 impl JmapConfig {
-    pub fn new(base_url: impl Into<String>, username: impl Into<String>, access_token: impl Into<String>) -> Self {
-        Self { base_url: base_url.into(), username: username.into(), access_token: access_token.into() }
+    pub fn new(
+        base_url: impl Into<String>,
+        username: impl Into<String>,
+        access_token: impl Into<String>,
+    ) -> Self {
+        Self {
+            base_url: base_url.into(),
+            username: username.into(),
+            access_token: access_token.into(),
+        }
     }
 }
 
@@ -58,8 +66,22 @@ impl MailProvider for JmapProvider {
         // Real: POST /.well-known/jmap + session discovery -> Mailbox/get
         // Stub
         Ok(vec![
-            RemoteFolder { remote_id: "inbox".into(), name: "Inbox".into(), path: "Inbox".into(), role_hint: Some("inbox".into()), uid_validity: None, highest_mod_seq: None },
-            RemoteFolder { remote_id: "sent".into(), name: "Sent".into(), path: "Sent".into(), role_hint: Some("sent".into()), uid_validity: None, highest_mod_seq: None },
+            RemoteFolder {
+                remote_id: "inbox".into(),
+                name: "Inbox".into(),
+                path: "Inbox".into(),
+                role_hint: Some("inbox".into()),
+                uid_validity: None,
+                highest_mod_seq: None,
+            },
+            RemoteFolder {
+                remote_id: "sent".into(),
+                name: "Sent".into(),
+                path: "Sent".into(),
+                role_hint: Some("sent".into()),
+                uid_validity: None,
+                highest_mod_seq: None,
+            },
         ])
     }
 
@@ -74,7 +96,11 @@ impl MailProvider for JmapProvider {
     async fn fetch_raw_message(&self, remote_id: &str) -> anyhow::Result<Vec<u8>> {
         debug!(remote_id, "JMAP fetch_raw_message");
         // Real: Email/get with bodyProperties + fetch blob
-        Ok(format!("From: jmap@example.com\r\nSubject: JMAP {}\r\n\r\nStub", remote_id).into_bytes())
+        Ok(format!(
+            "From: jmap@example.com\r\nSubject: JMAP {}\r\n\r\nStub",
+            remote_id
+        )
+        .into_bytes())
     }
 
     async fn send_message(&self, msg: &ComposedMessage) -> anyhow::Result<()> {
@@ -83,7 +109,12 @@ impl MailProvider for JmapProvider {
         Ok(())
     }
 
-    async fn update_flags(&self, remote_ids: &[u32], add: &[Flag], remove: &[Flag]) -> anyhow::Result<()> {
+    async fn update_flags(
+        &self,
+        remote_ids: &[u32],
+        add: &[Flag],
+        remove: &[Flag],
+    ) -> anyhow::Result<()> {
         debug!(uids=?remote_ids, add=?add, remove=?remove, "JMAP Email/set keywords");
         Ok(())
     }

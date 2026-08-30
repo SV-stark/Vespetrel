@@ -195,31 +195,34 @@ RUST_LOG=vespetrel=debug,vespetrel_imap=trace cargo run --package vespetrel-app
 
 ## 🗺️ Roadmap
 
-- [x] **P0: Storage & Core Engine**
-  - [x] Rusqlite relational schema with foreign keys and WAL mode
-  - [x] SQLite FTS5 full-text search with BM25 ranking
-  - [x] Domain entities & unified `MailProvider` trait abstraction
-  - [x] Zero-copy MIME parser (`mail-parser`) & compressed raw message store (`lz4_flex`)
-  - [x] Real-time HTML sanitizer (`ammonia`) & tracking pixel stripper (`lol_html`)
+- [x] **P0: Foundation & Storage Engine (Rust 2024 Edition)**
+  - [x] Full workspace migration to **Rust 2024 Edition** across all 11 member crates
+  - [x] Rusqlite relational schema with foreign keys, WAL mode, and `_schema_migrations` version tracking
+  - [x] SQLite FTS5 full-text search with BM25 ranking (sub-15ms queries)
+  - [x] Domain entities (`Account`, `Folder`, `Message`, `Thread`, `Contact`) & unified `MailProvider` trait
+  - [x] Zero-copy MIME parser (`mail-parser`) & compressed raw message store (`lz4_flex` + `zstd`)
+  - [x] Real-time HTML sanitizer (`ammonia`), tracking pixel stripper (`lol_html`), and sandboxed CSP document generator
 - [ ] **P1: GPUI 3-Pane Shell & Message Reader**
   - [x] 3-Pane dock state model & view logic (`vespetrel-app`)
+  - [x] Sandboxed HTML viewport with Content-Security-Policy generator
   - [ ] Resizable dock layout via `gpui-component`
   - [ ] 120 FPS virtualized message list (100k+ row stress testing)
-  - [ ] Plaintext / Markdown viewer + Sandboxed HTML viewport (`wry`)
+  - [ ] Plaintext / Markdown viewer + Webview viewport (`wry`)
   - [ ] Account tree & folder navigation
-- [ ] **P2: Multi-Account Providers & Compose**
-  - [x] Google & Microsoft OAuth2 PKCE engine (`vespetrel-crypto`)
+- [ ] **P2: Multi-Account Providers & Live Gmail Integration**
+  - [x] Google & Microsoft OAuth2 PKCE engine + Loopback TCP listener (`127.0.0.1:8989`)
+  - [x] Google OAuth2 access token auto-refresh routine (`refresh_access_token`)
   - [x] OS Keyring secure token storage (`keyring-rs` v3)
-  - [x] Tokio Account Worker actors & Sync Coordinator (`vespetrel-engine`)
-  - [x] IMAP IDLE state machine, QRESYNC/CONDSTORE & XOAUTH2 (`vespetrel-imap`)
+  - [x] Tokio Account Worker actors & Sync Coordinator with SQLite pool persistence (`vespetrel-engine`)
+  - [x] IMAP IDLE state machine, QRESYNC/CONDSTORE & XOAUTH2 command builders (`vespetrel-imap`)
+  - [x] Live SMTP submit transport with Lettre & DKIM (`vespetrel-smtp::send_live`)
   - [x] Stalwart JMAP push provider adapter (`vespetrel-jmap`)
   - [x] Microsoft Graph REST provider adapter (`vespetrel-graph`)
-  - [x] SMTP submit transport with Lettre & DKIM (`vespetrel-smtp`)
   - [ ] Interactive UI login wizard modal
   - [ ] Rich-text compose editor with contact autocomplete
 - [ ] **P3: PIM & End-to-End Encryption**
   - [x] CalDAV & CardDAV client integration foundation (`libdav`, `icalendar`, `vcard4`)
-  - [x] OpenPGP (RFC 9580 v6) & Autocrypt 1.1 engine scaffolding (`vespetrel-crypto`)
+  - [x] OpenPGP (RFC 9580 v6) armor detector & Autocrypt 1.1 engine (`vespetrel-crypto`)
   - [ ] CalDAV agenda & month grid views
   - [ ] CardDAV contact sync & address book
   - [ ] Inline digital signature verification badges

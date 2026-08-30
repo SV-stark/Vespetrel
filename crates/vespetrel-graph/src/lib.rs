@@ -19,14 +19,23 @@ pub struct GraphConfig {
 
 impl GraphConfig {
     pub fn new(access_token: impl Into<String>) -> Self {
-        Self { access_token: access_token.into(), base_url: GRAPH_BASE.into() }
+        Self {
+            access_token: access_token.into(),
+            base_url: GRAPH_BASE.into(),
+        }
     }
 
     pub fn delta_url(&self, folder_id: &str, delta_token: Option<&str>) -> String {
         if let Some(tok) = delta_token {
-            format!("{}/me/mailFolders/{}/messages/delta?$deltatoken={}", self.base_url, folder_id, tok)
+            format!(
+                "{}/me/mailFolders/{}/messages/delta?$deltatoken={}",
+                self.base_url, folder_id, tok
+            )
         } else {
-            format!("{}/me/mailFolders/{}/messages/delta", self.base_url, folder_id)
+            format!(
+                "{}/me/mailFolders/{}/messages/delta",
+                self.base_url, folder_id
+            )
         }
     }
 
@@ -58,7 +67,10 @@ pub struct GraphProvider {
 
 impl GraphProvider {
     pub fn new(config: GraphConfig) -> Self {
-        let http = reqwest::Client::builder().user_agent("Vespetrel/0.1 Graph").build().unwrap_or_else(|_| reqwest::Client::new());
+        let http = reqwest::Client::builder()
+            .user_agent("Vespetrel/0.1 Graph")
+            .build()
+            .unwrap_or_else(|_| reqwest::Client::new());
         Self { config, http }
     }
 
@@ -74,25 +86,50 @@ impl MailProvider for GraphProvider {
         // Real: GET /me/mailFolders with auth header
         // let resp = self.http.get(self.config.folders_url()).bearer_auth(&self.config.access_token).send().await?;
         Ok(vec![
-            RemoteFolder { remote_id: "inbox".into(), name: "Inbox".into(), path: "Inbox".into(), role_hint: Some("inbox".into()), uid_validity: None, highest_mod_seq: None },
-            RemoteFolder { remote_id: "sentitems".into(), name: "Sent Items".into(), path: "Sent Items".into(), role_hint: Some("sent".into()), uid_validity: None, highest_mod_seq: None },
+            RemoteFolder {
+                remote_id: "inbox".into(),
+                name: "Inbox".into(),
+                path: "Inbox".into(),
+                role_hint: Some("inbox".into()),
+                uid_validity: None,
+                highest_mod_seq: None,
+            },
+            RemoteFolder {
+                remote_id: "sentitems".into(),
+                name: "Sent Items".into(),
+                path: "Sent Items".into(),
+                role_hint: Some("sent".into()),
+                uid_validity: None,
+                highest_mod_seq: None,
+            },
         ])
     }
 
     async fn sync_messages(&self, folder: &Folder, state: SyncState) -> anyhow::Result<SyncDelta> {
-        let url = self.config.delta_url(&folder.remote_id, state.graph_delta_token.as_deref());
+        let url = self
+            .config
+            .delta_url(&folder.remote_id, state.graph_delta_token.as_deref());
         debug!(folder=%folder.name, url=%url, "Graph delta query");
         // Real delta: GET url with bearer, parse @odata.deltaLink for next token
         info!(folder=%folder.name, "Graph delta sync stub");
-        let mut new_state = SyncState::default();
-        new_state.graph_delta_token = Some("stub-delta-token".into());
-        Ok(SyncDelta { new_sync_state: new_state, ..Default::default() })
+        let new_sync_state = SyncState {
+            graph_delta_token: Some("stub-delta-token".into()),
+            ..Default::default()
+        };
+        Ok(SyncDelta {
+            new_sync_state,
+            ..Default::default()
+        })
     }
 
     async fn fetch_raw_message(&self, remote_id: &str) -> anyhow::Result<Vec<u8>> {
         debug!(remote_id, "Graph fetch MIME");
         // Real: GET /me/messages/{id}/$value
-        Ok(format!("From: graph@example.com\r\nSubject: Graph {}\r\n\r\nStub", remote_id).into_bytes())
+        Ok(format!(
+            "From: graph@example.com\r\nSubject: Graph {}\r\n\r\nStub",
+            remote_id
+        )
+        .into_bytes())
     }
 
     async fn send_message(&self, msg: &ComposedMessage) -> anyhow::Result<()> {
@@ -101,7 +138,12 @@ impl MailProvider for GraphProvider {
         Ok(())
     }
 
-    async fn update_flags(&self, remote_ids: &[u32], add: &[Flag], remove: &[Flag]) -> anyhow::Result<()> {
+    async fn update_flags(
+        &self,
+        remote_ids: &[u32],
+        add: &[Flag],
+        remove: &[Flag],
+    ) -> anyhow::Result<()> {
         debug!(uids=?remote_ids, "Graph PATCH isRead/flag");
         // Real: PATCH /me/messages/{id} with {"isRead": true}
         let _ = (add, remove);

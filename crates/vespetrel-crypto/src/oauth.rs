@@ -19,7 +19,11 @@ impl OAuth2Config {
             auth_url: "https://accounts.google.com/o/oauth2/v2/auth".into(),
             token_url: "https://oauth2.googleapis.com/token".into(),
             redirect_uri: "http://127.0.0.1:8989/callback".into(),
-            scopes: vec!["https://mail.google.com/".into(), "openid".into(), "email".into()],
+            scopes: vec![
+                "https://mail.google.com/".into(),
+                "openid".into(),
+                "email".into(),
+            ],
         }
     }
 
@@ -30,7 +34,11 @@ impl OAuth2Config {
             auth_url: "https://login.microsoftonline.com/common/oauth2/v2.0/authorize".into(),
             token_url: "https://login.microsoftonline.com/common/oauth2/v2.0/token".into(),
             redirect_uri: "http://127.0.0.1:8989/callback".into(),
-            scopes: vec!["https://outlook.office.com/IMAP.AccessAsUser.All".into(), "https://outlook.office.com/SMTP.Send".into(), "offline_access".into()],
+            scopes: vec![
+                "https://outlook.office.com/IMAP.AccessAsUser.All".into(),
+                "https://outlook.office.com/SMTP.Send".into(),
+                "offline_access".into(),
+            ],
         }
     }
 }
@@ -41,7 +49,9 @@ pub struct OAuth2Engine {
 }
 
 impl OAuth2Engine {
-    pub fn new(config: OAuth2Config) -> Self { Self { config } }
+    pub fn new(config: OAuth2Config) -> Self {
+        Self { config }
+    }
 
     /// Generate PKCE authorization URL to open in browser
     pub fn auth_url(&self) -> (String, CsrfToken, PkceCodeChallenge) {
@@ -73,8 +83,9 @@ impl OAuth2Engine {
         let n = socket.read(&mut buf).await?;
         let request_str = String::from_utf8_lossy(&buf[..n]);
 
-        let code = parse_code_from_http_request(&request_str)
-            .ok_or_else(|| anyhow::anyhow!("failed to extract authorization code from callback request"))?;
+        let code = parse_code_from_http_request(&request_str).ok_or_else(|| {
+            anyhow::anyhow!("failed to extract authorization code from callback request")
+        })?;
 
         // Respond with friendly confirmation page
         let response_body = r#"<!DOCTYPE html>
@@ -100,7 +111,11 @@ impl OAuth2Engine {
         Ok(code)
     }
 
-    pub async fn exchange_code(&self, code: String, pkce_verifier: String) -> anyhow::Result<TokenBundle> {
+    pub async fn exchange_code(
+        &self,
+        code: String,
+        pkce_verifier: String,
+    ) -> anyhow::Result<TokenBundle> {
         info!(token_url=%self.config.token_url, "exchanging code for OAuth2 tokens");
         let client = reqwest::Client::builder()
             .user_agent("Vespetrel/0.1 OAuth2")
@@ -144,6 +159,53 @@ impl OAuth2Engine {
             expires_in,
         })
     }
+
+    /// Refresh an expired access token using the long-lived refresh_token
+    pub async fn refresh_access_token(&self, refresh_token: &str) -> anyhow::Result<TokenBundle> {
+        info!(token_url=%self.config.token_url, "refreshing expired OAuth2 access token");
+        let client = reqwest::Client::builder()
+            .user_agent("Vespetrel/0.1 OAuth2")
+            .build()?;
+
+        let mut params = std::collections::HashMap::new();
+        params.insert("client_id", self.config.client_id.as_str());
+        params.insert("refresh_token", refresh_token);
+        params.insert("grant_type", "refresh_token");
+
+        if let Some(secret) = &self.config.client_secret {
+            params.insert("client_secret", secret.as_str());
+        }
+
+        let resp = client
+            .post(&self.config.token_url)
+            .form(&params)
+            .send()
+            .await?;
+
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let body = resp.text().await.unwrap_or_default();
+            anyhow::bail!("token refresh failed with status {}: {}", status, body);
+        }
+
+        let body: serde_json::Value = resp.json().await?;
+        let access_token = body["access_token"]
+            .as_str()
+            .ok_or_else(|| anyhow::anyhow!("missing access_token in refresh response"))?
+            .to_string();
+
+        let new_refresh = body["refresh_token"]
+            .as_str()
+            .map(|s| s.to_string())
+            .or_else(|| Some(refresh_token.to_string()));
+        let expires_in = body["expires_in"].as_u64().unwrap_or(3600);
+
+        Ok(TokenBundle {
+            access_token,
+            refresh_token: new_refresh,
+            expires_in,
+        })
+    }
 }
 
 /// Parse `code=...` query parameter from raw HTTP request line
@@ -154,10 +216,8 @@ pub fn parse_code_from_http_request(req: &str) -> Option<String> {
 
     for pair in query.split('&') {
         let mut parts = pair.split('=');
-        if let (Some(k), Some(v)) = (parts.next(), parts.next()) {
-            if k == "code" {
-                return Some(v.to_string());
-            }
+        if let (Some("code"), Some(v)) = (parts.next(), parts.next()) {
+            return Some(v.to_string());
         }
     }
     None

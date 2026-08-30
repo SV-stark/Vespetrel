@@ -1,9 +1,9 @@
-﻿[package]
+[package]
 name = "vespetrel-graph"
-version = "0.1.0"
-edition = "2021"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
 description = "Microsoft Graph REST adapter for Exchange Online"
-license = "MIT OR Apache-2.0"
 
 [dependencies]
 vespetrel-core = { path = "../vespetrel-core" }

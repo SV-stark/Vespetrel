@@ -32,9 +32,30 @@ impl MailProvider for ImapProvider {
         // Stub returns common folders
         debug!("sync_folder_list stub");
         Ok(vec![
-            RemoteFolder { remote_id: "INBOX".into(), name: "INBOX".into(), path: "INBOX".into(), role_hint: Some("\\Inbox".into()), uid_validity: Some(1), highest_mod_seq: Some(100) },
-            RemoteFolder { remote_id: "Sent".into(), name: "Sent".into(), path: "Sent".into(), role_hint: Some("\\Sent".into()), uid_validity: Some(1), highest_mod_seq: Some(50) },
-            RemoteFolder { remote_id: "Drafts".into(), name: "Drafts".into(), path: "Drafts".into(), role_hint: Some("\\Drafts".into()), uid_validity: Some(1), highest_mod_seq: Some(10) },
+            RemoteFolder {
+                remote_id: "INBOX".into(),
+                name: "INBOX".into(),
+                path: "INBOX".into(),
+                role_hint: Some("\\Inbox".into()),
+                uid_validity: Some(1),
+                highest_mod_seq: Some(100),
+            },
+            RemoteFolder {
+                remote_id: "Sent".into(),
+                name: "Sent".into(),
+                path: "Sent".into(),
+                role_hint: Some("\\Sent".into()),
+                uid_validity: Some(1),
+                highest_mod_seq: Some(50),
+            },
+            RemoteFolder {
+                remote_id: "Drafts".into(),
+                name: "Drafts".into(),
+                path: "Drafts".into(),
+                role_hint: Some("\\Drafts".into()),
+                uid_validity: Some(1),
+                highest_mod_seq: Some(10),
+            },
         ])
     }
 
@@ -43,18 +64,24 @@ impl MailProvider for ImapProvider {
         conn.connect().await?;
 
         // QRESYNC / CONDSTORE logic §4.2
-        // 1. Check UIDVALIDITY
-        if let Some(cached_validity) = state.folder_states.get(&folder.remote_id).and_then(|s| s.uid_validity) {
-            if let Some(remote_validity) = folder.uid_validity {
-                if cached_validity != remote_validity {
-                    return Err(anyhow::anyhow!(crate::ImapError::UidValidityChanged));
-                }
-            }
+        let cached_validity = state
+            .folder_states
+            .get(&folder.remote_id)
+            .and_then(|s| s.uid_validity);
+
+        if let (Some(cached), Some(remote)) = (cached_validity, folder.uid_validity)
+            && cached != remote
+        {
+            return Err(anyhow::anyhow!(crate::ImapError::UidValidityChanged));
         }
 
         // 2. If QRESYNC available, use CHANGEDSINCE
         let delta = if conn.has_capability("QRESYNC") {
-            let mod_seq = state.folder_states.get(&folder.remote_id).and_then(|s| s.highest_mod_seq).unwrap_or(0);
+            let mod_seq = state
+                .folder_states
+                .get(&folder.remote_id)
+                .and_then(|s| s.highest_mod_seq)
+                .unwrap_or(0);
             debug!(folder=%folder.name, mod_seq, "using QRESYNC CHANGEDSINCE");
             // Real: UID FETCH ... (CHANGEDSINCE mod_seq)
             SyncDelta::default()
@@ -75,7 +102,11 @@ impl MailProvider for ImapProvider {
         conn.connect().await?;
         debug!(remote_id, "fetch_raw_message stub");
         // Real: UID FETCH <uid> (BODY.PEEK[])
-        Ok(format!("From: stub@example.com\r\nSubject: Stub {}\r\n\r\nBody stub", remote_id).into_bytes())
+        Ok(format!(
+            "From: stub@example.com\r\nSubject: Stub {}\r\n\r\nBody stub",
+            remote_id
+        )
+        .into_bytes())
     }
 
     async fn send_message(&self, message: &ComposedMessage) -> anyhow::Result<()> {
@@ -85,11 +116,24 @@ impl MailProvider for ImapProvider {
         Ok(())
     }
 
-    async fn update_flags(&self, remote_ids: &[u32], add: &[Flag], remove: &[Flag]) -> anyhow::Result<()> {
+    async fn update_flags(
+        &self,
+        remote_ids: &[u32],
+        add: &[Flag],
+        remove: &[Flag],
+    ) -> anyhow::Result<()> {
         let mut conn = self.conn();
         conn.connect().await?;
-        let add_str = add.iter().map(|f| f.as_imap_str()).collect::<Vec<_>>().join(" ");
-        let rem_str = remove.iter().map(|f| f.as_imap_str()).collect::<Vec<_>>().join(" ");
+        let add_str = add
+            .iter()
+            .map(|f| f.as_imap_str())
+            .collect::<Vec<_>>()
+            .join(" ");
+        let rem_str = remove
+            .iter()
+            .map(|f| f.as_imap_str())
+            .collect::<Vec<_>>()
+            .join(" ");
         debug!(uids=?remote_ids, add=%add_str, remove=%rem_str, "UID STORE flags");
         // Real: UID STORE <set> +FLAGS (...) / -FLAGS (...)
         Ok(())

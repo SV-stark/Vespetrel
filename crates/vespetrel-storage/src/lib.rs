@@ -1,4 +1,4 @@
-﻿//! Vespetrel Storage - SQLite WAL + FTS5 + blob store
+//! Vespetrel Storage - SQLite WAL + FTS5 + blob store
 
 pub mod blob;
 pub mod db;
@@ -7,8 +7,8 @@ pub mod migrations;
 pub mod repo;
 
 pub use blob::BlobStore;
-pub use db::{create_pool, StoragePool, PRAGMAS};
-pub use fts::{search_messages, SearchResult};
+pub use db::{PRAGMAS, StoragePool, create_pool};
+pub use fts::{SearchResult, search_messages};
 
 use thiserror::Error;
 

@@ -1,9 +1,9 @@
-﻿[package]
+[package]
 name = "vespetrel-app"
-version = "0.1.0"
-edition = "2021"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
 description = "GPUI desktop frontend for Vespetrel - 3-pane layout, virtual list, reader, compose"
-license = "MIT OR Apache-2.0"
 
 [[bin]]
 name = "vespetrel"

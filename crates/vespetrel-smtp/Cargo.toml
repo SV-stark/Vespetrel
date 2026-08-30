@@ -1,9 +1,9 @@
-﻿[package]
+[package]
 name = "vespetrel-smtp"
-version = "0.1.0"
-edition = "2021"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
 description = "SMTP submission with lettre + mail-send + DKIM + XOAUTH2"
-license = "MIT OR Apache-2.0"
 
 [dependencies]
 vespetrel-core = { path = "../vespetrel-core" }

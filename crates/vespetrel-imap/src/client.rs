@@ -12,7 +12,12 @@ pub struct ImapConfig {
 }
 
 impl ImapConfig {
-    pub fn new(host: impl Into<String>, port: u16, username: impl Into<String>, auth_token: impl Into<String>) -> Self {
+    pub fn new(
+        host: impl Into<String>,
+        port: u16,
+        username: impl Into<String>,
+        auth_token: impl Into<String>,
+    ) -> Self {
         Self {
             host: host.into(),
             port,
@@ -39,7 +44,10 @@ pub struct ImapConnection {
 
 impl ImapConnection {
     pub fn new(config: ImapConfig) -> Self {
-        Self { config, capabilities: Vec::new() }
+        Self {
+            config,
+            capabilities: Vec::new(),
+        }
     }
 
     pub async fn connect(&mut self) -> anyhow::Result<()> {
@@ -63,13 +71,18 @@ impl ImapConnection {
     }
 
     pub fn has_capability(&self, cap: &str) -> bool {
-        self.capabilities.iter().any(|c| c.eq_ignore_ascii_case(cap))
+        self.capabilities
+            .iter()
+            .any(|c| c.eq_ignore_ascii_case(cap))
     }
 
     /// Build AUTHENTICATE XOAUTH2 payload (RFC 7628)
     pub fn build_xoauth2_payload(&self) -> String {
         use base64::Engine;
-        let payload = format!("user={}\x01auth=Bearer {}\x01\x01", self.config.username, self.config.auth_token);
+        let payload = format!(
+            "user={}\x01auth=Bearer {}\x01\x01",
+            self.config.username, self.config.auth_token
+        );
         base64::engine::general_purpose::STANDARD.encode(payload)
     }
 
@@ -80,6 +93,22 @@ impl ImapConnection {
 
     pub fn cmd_select(&self, mailbox: &str) -> String {
         format!("SELECT \"{}\"", mailbox.replace('"', "\\\""))
+    }
+
+    pub fn cmd_authenticate_xoauth2(&self) -> String {
+        format!("AUTHENTICATE XOAUTH2 {}", self.build_xoauth2_payload())
+    }
+
+    pub fn cmd_list(&self) -> &'static str {
+        "LIST \"\" \"*\""
+    }
+
+    pub fn cmd_uid_fetch_envelope(&self, range: &str) -> String {
+        format!("UID FETCH {range} (UID FLAGS RFC822.SIZE ENVELOPE)")
+    }
+
+    pub fn cmd_uid_fetch_rfc822(&self, uid: u32) -> String {
+        format!("UID FETCH {uid} (BODY.PEEK[])")
     }
 
     pub fn cmd_uid_fetch_changed_since(&self, _uid_next: u32, mod_seq: u64) -> String {
@@ -97,14 +126,37 @@ mod tests {
 
     #[test]
     fn xoauth2_payload() {
-        let cfg = ImapConfig::new("imap.gmail.com", 993, "user@gmail.com", "ya29.token").with_xoauth2();
+        let cfg =
+            ImapConfig::new("imap.gmail.com", 993, "user@gmail.com", "ya29.token").with_xoauth2();
         let conn = ImapConnection::new(cfg);
         let payload = conn.build_xoauth2_payload();
         assert!(!payload.is_empty());
         // decode and verify
         use base64::Engine;
-        let decoded = String::from_utf8(base64::engine::general_purpose::STANDARD.decode(&payload).unwrap()).unwrap();
+        let decoded = String::from_utf8(
+            base64::engine::general_purpose::STANDARD
+                .decode(&payload)
+                .unwrap(),
+        )
+        .unwrap();
         assert!(decoded.contains("user=user@gmail.com"));
         assert!(decoded.contains("auth=Bearer ya29.token"));
+    }
+
+    #[test]
+    fn imap_command_builders() {
+        let cfg =
+            ImapConfig::new("imap.gmail.com", 993, "user@gmail.com", "ya29.token").with_xoauth2();
+        let conn = ImapConnection::new(cfg);
+        assert!(
+            conn.cmd_authenticate_xoauth2()
+                .starts_with("AUTHENTICATE XOAUTH2 ")
+        );
+        assert_eq!(conn.cmd_list(), "LIST \"\" \"*\"");
+        assert_eq!(
+            conn.cmd_uid_fetch_envelope("1:50"),
+            "UID FETCH 1:50 (UID FLAGS RFC822.SIZE ENVELOPE)"
+        );
+        assert_eq!(conn.cmd_uid_fetch_rfc822(42), "UID FETCH 42 (BODY.PEEK[])");
     }
 }

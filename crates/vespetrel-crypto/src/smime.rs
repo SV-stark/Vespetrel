@@ -1,7 +1,9 @@
 pub struct SmimeEngine;
 
 impl SmimeEngine {
-    pub fn new() -> Self { Self }
+    pub fn new() -> Self {
+        Self
+    }
 
     pub fn verify(&self, _cms_data: &[u8]) -> anyhow::Result<bool> {
         // Real: use x509-cert + cms crates to validate chain
@@ -13,4 +15,8 @@ impl SmimeEngine {
     }
 }
 
-impl Default for SmimeEngine { fn default() -> Self { Self::new() } }
+impl Default for SmimeEngine {
+    fn default() -> Self {
+        Self::new()
+    }
+}

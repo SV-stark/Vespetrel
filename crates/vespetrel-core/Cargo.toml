@@ -1,9 +1,9 @@
-﻿[package]
+[package]
 name = "vespetrel-core"
-version = "0.1.0"
-edition = "2021"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
 description = "Domain models for Vespetrel - Account, Folder, Message, Thread, Contact"
-license = "MIT OR Apache-2.0"
 
 [dependencies]
 serde = { workspace = true }

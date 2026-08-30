@@ -1,4 +1,4 @@
-﻿//! Virtualized message list - 100k+ items, 120 FPS, dynamic row heights §6.1
+//! Virtualized message list - 100k+ items, 120 FPS, dynamic row heights §6.1
 
 use vespetrel_core::MessageSummary;
 
@@ -12,7 +12,11 @@ pub struct MessageListView {
 
 impl MessageListView {
     pub fn new(messages: Vec<MessageSummary>) -> Self {
-        Self { messages, viewport_start: 0, viewport_len: 50 }
+        Self {
+            messages,
+            viewport_start: 0,
+            viewport_len: 50,
+        }
     }
 
     pub fn set_viewport(&mut self, start: usize, len: usize) {
@@ -31,7 +35,11 @@ impl MessageListView {
                 // Splice at 0 - newest first, instant GPU redraw via cx.notify() in gpui
                 self.messages.splice(0..0, new_msgs);
             }
-            vespetrel_core::provider::SyncEvent::MessageFlagsUpdated { id, is_read, is_flagged } => {
+            vespetrel_core::provider::SyncEvent::MessageFlagsUpdated {
+                id,
+                is_read,
+                is_flagged,
+            } => {
                 if let Some(m) = self.messages.iter_mut().find(|m| m.id == id) {
                     m.is_read = is_read;
                     m.is_flagged = is_flagged;
@@ -45,7 +53,10 @@ impl MessageListView {
     }
 
     /// For non-gpui builds: simulate tokio->gpui bridge pattern from spec §6.2
-    pub fn spawn_bridge(mut self, mut rx: tokio::sync::mpsc::UnboundedReceiver<vespetrel_core::provider::SyncEvent>) -> tokio::task::JoinHandle<Self> {
+    pub fn spawn_bridge(
+        mut self,
+        mut rx: tokio::sync::mpsc::UnboundedReceiver<vespetrel_core::provider::SyncEvent>,
+    ) -> tokio::task::JoinHandle<Self> {
         tokio::spawn(async move {
             while let Some(ev) = rx.recv().await {
                 self.handle_sync_event(ev);

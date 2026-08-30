@@ -26,9 +26,21 @@ impl ParsedMail {
         let from = msg.from().and_then(|a| a.first()).map(|addr| {
             let name = addr.name.as_deref().unwrap_or("");
             let email = addr.address.as_deref().unwrap_or("");
-            if name.is_empty() { email.to_string() } else { format!("{name} <{email}>") }
+            if name.is_empty() {
+                email.to_string()
+            } else {
+                format!("{name} <{email}>")
+            }
         });
-        let to = msg.to().map(|addrs| addrs.iter().map(|a| a.address.as_deref().unwrap_or("").to_string()).collect()).unwrap_or_default();
+        let to = msg
+            .to()
+            .map(|addrs| {
+                addrs
+                    .iter()
+                    .map(|a| a.address.as_deref().unwrap_or("").to_string())
+                    .collect()
+            })
+            .unwrap_or_default();
         let date = msg.date().map(|d| d.to_rfc3339());
         let text_body = msg.body_text(0).map(|cow| cow.into_owned());
         let html_body = msg.body_html(0).map(|cow| cow.into_owned());
@@ -51,7 +63,15 @@ impl ParsedMail {
             })
             .collect::<Vec<_>>();
 
-        Some(Self { subject, from, to, date, text_body, html_body, attachments })
+        Some(Self {
+            subject,
+            from,
+            to,
+            date,
+            text_body,
+            html_body,
+            attachments,
+        })
     }
 
     /// Best body for rendering: sanitized HTML if present, else text
@@ -69,5 +89,7 @@ impl ParsedMail {
 }
 
 fn html_escape(s: &str) -> String {
-    s.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;")
+    s.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
 }

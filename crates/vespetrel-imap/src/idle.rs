@@ -21,7 +21,10 @@ pub struct IdleLoop {
 
 impl IdleLoop {
     pub fn new() -> Self {
-        Self { state: IdleState::Active, renew_interval: Duration::from_secs(25 * 60) }
+        Self {
+            state: IdleState::Active,
+            renew_interval: Duration::from_secs(25 * 60),
+        }
     }
 
     /// Logic for handling server EXISTS / FETCH / EXPUNGE untagged responses
@@ -44,7 +47,9 @@ impl IdleLoop {
 }
 
 impl Default for IdleLoop {
-    fn default() -> Self { Self::new() }
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 #[derive(Debug, Clone)]

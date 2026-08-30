@@ -1,4 +1,4 @@
-﻿use std::path::{Path, PathBuf};
+use std::path::{Path, PathBuf};
 
 /// Compressed blob store for raw RFC822 and attachments - § local storage layer
 /// Uses lz4_flex for fast compression (zstd available for archival)
@@ -59,7 +59,7 @@ impl BlobStore {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
         }
-        let compressed = zstd::encode_all(data, 3).map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
+        let compressed = zstd::encode_all(data, 3).map_err(std::io::Error::other)?;
         std::fs::write(&path, compressed)?;
         Ok(path)
     }

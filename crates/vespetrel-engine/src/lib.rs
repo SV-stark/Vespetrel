@@ -11,12 +11,12 @@ pub use worker::{AccountWorker, WorkerCommand};
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Arc;
     use async_trait::async_trait;
-    use vespetrel_core::provider::{MailProvider, RemoteFolder, SyncDelta, SyncMessage};
-    use vespetrel_core::folder::Folder;
+    use std::sync::Arc;
     use vespetrel_core::account::SyncState;
+    use vespetrel_core::folder::Folder;
     use vespetrel_core::message::{ComposedMessage, Flag};
+    use vespetrel_core::provider::{MailProvider, RemoteFolder, SyncDelta, SyncMessage};
 
     struct MockProvider;
 
@@ -33,7 +33,11 @@ mod tests {
             }])
         }
 
-        async fn sync_messages(&self, _folder: &Folder, _state: SyncState) -> anyhow::Result<SyncDelta> {
+        async fn sync_messages(
+            &self,
+            _folder: &Folder,
+            _state: SyncState,
+        ) -> anyhow::Result<SyncDelta> {
             Ok(SyncDelta {
                 inserted: vec![SyncMessage {
                     remote_uid: 101,
@@ -45,9 +49,20 @@ mod tests {
             })
         }
 
-        async fn fetch_raw_message(&self, _remote_id: &str) -> anyhow::Result<Vec<u8>> { Ok(vec![]) }
-        async fn send_message(&self, _msg: &ComposedMessage) -> anyhow::Result<()> { Ok(()) }
-        async fn update_flags(&self, _uids: &[u32], _add: &[Flag], _rem: &[Flag]) -> anyhow::Result<()> { Ok(()) }
+        async fn fetch_raw_message(&self, _remote_id: &str) -> anyhow::Result<Vec<u8>> {
+            Ok(vec![])
+        }
+        async fn send_message(&self, _msg: &ComposedMessage) -> anyhow::Result<()> {
+            Ok(())
+        }
+        async fn update_flags(
+            &self,
+            _uids: &[u32],
+            _add: &[Flag],
+            _rem: &[Flag],
+        ) -> anyhow::Result<()> {
+            Ok(())
+        }
     }
 
     #[tokio::test]

@@ -10,7 +10,12 @@ use vespetrel_core::provider::{MailProvider, SyncEvent};
 pub enum WorkerCommand {
     SyncNow,
     Stop,
-    UpdateFlags { folder_remote_id: String, uids: Vec<u32>, add: Vec<vespetrel_core::message::Flag>, remove: Vec<vespetrel_core::message::Flag> },
+    UpdateFlags {
+        folder_remote_id: String,
+        uids: Vec<u32>,
+        add: Vec<vespetrel_core::message::Flag>,
+        remove: Vec<vespetrel_core::message::Flag>,
+    },
 }
 
 /// One Actor per account - §3.2 Sync Engine
@@ -85,42 +90,54 @@ impl AccountWorker {
         let folders = self.provider.sync_folder_list().await?;
         self.emit(SyncEvent::FolderListUpdated(folders.clone()));
 
-        // Persist folders to storage if pool is provided
-        if let Some(pool) = &self.storage_pool {
-            if let Ok(conn) = pool.get().await {
-                for rf in &folders {
-                    let folder_record = vespetrel_core::Folder::new(&self.account_id, &rf.remote_id, &rf.name, &rf.path);
-                    let _ = conn.interact(move |c| {
+        // Acquire connection from storage pool if available
+        let storage_conn = match &self.storage_pool {
+            Some(pool) => pool.get().await.ok(),
+            None => None,
+        };
+
+        // Persist folders to storage if connection available
+        if let Some(conn) = &storage_conn {
+            for rf in &folders {
+                let folder_record = vespetrel_core::Folder::new(
+                    &self.account_id,
+                    &rf.remote_id,
+                    &rf.name,
+                    &rf.path,
+                );
+                let _ = conn
+                    .interact(move |c| {
                         vespetrel_storage::repo::upsert_folder(c, &folder_record)
-                    }).await;
-                }
+                    })
+                    .await;
             }
         }
 
         for rf in &folders {
-            let folder_meta = vespetrel_core::Folder::new(&self.account_id, &rf.remote_id, &rf.name, &rf.path);
+            let folder_meta =
+                vespetrel_core::Folder::new(&self.account_id, &rf.remote_id, &rf.name, &rf.path);
             let state = vespetrel_core::account::SyncState::default();
             match self.provider.sync_messages(&folder_meta, state).await {
                 Ok(delta) => {
                     let mut summaries = Vec::new();
 
                     // Persist synced messages to storage
-                    if let Some(pool) = &self.storage_pool {
-                        if let Ok(conn) = pool.get().await {
-                            for sync_msg in &delta.inserted {
-                                let msg = vespetrel_core::Message::new(
-                                    &self.account_id,
-                                    &rf.remote_id,
-                                    sync_msg.remote_uid,
-                                    format!("Message {}", sync_msg.remote_uid),
-                                    "sender@example.com",
-                                    vec![self.account_id.clone()],
-                                );
-                                summaries.push(msg.summary());
-                                let _ = conn.interact(move |c| {
+                    if let Some(conn) = &storage_conn {
+                        for sync_msg in &delta.inserted {
+                            let msg = vespetrel_core::Message::new(
+                                &self.account_id,
+                                &rf.remote_id,
+                                sync_msg.remote_uid,
+                                format!("Message {}", sync_msg.remote_uid),
+                                "sender@example.com",
+                                vec![self.account_id.clone()],
+                            );
+                            summaries.push(msg.summary());
+                            let _ = conn
+                                .interact(move |c| {
                                     vespetrel_storage::repo::insert_message(c, &msg)
-                                }).await;
-                            }
+                                })
+                                .await;
                         }
                     } else {
                         // In memory summaries for mock/test runs
@@ -142,17 +159,23 @@ impl AccountWorker {
                     }
 
                     if !delta.deleted_uids.is_empty() {
-                        let deleted_ids = delta.deleted_uids.iter().map(|u| u.to_string()).collect();
+                        let deleted_ids =
+                            delta.deleted_uids.iter().map(|u| u.to_string()).collect();
                         self.emit(SyncEvent::MessagesDeleted(deleted_ids));
                     }
                 }
                 Err(e) => {
                     warn!(folder=%rf.name, error=%e, "folder sync failed");
-                    self.emit(SyncEvent::SyncError{ folder: rf.name.clone(), error: e.to_string() });
+                    self.emit(SyncEvent::SyncError {
+                        folder: rf.name.clone(),
+                        error: e.to_string(),
+                    });
                 }
             }
         }
-        self.emit(SyncEvent::SyncFinished{ account_id: self.account_id.clone() });
+        self.emit(SyncEvent::SyncFinished {
+            account_id: self.account_id.clone(),
+        });
         Ok(())
     }
 

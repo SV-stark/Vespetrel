@@ -1,5 +1,5 @@
-﻿use chrono::{DateTime, Utc};
-use rusqlite::{params, Connection, OptionalExtension};
+use chrono::{DateTime, Utc};
+use rusqlite::{Connection, OptionalExtension, params};
 
 use vespetrel_core::{Account, Folder, Message};
 
@@ -81,7 +81,9 @@ pub fn list_folders(conn: &Connection, account_id: &str) -> anyhow::Result<Vec<F
             remote_id: row.get(2)?,
             name: row.get(3)?,
             path: row.get(4)?,
-            role: role_str.parse().unwrap_or(vespetrel_core::FolderRole::Custom),
+            role: role_str
+                .parse()
+                .unwrap_or(vespetrel_core::FolderRole::Custom),
             uid_validity: row.get::<_, Option<i64>>(6)?.map(|v| v as u32),
             highest_mod_seq: row.get::<_, Option<i64>>(7)?.map(|v| v as u64),
             total_count: row.get(8)?,
@@ -91,7 +93,11 @@ pub fn list_folders(conn: &Connection, account_id: &str) -> anyhow::Result<Vec<F
     rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
 }
 
-pub fn get_folder(conn: &Connection, account_id: &str, remote_id: &str) -> anyhow::Result<Option<Folder>> {
+pub fn get_folder(
+    conn: &Connection,
+    account_id: &str,
+    remote_id: &str,
+) -> anyhow::Result<Option<Folder>> {
     let mut stmt = conn.prepare("SELECT id, account_id, remote_id, name, path, role, uid_validity, highest_mod_seq, total_count, unread_count FROM folders WHERE account_id = ?1 AND remote_id = ?2")?;
     stmt.query_row(params![account_id, remote_id], |row| {
         let role_str: String = row.get(5)?;
@@ -101,7 +107,9 @@ pub fn get_folder(conn: &Connection, account_id: &str, remote_id: &str) -> anyho
             remote_id: row.get(2)?,
             name: row.get(3)?,
             path: row.get(4)?,
-            role: role_str.parse().unwrap_or(vespetrel_core::FolderRole::Custom),
+            role: role_str
+                .parse()
+                .unwrap_or(vespetrel_core::FolderRole::Custom),
             uid_validity: row.get::<_, Option<i64>>(6)?.map(|v| v as u32),
             highest_mod_seq: row.get::<_, Option<i64>>(7)?.map(|v| v as u64),
             total_count: row.get(8)?,
@@ -149,7 +157,12 @@ pub fn insert_message(conn: &Connection, msg: &Message) -> anyhow::Result<()> {
     Ok(())
 }
 
-pub fn list_messages_in_folder(conn: &Connection, folder_id: &str, limit: usize, offset: usize) -> anyhow::Result<Vec<Message>> {
+pub fn list_messages_in_folder(
+    conn: &Connection,
+    folder_id: &str,
+    limit: usize,
+    offset: usize,
+) -> anyhow::Result<Vec<Message>> {
     let mut stmt = conn.prepare(
         "SELECT id, account_id, folder_id, thread_id, remote_uid, message_id_header, in_reply_to, subject, from_address, from_name, to_addresses, cc_addresses, bcc_addresses, reply_to, sent_at, received_at, is_read, is_flagged, is_draft, has_attachments, body_snippet, body_text_preview, blob_path, size_bytes FROM messages WHERE folder_id = ?1 ORDER BY sent_at DESC LIMIT ?2 OFFSET ?3"
     )?;
@@ -168,9 +181,12 @@ pub fn list_messages_in_folder(conn: &Connection, folder_id: &str, limit: usize,
             to_addresses: serde_json::from_str(&row.get::<_, String>(10)?).unwrap_or_default(),
             cc_addresses: serde_json::from_str(&row.get::<_, String>(11)?).unwrap_or_default(),
             bcc_addresses: serde_json::from_str(&row.get::<_, String>(12)?).unwrap_or_default(),
-            reply_to: row.get::<_, Option<String>>(13)?.and_then(|s| serde_json::from_str(&s).ok()),
+            reply_to: row
+                .get::<_, Option<String>>(13)?
+                .and_then(|s| serde_json::from_str(&s).ok()),
             sent_at: DateTime::from_timestamp(row.get::<_, i64>(14)?, 0).unwrap_or_else(Utc::now),
-            received_at: DateTime::from_timestamp(row.get::<_, i64>(15)?, 0).unwrap_or_else(Utc::now),
+            received_at: DateTime::from_timestamp(row.get::<_, i64>(15)?, 0)
+                .unwrap_or_else(Utc::now),
             is_read: row.get::<_, i64>(16)? != 0,
             is_flagged: row.get::<_, i64>(17)? != 0,
             is_draft: row.get::<_, i64>(18)? != 0,

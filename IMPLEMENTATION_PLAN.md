@@ -380,29 +380,33 @@ impl MessageListView {
 ┌────────────────────────────────────────────────────────────────────────┐
 │                        DEVELOPMENT ROADMAP                             │
 │                                                                        │
-│  Phase 0: Storage Core & Search Engine (COMPLETE)                      │
-│  ├── [x] Rusqlite schema + FTS5 full-text indexing                     │
+│  Phase 0: Storage Core, Search Engine & Edition 2024 (COMPLETE)        │
+│  ├── [x] Full workspace migration to Rust 2024 Edition                 │
+│  ├── [x] Rusqlite schema + FTS5 indexing + _schema_migrations tracking │
 │  ├── [x] Zero-copy stalwartlabs/mail-parser MIME pipeline              │
-│  └── [x] Compressed raw message blob store (lz4_flex)                  │
+│  └── [x] Compressed raw message blob store (lz4_flex + zstd)           │
 │                                                                        │
 │  Phase 1: GPUI 3-Pane UI Shell & Reader (IN PROGRESS)                  │
 │  ├── [x] 3-Pane dock state model & view logic                          │
 │  ├── [x] HTML sanitizer (ammonia) & tracker stripper (lol_html)        │
+│  ├── [x] Sandboxed HTML viewport with Content-Security-Policy (CSP)    │
 │  ├── [ ] 120 FPS Virtualized message list (gpui-component)             │
 │  └── [ ] Sandboxed HTML message reader (wry webview)                   │
 │                                                                        │
-│  Phase 2: Authentication, Multi-Provider & Sending (FOUNDATION BUILT)  │
-│  ├── [x] OAuth2 PKCE engine (Google, Microsoft Entra ID)               │
+│  Phase 2: Authentication, Multi-Provider & Sending (GMAIL READY)       │
+│  ├── [x] OAuth2 PKCE engine + Loopback TCP server (127.0.0.1:8989)     │
+│  ├── [x] Google OAuth2 access token auto-refresh routine               │
 │  ├── [x] OS Keyring token storage (keyring-rs v3)                      │
-│  ├── [x] Tokio Actor IMAP sync engine (IDLE, QRESYNC, CONDSTORE)       │
+│  ├── [x] Tokio Account Worker actors with SQLite pool persistence      │
+│  ├── [x] IMAP IDLE state machine, QRESYNC/CONDSTORE & XOAUTH2 commands │
 │  ├── [x] JMAP client adapter (Fastmail / Stalwart RFC 8620/8621)       │
 │  ├── [x] Microsoft Graph REST engine (Exchange Online)                 │
-│  ├── [x] SMTP submit engine (lettre + mail-send + DKIM)                │
+│  ├── [x] SMTP submit engine + Lettre live relay (send_live)            │
 │  └── [ ] Interactive GUI login wizard modal & compose view             │
 │                                                                        │
 │  Phase 3: PIM (Calendar, Contacts, Tasks) & Encryption                 │
 │  ├── [x] CalDAV / CardDAV sync client foundation (libdav, icalendar)   │
-│  ├── [x] rPGP OpenPGP (RFC 9580) & Autocrypt 1.1 engine scaffolding    │
+│  ├── [x] rPGP OpenPGP armor detector & Autocrypt 1.1 engine            │
 │  └── [ ] Calendar grid views & contact address book                    │
 │                                                                        │
 │  Phase 4: Polish, Windows Hardening & Distribution                     │
@@ -432,6 +436,11 @@ members = [
     "crates/vespetrel-crypto",
     "crates/vespetrel-render",
 ]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "MIT OR Apache-2.0"
 
 [workspace.dependencies]
 # Async & Runtime
