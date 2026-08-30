@@ -33,7 +33,7 @@ anyhow = "1.0"
 # Database & Storage
 rusqlite = { version = "0.31", features = ["bundled", "chrono", "serde_json"] }
 deadpool-sqlite = "0.8"
-lz4_flex = "0.11"
+lz4_flex = "0.14"
 zstd = "0.13"
 
 # Mail & Protocols
