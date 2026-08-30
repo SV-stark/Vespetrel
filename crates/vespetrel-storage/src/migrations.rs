@@ -177,6 +177,18 @@ pub fn run_migrations(conn: &Connection) -> anyhow::Result<()> {
                 email TEXT NOT NULL,
                 vcard_data TEXT
             );
+
+            CREATE TABLE IF NOT EXISTS tasks (
+                id TEXT PRIMARY KEY,
+                calendar_id TEXT NOT NULL REFERENCES calendars(id) ON DELETE CASCADE,
+                ical_uid TEXT,
+                title TEXT NOT NULL,
+                description TEXT,
+                due_at INTEGER,
+                is_completed INTEGER NOT NULL DEFAULT 0,
+                completed_at INTEGER,
+                priority INTEGER NOT NULL DEFAULT 0
+            );
             "#,
         )?;
 

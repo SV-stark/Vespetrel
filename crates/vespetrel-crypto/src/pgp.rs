@@ -12,6 +12,58 @@ pub enum PgpError {
     InvalidArmor(String),
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AutocryptHeader {
+    pub addr: String,
+    pub prefer_encrypt: String,
+    pub keydata: String,
+}
+
+impl AutocryptHeader {
+    /// Parse RFC-compliant Autocrypt 1.1 header (e.g. `addr=alice@example.com; prefer-encrypt=mutual; keydata=mQEN...`)
+    pub fn parse(header_val: &str) -> Result<Self, PgpError> {
+        let mut addr = None;
+        let mut prefer_encrypt = "nopreference".to_string();
+        let mut keydata = None;
+
+        for part in header_val.split(';') {
+            let part = part.trim();
+            if let Some((k, v)) = part.split_once('=') {
+                let k = k.trim();
+                let v = v.trim();
+                match k {
+                    "addr" => addr = Some(v.to_string()),
+                    "prefer-encrypt" => prefer_encrypt = v.to_string(),
+                    "keydata" => keydata = Some(v.to_string()),
+                    _ => {}
+                }
+            }
+        }
+
+        match (addr, keydata) {
+            (Some(addr), Some(keydata)) => Ok(Self {
+                addr,
+                prefer_encrypt,
+                keydata,
+            }),
+            (None, _) => Err(PgpError::InvalidArmor(
+                "missing addr in Autocrypt header".into(),
+            )),
+            (_, None) => Err(PgpError::InvalidArmor(
+                "missing keydata in Autocrypt header".into(),
+            )),
+        }
+    }
+
+    /// Format as standard Autocrypt RFC header string
+    pub fn to_header_value(&self) -> String {
+        format!(
+            "addr={}; prefer-encrypt={}; keydata={}",
+            self.addr, self.prefer_encrypt, self.keydata
+        )
+    }
+}
+
 pub struct PgpEngine;
 
 impl PgpEngine {
@@ -101,5 +153,15 @@ mod tests {
         assert!(header.contains("addr=alice@example.com"));
         assert!(header.contains("prefer-encrypt=mutual"));
         assert!(header.contains("keydata=mQENBF..."));
+    }
+
+    #[test]
+    fn test_autocrypt_parse_roundtrip() {
+        let header_str = "addr=bob@example.com; prefer-encrypt=mutual; keydata=AAAA_KEY_DATA";
+        let parsed = AutocryptHeader::parse(header_str).unwrap();
+        assert_eq!(parsed.addr, "bob@example.com");
+        assert_eq!(parsed.prefer_encrypt, "mutual");
+        assert_eq!(parsed.keydata, "AAAA_KEY_DATA");
+        assert_eq!(parsed.to_header_value(), header_str);
     }
 }

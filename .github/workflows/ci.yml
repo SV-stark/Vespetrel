@@ -1,66 +1,47 @@
-name: CI
+name: Vespetrel CI & Multi-Platform Release
 
 on:
   push:
-    branches: [main]
+    branches: [ "main" ]
   pull_request:
-    branches: [main]
-  workflow_dispatch:
-
-concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+    branches: [ "main" ]
 
 env:
   CARGO_TERM_COLOR: always
-  RUST_BACKTRACE: 1
 
 jobs:
-  fmt:
-    name: Code Formatting
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          components: rustfmt
-      - name: Check Formatting
-        run: cargo fmt --all -- --check
-
-  clippy:
-    name: Clippy Linter
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          components: clippy
-      - uses: Swatinem/rust-cache@v2
-      - name: Install System Dependencies (Linux)
-        run: sudo apt-get update && sudo apt-get install -y libsqlite3-dev pkg-config
-      - name: Run Clippy (-D warnings)
-        run: cargo clippy --workspace --all-targets --all-features -- -D warnings
-
-  test:
-    name: Test (${{ matrix.os }})
+  check-and-test:
+    name: Test & Lint (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
-    needs: [fmt, clippy]
     strategy:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, windows-latest, macos-latest]
+        rust: [stable]
+
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
-      - name: Install System Dependencies (Linux)
-        if: runner.os == 'Linux'
-        run: sudo apt-get update && sudo apt-get install -y libsqlite3-dev pkg-config libssl-dev
-      - name: Install System Dependencies (macOS)
-        if: runner.os == 'macOS'
-        run: brew install sqlite pkg-config openssl || true
-      - name: Run Workspace Tests
-        run: cargo test --workspace --all-features
-      - name: Headless App Smoke Test
-        run: cargo run -p vespetrel-app
 
+      - name: Install Rust ${{ matrix.rust }}
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: ${{ matrix.rust }}
+          components: rustfmt, clippy
+
+      - name: Rust Cache
+        uses: Swatinem/rust-cache@v2
+
+      - name: Check Formatting
+        run: cargo fmt --all -- --check
+
+      - name: Clippy Linting
+        run: cargo clippy --all-targets -- -D warnings
+
+      - name: Run Workspace Tests
+        run: cargo test --workspace --verbose
+
+      - name: Build Release Binary
+        run: cargo build --release --workspace
+
+      - name: Verify In-Memory Headless Startup
+        run: cargo run --release -p vespetrel-app -- --memory

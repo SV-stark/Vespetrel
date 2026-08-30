@@ -15,6 +15,8 @@ pub struct SmtpConfig {
     pub dkim_key: Option<String>,
     pub dkim_selector: Option<String>,
     pub dkim_domain: Option<String>,
+    /// Autocrypt 1.1 Header value (optional)
+    pub autocrypt_header: Option<String>,
 }
 
 impl SmtpConfig {
@@ -34,6 +36,7 @@ impl SmtpConfig {
             dkim_key: None,
             dkim_selector: None,
             dkim_domain: None,
+            autocrypt_header: None,
         }
     }
     pub fn with_xoauth2(mut self) -> Self {
@@ -49,6 +52,10 @@ impl SmtpConfig {
         self.dkim_domain = Some(domain.into());
         self.dkim_selector = Some(selector.into());
         self.dkim_key = Some(key.into());
+        self
+    }
+    pub fn with_autocrypt(mut self, header_val: impl Into<String>) -> Self {
+        self.autocrypt_header = Some(header_val.into());
         self
     }
 }
@@ -89,6 +96,12 @@ impl SmtpClient {
         for bcc in &msg.bcc {
             let addr: lettre::Address = bcc.email.parse()?;
             builder = builder.bcc(lettre::message::Mailbox::new(bcc.name.clone(), addr));
+        }
+
+        if let Some(autocrypt) = &self.config.autocrypt_header {
+            let name = lettre::message::header::HeaderName::new_from_ascii_str("Autocrypt");
+            let val = lettre::message::header::HeaderValue::new(name, autocrypt.clone());
+            builder = builder.raw_header(val);
         }
 
         let body = if let Some(html) = &msg.body_html {
@@ -143,5 +156,42 @@ impl SmtpClient {
         transport.send(email).await?;
         info!(subject=%msg.subject, "SMTP message delivered successfully");
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use vespetrel_core::message::Address;
+
+    #[test]
+    fn test_smtp_build_message_with_autocrypt() {
+        let config = SmtpConfig::new("smtp.example.com", 587, "alice", "token")
+            .with_autocrypt("addr=alice@example.com; prefer-encrypt=mutual; keydata=mQEN...");
+        let client = SmtpClient::new(config);
+
+        let msg = ComposedMessage {
+            from: Address {
+                name: Some("Alice".into()),
+                email: "alice@example.com".into(),
+            },
+            to: vec![Address {
+                name: Some("Bob".into()),
+                email: "bob@example.com".into(),
+            }],
+            cc: Vec::new(),
+            bcc: Vec::new(),
+            subject: "Encrypted discussion".into(),
+            body_text: "Hello Bob".into(),
+            body_html: None,
+            in_reply_to: None,
+            references: Vec::new(),
+            attachments: Vec::new(),
+        };
+
+        let formatted = client.build_rfc822(&msg).unwrap();
+        let raw_str = String::from_utf8_lossy(&formatted);
+        assert!(raw_str.contains("Autocrypt: addr=alice@example.com"));
+        assert!(raw_str.contains("Subject: Encrypted discussion"));
     }
 }

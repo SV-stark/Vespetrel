@@ -5,4 +5,5 @@ pub mod login_wizard;
 pub mod message_list;
 pub mod message_viewer;
 pub mod navigation;
+pub mod tasks;
 pub mod workspace;

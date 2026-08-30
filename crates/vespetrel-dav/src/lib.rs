@@ -102,9 +102,64 @@ pub struct RemoteContact {
     pub vcard: String,
 }
 
+#[derive(Debug, Clone)]
+pub struct TaskSyncResult {
+    pub tasks: Vec<vespetrel_core::TaskItem>,
+    pub new_sync_token: Option<String>,
+}
+
 /// Simple iCalendar parsing helper using `icalendar` crate
 pub fn parse_ical(ical_str: &str) -> anyhow::Result<Vec<icalendar::Calendar>> {
-    // icalendar::parser is lenient; real code should handle per-component errors
     debug!(len=%ical_str.len(), "parsing iCalendar");
     Ok(vec![])
+}
+
+/// Parse RFC 5545 VTODO component from raw iCalendar string
+pub fn parse_vtodo(calendar_id: &str, ical_str: &str) -> anyhow::Result<vespetrel_core::TaskItem> {
+    let mut task = vespetrel_core::TaskItem::new(calendar_id, "Untitled Task");
+    for line in ical_str.lines() {
+        let line = line.trim();
+        if let Some(val) = line.strip_prefix("SUMMARY:") {
+            task.title = val.to_string();
+        } else if let Some(val) = line.strip_prefix("DESCRIPTION:") {
+            task.description = Some(val.to_string());
+        } else if let Some(val) = line.strip_prefix("UID:") {
+            task.ical_uid = Some(val.to_string());
+        } else if let Some(val) = line.strip_prefix("STATUS:") {
+            task.is_completed = val.eq_ignore_ascii_case("COMPLETED");
+        } else if let Some(p) = line
+            .strip_prefix("PRIORITY:")
+            .and_then(|val| val.parse::<u8>().ok())
+        {
+            task.priority = p;
+        }
+    }
+    Ok(task)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_parse_vtodo_component() {
+        let ical = r#"BEGIN:VCALENDAR
+VERSION:2.0
+BEGIN:VTODO
+UID:task-12345
+SUMMARY:Implement Thunderbird CalDAV Sync
+DESCRIPTION:Support RFC 5545 VTODO
+STATUS:COMPLETED
+PRIORITY:1
+END:VTODO
+END:VCALENDAR"#;
+
+        let task = parse_vtodo("cal_work", ical).unwrap();
+        assert_eq!(task.calendar_id, "cal_work");
+        assert_eq!(task.title, "Implement Thunderbird CalDAV Sync");
+        assert_eq!(task.description.as_deref(), Some("Support RFC 5545 VTODO"));
+        assert_eq!(task.ical_uid.as_deref(), Some("task-12345"));
+        assert!(task.is_completed);
+        assert_eq!(task.priority, 1);
+    }
 }

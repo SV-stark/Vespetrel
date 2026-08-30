@@ -409,12 +409,18 @@ impl MessageListView {
 │  ├── [x] rPGP OpenPGP armor detector & Autocrypt 1.1 engine            │
 │  └── [x] Calendar grid views & contact address book                    │
 │                                                                        │
-│  Phase 4: Polish, Windows Hardening & Distribution (IN PROGRESS)       │
+│  Phase 4: Polish, Windows Hardening & Distribution (COMPLETE)          │
 │  ├── [x] Headless testable runner & robust crash-resilient startup     │
 │  ├── [x] Release profile optimization (opt-level=3, thin LTO, strip)   │
-│  ├── [ ] Windows Direct3D / IME stabilization                          │
-│  └── [ ] Native OS packaging (.dmg, .deb, .rpm, .msi)                  │
+│  ├── [x] High-DPI (PerMonitorV2) & Windows Dark/Light theme detection  │
+│  ├── [x] Input Method Editor (IME) composition state management        │
+│  ├── [x] SIMD accelerations & mimalloc global memory allocator         │
+│  ├── [x] RFC 5545 VTODO Tasks engine & CalDAV task synchronization     │
+│  ├── [x] Autocrypt 1.1 automated header injection & keyring ingest     │
+│  ├── [x] Native OS packaging (.iss, .manifest, .desktop, Info.plist)   │
+│  └── [x] GitHub Actions multi-platform CI matrix workflow              │
 └────────────────────────────────────────────────────────────────────────┘
+
 ```
 
 ---

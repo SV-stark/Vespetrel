@@ -1,6 +1,7 @@
-﻿//! Vespetrel App - GPUI frontend library (re-exports views for bin)
+//! Vespetrel App - GPUI frontend library (re-exports views for bin)
 
 pub mod app;
+pub mod platform;
 pub mod state;
 pub mod views;
 

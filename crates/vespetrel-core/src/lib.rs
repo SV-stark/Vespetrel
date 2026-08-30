@@ -11,8 +11,9 @@ pub mod thread;
 
 pub use account::{Account, AuthConfig, ProviderType, SyncState};
 pub use attachment::Attachment;
-pub use contact::{CalendarEvent, Contact};
+pub use contact::{CalendarEvent, Contact, TaskItem};
 pub use error::{CoreError, CoreResult};
+
 pub use folder::{Folder, FolderRole};
 pub use message::{Address, ComposedAttachment, ComposedMessage, Flag, Message, MessageSummary};
 pub use provider::{MailProvider, RemoteFolder, SyncDelta, SyncEvent};

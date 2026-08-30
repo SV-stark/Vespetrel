@@ -45,7 +45,11 @@ async fn main() -> anyhow::Result<()> {
     println!("Vespetrel - Pure Rust gpui Mail Client v0.1.0");
     println!("Storage: SQLite WAL + FTS5 | Engine: Tokio Sync | Render: ammonia+lol_html");
 
+    // Initialize platform hardening (High-DPI, OS Theme)
+    vespetrel_app::platform::init_platform();
+
     // Initialize storage schema
+
     let app = vespetrel_app::app::VespetrelApp::new(&db_path);
     if let Err(e) = app.init_storage().await {
         eprintln!("Failed to initialize database storage: {e}");

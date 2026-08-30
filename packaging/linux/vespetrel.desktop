@@ -1,0 +1,17 @@
+[Desktop Entry]
+Name=Vespetrel
+GenericName=Mail & PIM Client
+Comment=Pure Rust High-Performance Thunderbird-Parity Email Client
+Exec=vespetrel %u
+Icon=vespetrel
+Terminal=false
+Type=Application
+Categories=Network;Email;Office;ContactManagement;News;
+MimeType=x-scheme-handler/mailto;message/rfc822;x-scheme-handler/mid;
+Keywords=email;mail;imap;jmap;smtp;exchange;calendar;contacts;tasks;pgp;
+StartupWMClass=vespetrel
+Actions=Compose;
+
+[Desktop Action Compose]
+Name=Compose New Message
+Exec=vespetrel --compose

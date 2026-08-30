@@ -349,11 +349,83 @@ pub fn list_calendar_events(
     rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
 }
 
+pub fn upsert_task(conn: &Connection, task: &vespetrel_core::TaskItem) -> anyhow::Result<()> {
+    conn.execute(
+        r#"INSERT INTO tasks (id, calendar_id, ical_uid, title, description, due_at, is_completed, completed_at, priority)
+           VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+           ON CONFLICT(id) DO UPDATE SET
+             title=excluded.title, description=excluded.description, due_at=excluded.due_at,
+             is_completed=excluded.is_completed, completed_at=excluded.completed_at, priority=excluded.priority"#,
+        params![
+            task.id,
+            task.calendar_id,
+            task.ical_uid,
+            task.title,
+            task.description,
+            task.due_at.map(|d| d.timestamp()),
+            if task.is_completed { 1 } else { 0 },
+            task.completed_at.map(|d| d.timestamp()),
+            task.priority,
+        ],
+    )?;
+    Ok(())
+}
+
+pub fn list_tasks(
+    conn: &Connection,
+    calendar_id: &str,
+) -> anyhow::Result<Vec<vespetrel_core::TaskItem>> {
+    let mut stmt = conn.prepare(
+        "SELECT id, calendar_id, ical_uid, title, description, due_at, is_completed, completed_at, priority FROM tasks WHERE calendar_id = ?1 ORDER BY is_completed ASC, due_at ASC",
+    )?;
+    let rows = stmt.query_map(params![calendar_id], |row| {
+        let is_completed_int: i64 = row.get(6)?;
+        Ok(vespetrel_core::TaskItem {
+            id: row.get(0)?,
+            calendar_id: row.get(1)?,
+            ical_uid: row.get(2)?,
+            title: row.get(3)?,
+            description: row.get(4)?,
+            due_at: row
+                .get::<_, Option<i64>>(5)?
+                .and_then(|ts| DateTime::from_timestamp(ts, 0)),
+            is_completed: is_completed_int != 0,
+            completed_at: row
+                .get::<_, Option<i64>>(7)?
+                .and_then(|ts| DateTime::from_timestamp(ts, 0)),
+            priority: row.get::<_, u8>(8)?,
+        })
+    })?;
+    rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+}
+
+pub fn toggle_task_completion(
+    conn: &Connection,
+    id: &str,
+    is_completed: bool,
+) -> anyhow::Result<()> {
+    let now = if is_completed {
+        Some(Utc::now().timestamp())
+    } else {
+        None
+    };
+    conn.execute(
+        "UPDATE tasks SET is_completed = ?1, completed_at = ?2 WHERE id = ?3",
+        params![if is_completed { 1 } else { 0 }, now, id],
+    )?;
+    Ok(())
+}
+
+pub fn delete_task(conn: &Connection, id: &str) -> anyhow::Result<()> {
+    conn.execute("DELETE FROM tasks WHERE id = ?1", params![id])?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::db::open_in_memory;
-    use vespetrel_core::{Account, Contact, Folder, Message};
+    use vespetrel_core::{Account, Contact, Folder, Message, TaskItem};
 
     #[test]
     fn test_repo_crud() {
@@ -413,5 +485,25 @@ mod tests {
         delete_message(&conn, &msg.id).unwrap();
         let empty_msgs = list_messages_in_folder(&conn, &folder.id, 10, 0).unwrap();
         assert_eq!(empty_msgs.len(), 0);
+
+        // 7. Calendar and Tasks
+        conn.execute(
+            "INSERT INTO calendars (id, account_id, remote_id, name) VALUES ('cal1', ?1, 'r1', 'Personal')",
+            params![acct.id],
+        ).unwrap();
+
+        let task = TaskItem::new("cal1", "Implement Vespetrel Tasks");
+        upsert_task(&conn, &task).unwrap();
+        let tasks = list_tasks(&conn, "cal1").unwrap();
+        assert_eq!(tasks.len(), 1);
+        assert_eq!(tasks[0].title, "Implement Vespetrel Tasks");
+        assert!(!tasks[0].is_completed);
+
+        toggle_task_completion(&conn, &task.id, true).unwrap();
+        let completed = list_tasks(&conn, "cal1").unwrap();
+        assert!(completed[0].is_completed);
+
+        delete_task(&conn, &task.id).unwrap();
+        assert_eq!(list_tasks(&conn, "cal1").unwrap().len(), 0);
     }
 }
