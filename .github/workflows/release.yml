@@ -31,7 +31,7 @@ jobs:
       - name: Build Windows Binary
         run: cargo build --release --bin vespetrel
 
-      - name: Package Standalone Zip
+      - name: Stage Distribution Files
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Force -Path dist
@@ -42,25 +42,24 @@ jobs:
           Compress-Archive -Path staging\vespetrel\* -DestinationPath dist\vespetrel-windows-x86_64.zip -Force
 
       - name: Build Windows Setup Installer (NSIS)
+        uses: joncloud/makensis-action@v4
+        with:
+          script-file: .github/installer.nsi
+          arguments: "/V4"
+
+      - name: Verify Installer Artifact
         shell: pwsh
         run: |
-          if (!(Get-Command makensis -ErrorAction SilentlyContinue)) {
-            $nsisDefault = "C:\Program Files (x86)\NSIS\makensis.exe"
-            if (Test-Path $nsisDefault) {
-              Set-Alias -Name makensis -Value $nsisDefault
-            } else {
-              choco install nsis -y --no-progress
-              $env:PATH += ";C:\Program Files (x86)\NSIS"
-            }
+          if (-not (Test-Path dist\vespetrel-setup-windows-x86_64.exe)) {
+            throw "Expected dist\vespetrel-setup-windows-x86_64.exe was not created"
           }
-          makensis .github/installer.nsi
-          Copy-Item vespetrel-setup-windows-x86_64.exe dist\
+          Get-Item dist\vespetrel-setup-windows-x86_64.exe | Select-Object Name, Length
 
       - name: Generate Checksums
         shell: pwsh
         run: |
           Set-Location dist
-          Get-FileHash -Algorithm SHA256 * | ForEach-Object { "$($_.Hash)  $($_.Path | Split-Path -Leaf)" } | Out-File -Encoding ascii SHA256SUMS.txt
+          Get-ChildItem -File -Exclude "*.txt" | Get-FileHash -Algorithm SHA256 | ForEach-Object { "$($_.Hash)  $($_.Name)" } | Out-File -Encoding ascii SHA256SUMS.txt
           Get-Content SHA256SUMS.txt
 
       - name: Upload Windows Artifacts
@@ -81,17 +80,11 @@ jobs:
           name: dist-windows
           path: dist
 
-      - name: Update Nightly Git Tag
-        run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          git tag -f nightly
-          git push -f origin nightly
-
       - name: Publish or Update Nightly Release
         uses: softprops/action-gh-release@v2
         with:
           tag_name: nightly
+          target_commitish: ${{ github.sha }}
           name: "Vespetrel Windows Nightly Build"
           body: |
             ## 🕊️ Vespetrel Nightly (Windows x86_64)

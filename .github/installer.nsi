@@ -1,15 +1,15 @@
 Unicode True
+!cd ".."
+
 !include "MUI2.nsh"
 
 Name "Vespetrel"
-OutFile "vespetrel-setup-windows-x86_64.exe"
+OutFile "dist\vespetrel-setup-windows-x86_64.exe"
 InstallDir "$LOCALAPPDATA\Programs\Vespetrel"
 InstallDirRegKey HKCU "Software\Vespetrel" "InstallDir"
 RequestExecutionLevel user
 
 !define MUI_ABORTWARNING
-!define MUI_ICON "${NSISDIR}\Contrib\Graphics\Icons\modern-install.ico"
-!define MUI_UNICON "${NSISDIR}\Contrib\Graphics\Icons\modern-uninstall.ico"
 
 !insertmacro MUI_PAGE_WELCOME
 !insertmacro MUI_PAGE_DIRECTORY
@@ -23,9 +23,9 @@ RequestExecutionLevel user
 
 Section "Install"
     SetOutPath "$INSTDIR"
-    File "target\release\vespetrel.exe"
-    File "README.md"
-    File "LICENSE"
+    File "staging\vespetrel\vespetrel.exe"
+    File "staging\vespetrel\README.md"
+    File "staging\vespetrel\LICENSE"
 
     WriteRegStr HKCU "Software\Vespetrel" "InstallDir" "$INSTDIR"
 
@@ -44,6 +44,8 @@ Section "Install"
 SectionEnd
 
 Section "Uninstall"
+    SetOutPath "$TEMP"
+
     Delete "$DESKTOP\Vespetrel.lnk"
     Delete "$SMPROGRAMS\Vespetrel\Vespetrel.lnk"
     Delete "$SMPROGRAMS\Vespetrel\Uninstall Vespetrel.lnk"
