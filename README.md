@@ -199,22 +199,32 @@ RUST_LOG=vespetrel=debug,vespetrel_imap=trace cargo run --package vespetrel-app
   - [x] Rusqlite relational schema with foreign keys and WAL mode
   - [x] SQLite FTS5 full-text search with BM25 ranking
   - [x] Domain entities & unified `MailProvider` trait abstraction
-  - [x] Zero-copy MIME parser & compressed raw message store
+  - [x] Zero-copy MIME parser (`mail-parser`) & compressed raw message store (`lz4_flex`)
+  - [x] Real-time HTML sanitizer (`ammonia`) & tracking pixel stripper (`lol_html`)
 - [ ] **P1: GPUI 3-Pane Shell & Message Reader**
+  - [x] 3-Pane dock state model & view logic (`vespetrel-app`)
   - [ ] Resizable dock layout via `gpui-component`
   - [ ] 120 FPS virtualized message list (100k+ row stress testing)
   - [ ] Plaintext / Markdown viewer + Sandboxed HTML viewport (`wry`)
   - [ ] Account tree & folder navigation
 - [ ] **P2: Multi-Account Providers & Compose**
-  - [ ] Google & Microsoft OAuth2 PKCE login wizard
-  - [ ] Background IMAP IDLE auto-reconnect actor
-  - [ ] Stalwart JMAP push event integration
+  - [x] Google & Microsoft OAuth2 PKCE engine (`vespetrel-crypto`)
+  - [x] OS Keyring secure token storage (`keyring-rs` v3)
+  - [x] Tokio Account Worker actors & Sync Coordinator (`vespetrel-engine`)
+  - [x] IMAP IDLE state machine, QRESYNC/CONDSTORE & XOAUTH2 (`vespetrel-imap`)
+  - [x] Stalwart JMAP push provider adapter (`vespetrel-jmap`)
+  - [x] Microsoft Graph REST provider adapter (`vespetrel-graph`)
+  - [x] SMTP submit transport with Lettre & DKIM (`vespetrel-smtp`)
+  - [ ] Interactive UI login wizard modal
   - [ ] Rich-text compose editor with contact autocomplete
 - [ ] **P3: PIM & End-to-End Encryption**
+  - [x] CalDAV & CardDAV client integration foundation (`libdav`, `icalendar`, `vcard4`)
+  - [x] OpenPGP (RFC 9580 v6) & Autocrypt 1.1 engine scaffolding (`vespetrel-crypto`)
   - [ ] CalDAV agenda & month grid views
   - [ ] CardDAV contact sync & address book
-  - [ ] OpenPGP key management & inline signature verification
+  - [ ] Inline digital signature verification badges
 - [ ] **P4: Desktop Polish & Distribution**
+  - [x] Headless testable application runner (`vespetrel-app::VespetrelApp`)
   - [ ] System tray integration & native notifications
   - [ ] Multiplatform packaging (.dmg, .deb, .msi)
 
