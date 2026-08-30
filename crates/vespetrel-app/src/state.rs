@@ -1,3 +1,5 @@
+use arc_swap::ArcSwap;
+use std::sync::Arc;
 use vespetrel_core::{Folder, MessageSummary};
 
 /// Application state shared between Tokio engine and UI
@@ -58,5 +60,62 @@ impl AppState {
 impl Default for AppState {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+/// Lock-free, atomically swappable application state container for 120 FPS UI reads
+#[derive(Debug)]
+pub struct SharedAppState {
+    inner: ArcSwap<AppState>,
+}
+
+impl SharedAppState {
+    pub fn new(state: AppState) -> Self {
+        Self {
+            inner: ArcSwap::from_pointee(state),
+        }
+    }
+
+    /// Fast lock-free load for rendering (wait-free, zero contention)
+    pub fn load(&self) -> arc_swap::Guard<Arc<AppState>> {
+        self.inner.load()
+    }
+
+    /// Atomically swap updated state into place
+    pub fn store(&self, state: AppState) {
+        self.inner.store(Arc::new(state));
+    }
+
+    /// Mutate state with an update closure and atomically swap
+    pub fn update<F>(&self, f: F)
+    where
+        F: FnOnce(&mut AppState),
+    {
+        let mut cloned = (**self.inner.load()).clone();
+        f(&mut cloned);
+        self.store(cloned);
+    }
+}
+
+impl Default for SharedAppState {
+    fn default() -> Self {
+        Self::new(AppState::new())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_shared_app_state_atomic_swap() {
+        let shared = SharedAppState::default();
+        assert_eq!(shared.load().messages.len(), 0);
+
+        shared.update(|st| {
+            st.search_query = "inbox".into();
+        });
+
+        assert_eq!(shared.load().search_query, "inbox");
     }
 }

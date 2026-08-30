@@ -18,3 +18,6 @@ serde_json = { workspace = true }
 chrono = { workspace = true }
 deadpool-sqlite = { workspace = true }
 anyhow = { workspace = true }
+flume = { workspace = true }
+parking_lot = { workspace = true }
+

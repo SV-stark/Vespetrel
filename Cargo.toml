@@ -78,6 +78,16 @@ uuid = { version = "1.0", features = ["v4", "serde"] }
 simdutf8 = { version = "0.1", features = ["aarch64_neon"] }
 memchr = "2.7"
 ahash = "0.8"
+mimalloc = { version = "0.1", default-features = false }
+compact_str = { version = "0.8", features = ["serde"] }
+smallvec = { version = "1.13", features = ["serde", "const_generics"] }
+parking_lot = "0.12"
+flume = "0.11"
+moka = { version = "0.12", features = ["sync", "future"] }
+bytes = "1.6"
+arc-swap = "1.7"
+
+
 
 
 [profile.release]

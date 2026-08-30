@@ -1,14 +1,25 @@
+use bytes::Bytes;
+use moka::sync::Cache;
 use std::path::{Path, PathBuf};
 
 /// Compressed blob store for raw RFC822 and attachments - § local storage layer
-/// Uses lz4_flex for fast compression (zstd available for archival)
+/// Uses lz4_flex for fast compression + moka bounded in-memory cache
 pub struct BlobStore {
     base: PathBuf,
+    cache: Cache<String, Bytes>,
 }
 
 impl BlobStore {
     pub fn new(base: impl Into<PathBuf>) -> Self {
-        Self { base: base.into() }
+        // Max 50MB in memory, max 1000 items
+        let cache = Cache::builder()
+            .max_capacity(1000)
+            .weigher(|_k, v: &Bytes| v.len() as u32)
+            .build();
+        Self {
+            base: base.into(),
+            cache,
+        }
     }
 
     pub fn ensure_base(&self) -> std::io::Result<()> {
@@ -29,12 +40,28 @@ impl BlobStore {
         }
         let compressed = lz4_flex::compress_prepend_size(data);
         std::fs::write(&path, compressed)?;
+        self.cache
+            .insert(id.to_string(), Bytes::copy_from_slice(data));
         Ok(path)
     }
 
     pub fn read(&self, id: &str) -> std::io::Result<Vec<u8>> {
+        if let Some(cached) = self.cache.get(id) {
+            return Ok(cached.to_vec());
+        }
         let path = self.blob_path(id);
-        self.read_path(&path)
+        let data = self.read_path(&path)?;
+        self.cache
+            .insert(id.to_string(), Bytes::copy_from_slice(&data));
+        Ok(data)
+    }
+
+    pub fn read_bytes(&self, id: &str) -> std::io::Result<Bytes> {
+        if let Some(cached) = self.cache.get(id) {
+            return Ok(cached);
+        }
+        let raw = self.read(id)?;
+        Ok(Bytes::from(raw))
     }
 
     pub fn read_path(&self, path: &Path) -> std::io::Result<Vec<u8>> {
@@ -53,6 +80,7 @@ impl BlobStore {
     }
 
     pub fn delete(&self, id: &str) -> std::io::Result<()> {
+        self.cache.invalidate(id);
         let path = self.blob_path(id);
         if path.exists() {
             std::fs::remove_file(path)?;

@@ -21,4 +21,8 @@ zstd = { workspace = true }
 uuid = { workspace = true }
 simdutf8 = { workspace = true }
 ahash = { workspace = true }
+moka = { workspace = true }
+bytes = { workspace = true }
+parking_lot = { workspace = true }
+
 

@@ -1,6 +1,10 @@
 use tracing_subscriber::EnvFilter;
 
+#[global_allocator]
+static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
 #[tokio::main]
+
 async fn main() -> anyhow::Result<()> {
     // Safe logger init (ignores error if already initialized)
     tracing_subscriber::fmt()

@@ -33,6 +33,13 @@ uuid = { workspace = true }
 memchr = { workspace = true }
 ahash = { workspace = true }
 simdutf8 = { workspace = true }
+mimalloc = { workspace = true }
+arc-swap = { workspace = true }
+flume = { workspace = true }
+parking_lot = { workspace = true }
+compact_str = { workspace = true }
+smallvec = { workspace = true }
+
 
 # wry / gpui are intentionally NOT listed here to keep `cargo check` offline-friendly.
 # To enable: add `wry = { workspace = true, optional = true }` and gpui git deps, then set `gpui = ["dep:wry"]`

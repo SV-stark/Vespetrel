@@ -30,6 +30,11 @@ impl SyncCoordinator {
         (coord, rx)
     }
 
+    /// High-throughput flume channel constructor for zero-contention cross-thread event streaming
+    pub fn create_flume_bridge() -> (flume::Sender<SyncEvent>, flume::Receiver<SyncEvent>) {
+        flume::unbounded()
+    }
+
     pub fn with_storage_pool(mut self, pool: deadpool_sqlite::Pool) -> Self {
         self.storage_pool = Some(pool);
         self
