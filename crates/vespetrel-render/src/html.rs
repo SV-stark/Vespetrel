@@ -24,48 +24,41 @@ pub fn sanitize(html: &str, opts: &SanitizeOptions) -> anyhow::Result<String> {
 fn rewrite_html(input: &str, opts: &RewriteOptions) -> anyhow::Result<String> {
     let mut output = Vec::new();
 
-    let mut rewriter = HtmlRewriter::new(
-        Settings {
-            element_content_handlers: vec![
-                // Remove script, iframe, object, embed, applet
-                element!("script, iframe, object, embed, applet", |el| {
-                    el.remove();
-                    Ok(())
-                }),
-                // Handle img: strip 1x1 trackers, block remote src, rewrite cid
-                element!("img", |el| {
-                    // Tag 1x1 tracking pixels
-                    if (
-                        el.get_attribute("width").as_deref(),
-                        el.get_attribute("height").as_deref(),
-                    ) == (Some("1"), Some("1"))
-                    {
-                        el.remove();
-                        return Ok(());
-                    }
-                    if let Some(src) = el.get_attribute("src") {
-                        if src.starts_with("cid:") && opts.rewrite_cid {
-                            let cid = src.trim_start_matches("cid:");
-                            el.set_attribute("src", &format!("blob://{cid}"))?;
-                        } else if (src.starts_with("http://") || src.starts_with("https://"))
-                            && opts.block_remote_images
-                        {
-                            el.set_attribute("data-blocked-src", &src)?;
-                            el.remove_attribute("src");
-                        }
-                    }
-                    Ok(())
-                }),
-                element!("a", |el| {
-                    el.set_attribute("rel", "noopener noreferrer")?;
-                    el.set_attribute("target", "_blank")?;
-                    Ok(())
-                }),
-            ],
-            ..Settings::new()
-        },
-        |c: &[u8]| output.extend_from_slice(c),
-    );
+    let settings = Settings::new()
+        .append_element_content_handler(element!("script, iframe, object, embed, applet", |el| {
+            el.remove();
+            Ok(())
+        }))
+        .append_element_content_handler(element!("img", |el| {
+            // Tag 1x1 tracking pixels
+            if (
+                el.get_attribute("width").as_deref(),
+                el.get_attribute("height").as_deref(),
+            ) == (Some("1"), Some("1"))
+            {
+                el.remove();
+                return Ok(());
+            }
+            if let Some(src) = el.get_attribute("src") {
+                if src.starts_with("cid:") && opts.rewrite_cid {
+                    let cid = src.trim_start_matches("cid:");
+                    el.set_attribute("src", &format!("blob://{cid}"))?;
+                } else if (src.starts_with("http://") || src.starts_with("https://"))
+                    && opts.block_remote_images
+                {
+                    el.set_attribute("data-blocked-src", &src)?;
+                    el.remove_attribute("src");
+                }
+            }
+            Ok(())
+        }))
+        .append_element_content_handler(element!("a", |el| {
+            el.set_attribute("rel", "noopener noreferrer")?;
+            el.set_attribute("target", "_blank")?;
+            Ok(())
+        }));
+
+    let mut rewriter = HtmlRewriter::new(settings, |c: &[u8]| output.extend_from_slice(c));
 
     rewriter
         .write(input.as_bytes())

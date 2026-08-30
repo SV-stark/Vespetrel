@@ -31,7 +31,7 @@ wry = "0.41"
 anyhow = "1.0"
 
 # Database & Storage
-rusqlite = { version = "0.31", features = ["bundled", "chrono", "serde_json"] }
+rusqlite = { version = "0.40", features = ["bundled", "chrono", "serde_json"] }
 deadpool-sqlite = "0.14"
 lz4_flex = "0.14"
 zstd = "0.13"
@@ -54,7 +54,7 @@ vcard4 = "0.4"
 # Security & Crypto
 rustls = { version = "0.23", default-features = false, features = ["aws_lc_rs"] }
 oauth2 = "4.4"
-keyring = { version = "4.1", features = ["apple-native", "windows-native", "sync-secret-service"] }
+keyring = { version = "4.1", features = ["apple-native-keyring-store", "windows-native-keyring-store", "linux-keyutils-keyring-store"] }
 pgp = "0.20"
 rpgp = { package = "pgp", version = "0.14" }
 x509-cert = "0.2"
