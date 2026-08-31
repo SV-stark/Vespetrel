@@ -15,4 +15,7 @@ anyhow = { workspace = true }
 async-trait = { workspace = true }
 ahash = { workspace = true }
 memchr = { workspace = true }
+vcard4 = { workspace = true }
+icalendar = { workspace = true }
+
 

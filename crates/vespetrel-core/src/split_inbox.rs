@@ -33,7 +33,21 @@ impl InboxCategory {
     }
 }
 
-/// Classify an incoming message into a split inbox category using header & domain heuristics
+/// Fast SIMD substring search
+#[inline]
+fn simd_contains(haystack: &str, needle: &str) -> bool {
+    let hay = haystack.as_bytes();
+    let n = needle.as_bytes();
+    if n.is_empty() {
+        return true;
+    }
+    if hay.len() < n.len() {
+        return false;
+    }
+    memchr::memmem::find(hay, n).is_some()
+}
+
+/// Classify an incoming message into a split inbox category using SIMD header & domain heuristics
 pub fn classify_inbox_category(msg: &MessageSummary, raw_headers: Option<&str>) -> InboxCategory {
     let from_lower = msg.from_address.to_lowercase();
     let subject_lower = msg
@@ -45,63 +59,66 @@ pub fn classify_inbox_category(msg: &MessageSummary, raw_headers: Option<&str>) 
     // 1. Check RFC headers if available
     if let Some(headers) = raw_headers {
         let headers_lower = headers.to_lowercase();
-        if headers_lower.contains("list-unsubscribe") || headers_lower.contains("list-id") {
-            if headers_lower.contains("newsletter")
-                || headers_lower.contains("digest")
-                || headers_lower.contains("substack")
+        if simd_contains(&headers_lower, "list-unsubscribe")
+            || simd_contains(&headers_lower, "list-id")
+        {
+            if simd_contains(&headers_lower, "newsletter")
+                || simd_contains(&headers_lower, "digest")
+                || simd_contains(&headers_lower, "substack")
             {
                 return InboxCategory::Newsletters;
             }
             return InboxCategory::Promotions;
         }
-        if headers_lower.contains("precedence: bulk") || headers_lower.contains("precedence: list")
+        if simd_contains(&headers_lower, "precedence: bulk")
+            || simd_contains(&headers_lower, "precedence: list")
         {
             return InboxCategory::Updates;
         }
     }
 
     // 2. Check Social networks
-    if from_lower.contains("twitter.com")
-        || from_lower.contains("x.com")
-        || from_lower.contains("linkedin.com")
-        || from_lower.contains("facebookmail.com")
-        || from_lower.contains("instagram.com")
-        || from_lower.contains("redditmail.com")
+    if simd_contains(&from_lower, "twitter.com")
+        || simd_contains(&from_lower, "x.com")
+        || simd_contains(&from_lower, "linkedin.com")
+        || simd_contains(&from_lower, "facebookmail.com")
+        || simd_contains(&from_lower, "instagram.com")
+        || simd_contains(&from_lower, "redditmail.com")
     {
         return InboxCategory::Social;
     }
 
     // 3. Check Newsletters & Subscriptions
-    if from_lower.contains("substack.com")
-        || from_lower.contains("medium.com")
-        || from_lower.contains("newsletter")
-        || subject_lower.contains("weekly digest")
-        || subject_lower.contains("newsletter")
+    if simd_contains(&from_lower, "substack.com")
+        || simd_contains(&from_lower, "medium.com")
+        || simd_contains(&from_lower, "newsletter")
+        || simd_contains(&subject_lower, "weekly digest")
+        || simd_contains(&subject_lower, "newsletter")
     {
         return InboxCategory::Newsletters;
     }
 
     // 4. Check Promotions & Deals
-    if subject_lower.contains("% off")
-        || subject_lower.contains("discount")
-        || subject_lower.contains("sale")
-        || subject_lower.contains("promo")
-        || subject_lower.contains("deal")
-        || from_lower.contains("promotions")
-        || from_lower.contains("marketing")
+    if simd_contains(&subject_lower, "% off")
+        || simd_contains(&subject_lower, "discount")
+        || simd_contains(&subject_lower, "sale")
+        || simd_contains(&subject_lower, "promo")
+        || simd_contains(&subject_lower, "deal")
+        || simd_contains(&from_lower, "promotions")
+        || simd_contains(&from_lower, "marketing")
     {
         return InboxCategory::Promotions;
     }
 
     // 5. Check System Updates & Notifications
-    if from_lower.contains("no-reply")
-        || from_lower.contains("noreply")
-        || from_lower.contains("notifications@")
-        || from_lower.contains("github.com")
-        || from_lower.contains("gitlab.com")
-        || subject_lower.contains("security alert")
-        || subject_lower.contains("invoice")
-        || subject_lower.contains("receipt")
+    if simd_contains(&from_lower, "no-reply")
+        || simd_contains(&from_lower, "noreply")
+        || simd_contains(&from_lower, "notifications@")
+        || simd_contains(&from_lower, "github.com")
+        || simd_contains(&from_lower, "gitlab.com")
+        || simd_contains(&subject_lower, "security alert")
+        || simd_contains(&subject_lower, "invoice")
+        || simd_contains(&subject_lower, "receipt")
     {
         return InboxCategory::Updates;
     }

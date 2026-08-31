@@ -51,16 +51,20 @@ pub enum PhishingRisk {
 
 /// Strip common analytics and privacy-violating tracker query parameters from a URL
 pub fn clean_tracking_url(raw_url: &str) -> String {
-    let parts: Vec<&str> = raw_url.splitn(2, '?').collect();
-    if parts.len() < 2 {
-        return raw_url.to_string();
-    }
+    let bytes = raw_url.as_bytes();
+    let qmark_pos = match memchr::memchr(b'?', bytes) {
+        Some(pos) => pos,
+        None => return raw_url.to_string(),
+    };
 
-    let base = parts[0];
-    let query_and_fragment = parts[1];
+    let base = &raw_url[..qmark_pos];
+    let query_and_fragment = &raw_url[qmark_pos + 1..];
 
-    let (query, fragment) = match query_and_fragment.split_once('#') {
-        Some((q, f)) => (q, Some(f)),
+    let (query, fragment) = match memchr::memchr(b'#', query_and_fragment.as_bytes()) {
+        Some(hash_pos) => (
+            &query_and_fragment[..hash_pos],
+            Some(&query_and_fragment[hash_pos + 1..]),
+        ),
         None => (query_and_fragment, None),
     };
 
@@ -72,7 +76,10 @@ pub fn clean_tracking_url(raw_url: &str) -> String {
             if pair.is_empty() {
                 return false;
             }
-            let key = pair.split('=').next().unwrap_or("");
+            let key = match memchr::memchr(b'=', pair.as_bytes()) {
+                Some(eq_pos) => &pair[..eq_pos],
+                None => *pair,
+            };
             let key_lower = key.to_ascii_lowercase();
             !track_set.contains(key_lower.as_str())
         })

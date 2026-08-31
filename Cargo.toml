@@ -34,13 +34,11 @@ zstd = "0.13"
 
 # Mail & Protocols
 mail-parser = "0.11"
-mail-builder = "0.5"
-mail-send = { version = "0.6", default-features = false, features = ["builder"] }
 lettre = { version = "0.11", default-features = false, features = ["tokio1-rustls", "builder", "smtp-transport", "rustls-tls", "aws-lc-rs"] }
-jmap-client = "0.4"
 imap-codec = "2.0.0-alpha.9"
 imap-types = "2.0.0-alpha.7"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+
 
 # PIM (Calendar & Contacts)
 libdav = "0.10"
@@ -73,8 +71,9 @@ uuid = { version = "1.0", features = ["v4", "serde"] }
 # SIMD & High-Performance Acceleration
 simdutf8 = { version = "0.1", features = ["aarch64_neon"] }
 memchr = "2.7"
-ahash = "0.8"
+ahash = { version = "0.8", features = ["serde"] }
 mimalloc = { version = "0.1", default-features = false }
+
 compact_str = { version = "0.8", features = ["serde"] }
 smallvec = { version = "1.13", features = ["serde", "const_generics"] }
 parking_lot = "0.12"
