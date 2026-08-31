@@ -140,8 +140,7 @@ impl SmtpClient {
                 "v=1; a=rsa-sha256; d={domain}; s={selector}; c=relaxed/relaxed; q=dns/txt; h=from:to:subject:date; bh={bh}; b="
             );
 
-            // Attempt RSA PKCS#1 v1.5 signing via ring if valid DER/PKCS#8 key is provided
-            let mut signature_bytes = Vec::new();
+            // RSA PKCS#1 v1.5 signing via ring
             let der_bytes = if let Ok(decoded) =
                 base64::engine::general_purpose::STANDARD.decode(key.trim().as_bytes())
             {
@@ -150,32 +149,26 @@ impl SmtpClient {
                 key.as_bytes().to_vec()
             };
 
-            if let Ok(key_pair) = ring::signature::RsaKeyPair::from_pkcs8(&der_bytes)
+            let key_pair = ring::signature::RsaKeyPair::from_pkcs8(&der_bytes)
                 .or_else(|_| ring::signature::RsaKeyPair::from_der(&der_bytes))
-            {
-                let rng = ring::rand::SystemRandom::new();
-                let mut sig = vec![0; key_pair.public().modulus_len()];
-                if key_pair
-                    .sign(
-                        &ring::signature::RSA_PKCS1_SHA256,
-                        &rng,
-                        sig_input.as_bytes(),
-                        &mut sig,
-                    )
-                    .is_ok()
-                {
-                    signature_bytes = sig;
-                }
-            }
+                .map_err(|_| {
+                    anyhow::anyhow!("invalid RSA private key for DKIM: expected PKCS#8 or DER key")
+                })?;
 
-            if signature_bytes.is_empty() {
-                // Deterministic HMAC-SHA256 signature for test keys
-                let s_key = ring::hmac::Key::new(ring::hmac::HMAC_SHA256, key.as_bytes());
-                let tag = ring::hmac::sign(&s_key, sig_input.as_bytes());
-                signature_bytes = tag.as_ref().to_vec();
-            }
+            let rng = ring::rand::SystemRandom::new();
+            let mut sig = vec![0; key_pair.public().modulus_len()];
+            key_pair
+                .sign(
+                    &ring::signature::RSA_PKCS1_SHA256,
+                    &rng,
+                    sig_input.as_bytes(),
+                    &mut sig,
+                )
+                .map_err(|_| {
+                    anyhow::anyhow!("failed to compute RSASSA-PKCS1-v1_5 DKIM signature")
+                })?;
 
-            let b = base64::engine::general_purpose::STANDARD.encode(&signature_bytes);
+            let b = base64::engine::general_purpose::STANDARD.encode(&sig);
             let dkim_val = format!("{sig_input}{b}");
             let name = lettre::message::header::HeaderName::new_from_ascii_str("DKIM-Signature");
             let val = lettre::message::header::HeaderValue::new(name, dkim_val);
@@ -290,10 +283,11 @@ mod tests {
 
     #[test]
     fn test_smtp_build_message_with_dkim() {
+        let rsa_pkcs8 = "MIIEvgIBADANBgkqhkiG9w0BAQEFAASCBKgwggSkAgEAAoIBAQCy+OYeW6EsC8TQ4z6RiAIxRM5kEz6gbYkyemoQXiZLDrJf4yVj5EfI4lwEbAAr6D2v+QBJofXQWdigjMooqk7RW5lr0LYsNN7UhfnWsOt74BGzuQ8k6zf2m1EJoD20I04UyWfil+IMvpDVqcd6UbZZCGlLjlPSEs1B6tncbHHSPtHhGJcCpeyO5/KFqcDc9oXwB4skNQ6eRA2KYLY9O4jqThjHueNlA4hic6r9CyF0hpGZtxe90F5hwJ8s3TLBWTn8n5tZD2B8euCTBmgMiH6fnOKOo22VEqzGh9bSioxm+EzFzB0nYoPbAri7dgch7X3r7dNGpkhjwzjhp2R4MYeBAgMBAAECggEAe1E/Fmniivvs+FWsVhCWGiaj45bTDy2KXEq27GJDFnKg+6sCp2qy/7rg1ncoQxi58Jes2A+N1asitbVs0kpPFrh75SshayJe66cI+CJdj7Rb3i9EPRcKL5TjaLON8KJm+bGxMBOhQVDJcT+T4DePYpeGHfaK0PP9lE7jIJtkbg2Nzvbw1XHmnTXdCD36q3gt2uLwnydQXXtoK6WfXmz1hgfiRkdhAo5bOwKpupgGzoBR3aZFtNhQqRVnz/dR4qqQHpvpatmnoxwrbRG0b0YcIheutUictZpbk2JNpEjEfKG8JvkFbsCFsZVEyYE4K2UzLJFof7mb9JCOlOd4B/HZ1QKBgQDe0uDpGC/6jVmHId4xEr3b7+pDxnkZAOy8xXRBl/hXxDAjNU+01EACRFVoWnHWHDeZVfILdh6Az8N+wxl4HY1CtVAhujXU/ANr6cRyPPKMm/P0YuJ85RsxmnOuGsYeZmiEwspJVASJ472KW0mOJnMieqGcGarn3ajAacGqu2gWpwKBgQDNnpUyuVKHssOrBmWBwZ9F6uhK2iSoxtLAQfUBK9KWNN2hURMXZW1QoKT3Kp/0CDEgIUz9v9zfylER2NsO7C1p2azj+W+jNKkOsITgIeAcrcp5wYS2K2q4x6U+JkARkKna0V4PwsHBgyZrIIycd6y6zF5hBMan+Hxy8DfggZLdlwKBgQCOtrP0t1grepLn2QpNlfpiPpRlml3/ZLc75J+kT2hxFifatQ96+yKQESI+twcIIoR9wi1Hp/y7ddZ5fw31/791BVnwcCqAYnTyjgQTQvP6mPwz/42efsLfD1SeI2nXGLJCrdwQAS7y/hls3zEKSZgecjrGFy5+WVr2+gVfi66MKwKBgAcH8jAe2Cydt0Uk3dm3Bjw80R6mIPTIf7JlTvxwRC4wtpdqj02QgVFtfNaa1YdhtFRV7y0KH4Jjh6wljzAOcWsaL2hIQkIBbfp7nL+RSPmSE8dgD6qvB2I0KXlbk3tGSBicaiv9y+RTGMA3B7fd+8ETdfK5WBWsUI0Zm7+Ijr4XAoGBANLc+H3c9h1faSb2YSN+QHtcyWJxhZONrE7pbBTMuVbgewtqjR2Et4AvmIuhwNfmZI6gnrbd1TWvGeGhZbdFQHpgms/92HjfAl61rttB+LgaKWoMod4XWqMxtChLNBpLqXEcY1xND9gAM66IGSPw7XKFiygzgDBucFcdJdwMo/Jk";
         let config = SmtpConfig::new("smtp.example.com", 465, "alice", "token").with_dkim(
             "example.com",
             "default",
-            "private_rsa_key_data",
+            rsa_pkcs8,
         );
         let client = SmtpClient::new(config);
 

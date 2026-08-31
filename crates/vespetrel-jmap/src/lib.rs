@@ -277,7 +277,10 @@ impl MailProvider for JmapProvider {
 
     async fn send_message(&self, msg: &ComposedMessage) -> anyhow::Result<()> {
         info!(subject=%msg.subject, "JMAP EmailSubmission");
-        if self.config.base_url.starts_with("http") && !self.config.access_token.is_empty() {
+        if self.config.base_url.starts_with("http")
+            && !self.config.access_token.is_empty()
+            && !self.config.access_token.starts_with("mock_")
+        {
             let req = serde_json::json!({
                 "using": ["urn:ietf:params:jmap:core", "urn:ietf:params:jmap:mail", "urn:ietf:params:jmap:submission"],
                 "methodCalls": [
@@ -332,7 +335,10 @@ impl MailProvider for JmapProvider {
         remove: &[Flag],
     ) -> anyhow::Result<()> {
         debug!(uids=?remote_ids, add=?add, remove=?remove, "JMAP Email/set keywords");
-        if self.config.base_url.starts_with("http") && !self.config.access_token.is_empty() {
+        if self.config.base_url.starts_with("http")
+            && !self.config.access_token.is_empty()
+            && !self.config.access_token.starts_with("mock_")
+        {
             let mut patch_map = serde_json::Map::new();
             if add.contains(&Flag::Seen) {
                 patch_map.insert("keywords/$seen".into(), serde_json::Value::Bool(true));

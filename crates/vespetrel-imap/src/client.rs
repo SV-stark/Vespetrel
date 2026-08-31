@@ -137,6 +137,13 @@ impl ImapConnection {
     pub fn cmd_idle(&self) -> &'static str {
         "IDLE"
     }
+
+    /// Format a structured tagged IMAP command (e.g. `A001 SELECT "INBOX"\r\n`)
+    pub fn format_tagged_command(&self, tag_id: u32, cmd: &str) -> String {
+        let tag = imap_types::core::Tag::try_from(format!("A{tag_id:04}"))
+            .unwrap_or_else(|_| imap_types::core::Tag::try_from("A0001").unwrap());
+        format!("{} {}\r\n", tag.as_ref(), cmd)
+    }
 }
 
 /// Parse an untagged `* LIST (\Flags) "/" "FolderName"` line using SIMD memchr

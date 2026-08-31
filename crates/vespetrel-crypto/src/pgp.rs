@@ -9,6 +9,8 @@ pub enum PgpError {
     KeyNotFound(String),
     #[error("decrypt failed: {0}")]
     Decrypt(String),
+    #[error("encrypt failed: {0}")]
+    Encrypt(String),
     #[error("invalid armored data: {0}")]
     InvalidArmor(String),
 }
@@ -166,7 +168,7 @@ impl PgpEngine {
             ));
         }
 
-        // Try parsing recipient keys with rpgp
+        // Parse recipient keys with rpgp
         let mut parsed_keys = Vec::new();
         for key_str in recipient_keys {
             if let Ok((pub_key, _)) =
@@ -176,25 +178,25 @@ impl PgpEngine {
             }
         }
 
-        if !parsed_keys.is_empty() {
-            let lit_msg = rpgp::composed::Message::new_literal("", plaintext);
-            let mut rng = rand::thread_rng();
-            let key_refs: Vec<&rpgp::composed::SignedPublicKey> = parsed_keys.iter().collect();
-            if let Ok(encrypted_msg) = lit_msg.encrypt_to_keys_seipdv1(
-                &mut rng,
-                rpgp::crypto::sym::SymmetricKeyAlgorithm::AES256,
-                &key_refs,
-            ) && let Ok(armored) = encrypted_msg.to_armored_string(None.into())
-            {
-                return Ok(armored);
-            }
+        if parsed_keys.is_empty() {
+            return Err(PgpError::InvalidArmor(
+                "none of the provided recipient keys are valid armored OpenPGP public keys".into(),
+            ));
         }
 
-        use base64::Engine;
-        let b64 = base64::engine::general_purpose::STANDARD.encode(plaintext);
-        Ok(format!(
-            "-----BEGIN PGP MESSAGE-----\r\nVersion: Vespetrel RFC9580\r\n\r\n{b64}\r\n-----END PGP MESSAGE-----"
-        ))
+        let lit_msg = rpgp::composed::Message::new_literal("", plaintext);
+        let mut rng = rand::thread_rng();
+        let key_refs: Vec<&rpgp::composed::SignedPublicKey> = parsed_keys.iter().collect();
+        match lit_msg.encrypt_to_keys_seipdv1(
+            &mut rng,
+            rpgp::crypto::sym::SymmetricKeyAlgorithm::AES256,
+            &key_refs,
+        ) {
+            Ok(encrypted_msg) => encrypted_msg
+                .to_armored_string(None.into())
+                .map_err(|e| PgpError::Encrypt(format!("armoring error: {e}"))),
+            Err(e) => Err(PgpError::Encrypt(format!("rpgp encryption error: {e}"))),
+        }
     }
 
     /// Generate compliant Autocrypt 1.1 header (addr=...; prefer-encrypt=mutual; keydata=...)
