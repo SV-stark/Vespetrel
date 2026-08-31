@@ -13,6 +13,8 @@ pub struct SyncCoordinator {
     workers: HashMap<String, mpsc::UnboundedSender<WorkerCommand>>,
     /// UI event sender (Tokio mpsc -> GPUI)
     event_tx: mpsc::UnboundedSender<SyncEvent>,
+    /// Bounded event sender for backpressure control
+    flume_tx: Option<flume::Sender<SyncEvent>>,
     /// Optional shared SQLite storage pool
     storage_pool: Option<deadpool_sqlite::Pool>,
 }
@@ -25,9 +27,23 @@ impl SyncCoordinator {
         let coord = Self {
             workers: HashMap::new(),
             event_tx: tx,
+            flume_tx: None,
             storage_pool: None,
         };
         (coord, rx)
+    }
+
+    /// High-throughput bounded flume coordinator constructor preventing OOM under heavy bursts
+    pub fn create_bounded(capacity: usize) -> (Self, flume::Receiver<SyncEvent>) {
+        let (flume_tx, flume_rx) = flume::bounded(capacity.clamp(128, 65536));
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let coord = Self {
+            workers: HashMap::new(),
+            event_tx: tx,
+            flume_tx: Some(flume_tx),
+            storage_pool: None,
+        };
+        (coord, flume_rx)
     }
 
     /// High-throughput flume channel constructor for zero-contention cross-thread event streaming
@@ -49,6 +65,10 @@ impl SyncCoordinator {
 
     pub fn event_sender(&self) -> mpsc::UnboundedSender<SyncEvent> {
         self.event_tx.clone()
+    }
+
+    pub fn flume_sender(&self) -> Option<flume::Sender<SyncEvent>> {
+        self.flume_tx.clone()
     }
 
     pub fn spawn_worker(&mut self, account_id: impl Into<String>, provider: Arc<dyn MailProvider>) {
@@ -89,6 +109,7 @@ impl Default for SyncCoordinator {
         Self {
             workers: HashMap::new(),
             event_tx: tx,
+            flume_tx: None,
             storage_pool: None,
         }
     }

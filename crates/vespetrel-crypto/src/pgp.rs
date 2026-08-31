@@ -1,3 +1,4 @@
+use rpgp::Deserializable;
 use thiserror::Error;
 
 #[derive(Debug, Error)]
@@ -84,6 +85,10 @@ impl PgpEngine {
         if !self.is_armored_pgp(armored) {
             return Err(PgpError::InvalidArmor("not an armored pgp block".into()));
         }
+        // Try parsing directly with rpgp Message parser
+        if let Ok((msg, _)) = rpgp::composed::Message::from_armor_single(armored.as_bytes()) {
+            return Ok(format!("{:?}", msg));
+        }
         // Validate armor structure
         let lines: Vec<&str> = armored.lines().map(|l| l.trim()).collect();
         let has_header = lines.iter().any(|l| l.starts_with("-----BEGIN PGP"));
@@ -116,6 +121,18 @@ impl PgpEngine {
                 "empty private key supplied for decryption".into(),
             ));
         }
+
+        // Try decrypting with rpgp engine
+        if let Ok((msg, _)) = rpgp::composed::Message::from_armor_single(armored.as_bytes())
+            && let Ok((sec_key, _)) =
+                rpgp::composed::SignedSecretKey::from_armor_single(private_key.as_bytes())
+            && let Ok(decrypted_tuple) = msg.decrypt(|| "".into(), &[&sec_key])
+            && let Ok(Some(bytes)) = decrypted_tuple.0.get_content()
+            && let Ok(s) = String::from_utf8(bytes)
+        {
+            return Ok(s);
+        }
+
         // If cleartext signed or armored payload
         if armored.contains("-----BEGIN PGP SIGNED MESSAGE-----") {
             // Extract cleartext message

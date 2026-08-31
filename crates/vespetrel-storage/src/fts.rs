@@ -95,4 +95,37 @@ mod tests {
         let results_resume = search_messages(&conn, "resume", None, 10).unwrap();
         assert_eq!(results_resume.len(), 1);
     }
+
+    #[test]
+    fn test_insert_message_populates_fts5_via_trigger() {
+        let conn = crate::db::open_in_memory().unwrap();
+        let acct = vespetrel_core::Account::new(
+            "Test",
+            "user@example.com",
+            vespetrel_core::account::ProviderType::Imap,
+        );
+        crate::repo::upsert_account(&conn, &acct).unwrap();
+        let folder = vespetrel_core::Folder::new(&acct.id, "inbox", "Inbox", "INBOX");
+        crate::repo::upsert_folder(&conn, &folder).unwrap();
+
+        let mut msg = vespetrel_core::Message::new(
+            &acct.id,
+            &folder.id,
+            101,
+            "Quarterly Financial Résumé",
+            "cfo@example.com",
+            vec!["user@example.com".into()],
+        );
+        msg.body_snippet = Some("Attached is the financial statement for the Café project.".into());
+        crate::repo::insert_message(&conn, &msg).unwrap();
+
+        // Search via FTS5 query to verify trigger worked
+        let matches = search_messages(&conn, "resume", None, 10).unwrap();
+        assert_eq!(matches.len(), 1);
+        assert_eq!(matches[0].message_id, msg.id);
+
+        let cafe_matches = search_messages(&conn, "cafe", None, 10).unwrap();
+        assert_eq!(cafe_matches.len(), 1);
+        assert_eq!(cafe_matches[0].message_id, msg.id);
+    }
 }

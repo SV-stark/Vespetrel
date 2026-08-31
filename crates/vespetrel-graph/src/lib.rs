@@ -162,7 +162,7 @@ impl MailProvider for GraphProvider {
             && !self.config.access_token.starts_with("mock_")
             && let Ok(resp) = self
                 .http
-                .get(&self.config.folders_url())
+                .get(self.config.folders_url())
                 .bearer_auth(&self.config.access_token)
                 .send()
                 .await
