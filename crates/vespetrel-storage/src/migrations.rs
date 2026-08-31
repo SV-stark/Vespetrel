@@ -36,6 +36,7 @@ pub fn run_migrations(conn: &Connection) -> anyhow::Result<()> {
                 auth_config TEXT NOT NULL,
                 sync_state TEXT NOT NULL DEFAULT '{}',
                 is_active INTEGER NOT NULL DEFAULT 1,
+                color TEXT,
                 created_at INTEGER NOT NULL
             );
 
@@ -51,8 +52,10 @@ pub fn run_migrations(conn: &Connection) -> anyhow::Result<()> {
                 highest_mod_seq INTEGER DEFAULT 0,
                 total_count INTEGER DEFAULT 0,
                 unread_count INTEGER DEFAULT 0,
+                color TEXT,
                 UNIQUE(account_id, remote_id)
             );
+
             CREATE INDEX IF NOT EXISTS idx_folders_account ON folders(account_id);
 
             -- Threads

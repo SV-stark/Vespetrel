@@ -39,6 +39,8 @@ flume = { workspace = true }
 parking_lot = { workspace = true }
 compact_str = { workspace = true }
 smallvec = { workspace = true }
+regex = { workspace = true }
+
 
 
 [target.'cfg(windows)'.dependencies]

@@ -56,6 +56,7 @@ pub struct Folder {
     pub highest_mod_seq: Option<u64>,
     pub total_count: i64,
     pub unread_count: i64,
+    pub color: Option<String>,
 }
 
 impl Folder {
@@ -78,7 +79,13 @@ impl Folder {
             highest_mod_seq: Some(0),
             total_count: 0,
             unread_count: 0,
+            color: None,
         }
+    }
+
+    pub fn with_color(mut self, color: impl Into<String>) -> Self {
+        self.color = Some(color.into());
+        self
     }
 
     /// Infer role from IMAP SPECIAL-USE or well-known names

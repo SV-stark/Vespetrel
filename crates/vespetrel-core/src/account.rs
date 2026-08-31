@@ -107,6 +107,7 @@ pub struct Account {
     pub auth_config: AuthConfig,
     pub sync_state: SyncState,
     pub is_active: bool,
+    pub color: Option<String>,
     pub created_at: DateTime<Utc>,
 }
 
@@ -124,8 +125,14 @@ impl Account {
             auth_config: AuthConfig::default(),
             sync_state: SyncState::default(),
             is_active: true,
+            color: None,
             created_at: Utc::now(),
         }
+    }
+
+    pub fn with_color(mut self, color: impl Into<String>) -> Self {
+        self.color = Some(color.into());
+        self
     }
 
     pub fn validate(&self) -> Result<(), String> {

@@ -9,6 +9,27 @@ pub enum ListFilter {
     WithAttachments,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
+pub enum MessageRowDensity {
+    /// 1-line tabular (Sender, Subject, Date)
+    Compact,
+    /// 2-line modern card (Line 1: Sender + Date, Line 2: Subject + Snippet)
+    #[default]
+    Comfortable,
+    /// 3-line rich preview (Line 1: Sender + Badges + Date, Line 2: Subject, Line 3: Multi-line Snippet)
+    Roomy,
+}
+
+impl MessageRowDensity {
+    pub fn row_height_px(&self) -> f32 {
+        match self {
+            Self::Compact => 32.0,
+            Self::Comfortable => 64.0,
+            Self::Roomy => 96.0,
+        }
+    }
+}
+
 /// View-model for the virtual list. In gpui this wraps `gpui::VirtualList`.
 pub struct MessageListView {
     pub messages: Vec<MessageSummary>,
@@ -16,6 +37,7 @@ pub struct MessageListView {
     pub viewport_start: usize,
     pub viewport_len: usize,
     pub filter: ListFilter,
+    pub density: MessageRowDensity,
     pub search_query: String,
     pub selected_ids: HashSet<String>,
 }
@@ -27,9 +49,14 @@ impl MessageListView {
             viewport_start: 0,
             viewport_len: 50,
             filter: ListFilter::All,
+            density: MessageRowDensity::Comfortable,
             search_query: String::new(),
             selected_ids: HashSet::new(),
         }
+    }
+
+    pub fn set_density(&mut self, density: MessageRowDensity) {
+        self.density = density;
     }
 
     pub fn set_viewport(&mut self, start: usize, len: usize) {
@@ -261,5 +288,15 @@ mod tests {
         assert!(view.selected_ids.contains("m1"));
         view.toggle_selection("m1");
         assert!(!view.selected_ids.contains("m1"));
+
+        // Density settings
+        assert_eq!(view.density, MessageRowDensity::Comfortable);
+        assert_eq!(view.density.row_height_px(), 64.0);
+
+        view.set_density(MessageRowDensity::Compact);
+        assert_eq!(view.density.row_height_px(), 32.0);
+
+        view.set_density(MessageRowDensity::Roomy);
+        assert_eq!(view.density.row_height_px(), 96.0);
     }
 }

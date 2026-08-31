@@ -7,11 +7,12 @@ use vespetrel_core::{Account, Folder, Message};
 
 pub fn upsert_account(conn: &Connection, acct: &Account) -> anyhow::Result<()> {
     conn.execute(
-        r#"INSERT INTO accounts (id, name, email, provider_type, auth_config, sync_state, is_active, created_at)
-           VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+        r#"INSERT INTO accounts (id, name, email, provider_type, auth_config, sync_state, is_active, color, created_at)
+           VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
            ON CONFLICT(id) DO UPDATE SET
              name=excluded.name, email=excluded.email, provider_type=excluded.provider_type,
-             auth_config=excluded.auth_config, sync_state=excluded.sync_state, is_active=excluded.is_active"#,
+             auth_config=excluded.auth_config, sync_state=excluded.sync_state,
+             is_active=excluded.is_active, color=excluded.color"#,
         params![
             acct.id,
             acct.name,
@@ -20,6 +21,7 @@ pub fn upsert_account(conn: &Connection, acct: &Account) -> anyhow::Result<()> {
             serde_json::to_string(&acct.auth_config)?,
             serde_json::to_string(&acct.sync_state)?,
             if acct.is_active { 1 } else { 0 },
+            acct.color,
             acct.created_at.timestamp(),
         ],
     )?;
@@ -27,7 +29,7 @@ pub fn upsert_account(conn: &Connection, acct: &Account) -> anyhow::Result<()> {
 }
 
 pub fn list_accounts(conn: &Connection) -> anyhow::Result<Vec<Account>> {
-    let mut stmt = conn.prepare("SELECT id, name, email, provider_type, auth_config, sync_state, is_active, created_at FROM accounts")?;
+    let mut stmt = conn.prepare("SELECT id, name, email, provider_type, auth_config, sync_state, is_active, color, created_at FROM accounts")?;
     let rows = stmt.query_map([], |row| {
         let pt_str: String = row.get(3)?;
         let pt = pt_str.parse().unwrap_or(vespetrel_core::ProviderType::Imap);
@@ -41,7 +43,8 @@ pub fn list_accounts(conn: &Connection) -> anyhow::Result<Vec<Account>> {
             auth_config: serde_json::from_str(&auth_json).unwrap_or_default(),
             sync_state: serde_json::from_str(&sync_json).unwrap_or_default(),
             is_active: row.get::<_, i64>(6)? != 0,
-            created_at: DateTime::from_timestamp(row.get::<_, i64>(7)?, 0).unwrap_or_else(Utc::now),
+            color: row.get(7)?,
+            created_at: DateTime::from_timestamp(row.get::<_, i64>(8)?, 0).unwrap_or_else(Utc::now),
         })
     })?;
     rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
@@ -49,12 +52,12 @@ pub fn list_accounts(conn: &Connection) -> anyhow::Result<Vec<Account>> {
 
 pub fn upsert_folder(conn: &Connection, folder: &Folder) -> anyhow::Result<()> {
     conn.execute(
-        r#"INSERT INTO folders (id, account_id, remote_id, name, path, role, uid_validity, highest_mod_seq, total_count, unread_count)
-           VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
+        r#"INSERT INTO folders (id, account_id, remote_id, name, path, role, uid_validity, highest_mod_seq, total_count, unread_count, color)
+           VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
            ON CONFLICT(account_id, remote_id) DO UPDATE SET
              name=excluded.name, path=excluded.path, role=excluded.role,
              uid_validity=excluded.uid_validity, highest_mod_seq=excluded.highest_mod_seq,
-             total_count=excluded.total_count, unread_count=excluded.unread_count"#,
+             total_count=excluded.total_count, unread_count=excluded.unread_count, color=excluded.color"#,
         params![
             folder.id,
             folder.account_id,
@@ -66,13 +69,14 @@ pub fn upsert_folder(conn: &Connection, folder: &Folder) -> anyhow::Result<()> {
             folder.highest_mod_seq.map(|v| v as i64),
             folder.total_count,
             folder.unread_count,
+            folder.color,
         ],
     )?;
     Ok(())
 }
 
 pub fn list_folders(conn: &Connection, account_id: &str) -> anyhow::Result<Vec<Folder>> {
-    let mut stmt = conn.prepare("SELECT id, account_id, remote_id, name, path, role, uid_validity, highest_mod_seq, total_count, unread_count FROM folders WHERE account_id = ?1")?;
+    let mut stmt = conn.prepare("SELECT id, account_id, remote_id, name, path, role, uid_validity, highest_mod_seq, total_count, unread_count, color FROM folders WHERE account_id = ?1")?;
     let rows = stmt.query_map(params![account_id], |row| {
         let role_str: String = row.get(5)?;
         Ok(Folder {
@@ -88,6 +92,7 @@ pub fn list_folders(conn: &Connection, account_id: &str) -> anyhow::Result<Vec<F
             highest_mod_seq: row.get::<_, Option<i64>>(7)?.map(|v| v as u64),
             total_count: row.get(8)?,
             unread_count: row.get(9)?,
+            color: row.get(10)?,
         })
     })?;
     rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
@@ -98,7 +103,7 @@ pub fn get_folder(
     account_id: &str,
     remote_id: &str,
 ) -> anyhow::Result<Option<Folder>> {
-    let mut stmt = conn.prepare("SELECT id, account_id, remote_id, name, path, role, uid_validity, highest_mod_seq, total_count, unread_count FROM folders WHERE account_id = ?1 AND remote_id = ?2")?;
+    let mut stmt = conn.prepare("SELECT id, account_id, remote_id, name, path, role, uid_validity, highest_mod_seq, total_count, unread_count, color FROM folders WHERE account_id = ?1 AND remote_id = ?2")?;
     stmt.query_row(params![account_id, remote_id], |row| {
         let role_str: String = row.get(5)?;
         Ok(Folder {
@@ -114,6 +119,7 @@ pub fn get_folder(
             highest_mod_seq: row.get::<_, Option<i64>>(7)?.map(|v| v as u64),
             total_count: row.get(8)?,
             unread_count: row.get(9)?,
+            color: row.get(10)?,
         })
     })
     .optional()
@@ -563,18 +569,21 @@ mod tests {
             "Alice",
             "alice@example.com",
             vespetrel_core::ProviderType::Imap,
-        );
+        )
+        .with_color("#3b82f6");
         upsert_account(&conn, &acct).unwrap();
         let accts = list_accounts(&conn).unwrap();
         assert_eq!(accts.len(), 1);
         assert_eq!(accts[0].email, "alice@example.com");
+        assert_eq!(accts[0].color.as_deref(), Some("#3b82f6"));
 
         // 2. Folder
-        let folder = Folder::new(&acct.id, "INBOX", "Inbox", "INBOX");
+        let folder = Folder::new(&acct.id, "INBOX", "Inbox", "INBOX").with_color("#ef4444");
         upsert_folder(&conn, &folder).unwrap();
         let folders = list_folders(&conn, &acct.id).unwrap();
         assert_eq!(folders.len(), 1);
         assert_eq!(folders[0].name, "Inbox");
+        assert_eq!(folders[0].color.as_deref(), Some("#ef4444"));
 
         // 3. Message
         let msg = Message::new(
