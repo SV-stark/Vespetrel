@@ -3,7 +3,9 @@
 pub mod cleaner;
 pub mod html;
 pub mod mime;
+pub mod unsubscribe;
 
 pub use cleaner::{PhishingRisk, analyze_phishing_risk, clean_tracking_url};
 pub use html::{RewriteOptions, SanitizeOptions, render_sandboxed_document, sanitize};
 pub use mime::ParsedMail;
+pub use unsubscribe::{ListUnsubscribe, UnsubscribeAction};

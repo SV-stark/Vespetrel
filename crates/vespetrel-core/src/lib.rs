@@ -8,6 +8,9 @@ pub mod folder;
 pub mod invite;
 pub mod message;
 pub mod provider;
+pub mod richtext;
+pub mod split_inbox;
+pub mod template;
 pub mod thread;
 pub mod virtual_folder;
 
@@ -19,5 +22,8 @@ pub use folder::{Folder, FolderRole};
 pub use invite::{MeetingInvitation, RsvpStatus};
 pub use message::{Address, ComposedAttachment, ComposedMessage, Flag, Message, MessageSummary};
 pub use provider::{MailProvider, RemoteFolder, SyncDelta, SyncEvent};
+pub use richtext::{BlockKind, InlineStyle, RichTextDocument, TextSpan};
+pub use split_inbox::{InboxCategory, classify_inbox_category};
+pub use template::{EmailTemplate, TemplateStore};
 pub use thread::{Thread, ThreadNode, ThreadTree, normalize_subject};
 pub use virtual_folder::{VirtualFolder, VirtualFolderType};

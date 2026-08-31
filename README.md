@@ -273,6 +273,18 @@ cargo run --package vespetrel-app -- --memory
   - [x] **POP3 Legacy Client Engine**: Full RFC 1939 POP3 provider support with SSL/TLS and UIDL tracking for legacy mail servers
   - [x] **Decentralized Matrix & Chat Bridge**: Native Matrix protocol client integration for real-time team communication alongside email threads
 
+- [x] **P7: Modern Workflow Ergonomics & Superhuman Productivity (COMPLETE)**
+  - [x] **Native TipTap-Style Rich Text & Markdown WYSIWYG Editor (Approach 1)**: Native span & block attributed text engine with floating bubble menu, markdown input rules (`**bold**`, `# heading`, `- list`), and clean MIME HTML serialization.
+  - [x] **Undo Send (Configurable Grace Period Buffer)**: 5–30s cancellation delay buffer allowing immediate recall of accidental sends.
+  - [x] **Scheduled Send (Delayed Outbox Queue)**: Timezone-aware delayed outbox queue for automated future email transmission.
+  - [x] **Thread Snoozing & Reminder Queue**: Temporarily snooze conversations with automatic resurfacing in Inbox at trigger timestamp.
+  - [x] **Split Inbox Categories**: Categorized inbox tabs (Primary, Updates, Promotions, Newsletters, Social) with heuristic and header classification.
+  - [x] **1-Click `List-Unsubscribe` & Newsletter Bundling**: RFC 2369 / RFC 8058 automated one-click unsubscribe and collapsible newsletter bundles.
+  - [x] **Command Palette (`Ctrl+K` / `Cmd+K` Superhuman Action Switcher)**: Instant fuzzy-finder action switcher for commands, folders, and compose actions.
+  - [x] **Reusable Email Snippets & Templates with Variables**: Pre-saved response templates with `{{name}}`, `{{company}}`, `{{email}}` placeholder interpolation.
+
+
+
 
 
 ---

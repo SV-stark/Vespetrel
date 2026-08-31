@@ -6,9 +6,11 @@ pub mod feeds;
 pub mod filter;
 pub mod matrix;
 pub mod migrator;
+pub mod outbox;
 pub mod plugin;
 pub mod pop3;
 pub mod sieve;
+pub mod snooze;
 pub mod spam;
 pub mod worker;
 
@@ -24,11 +26,13 @@ pub use migrator::{
     MigratedAccount, ThunderbirdProfile, discover_thunderbird_profiles, parse_mbox_data,
     parse_thunderbird_prefs,
 };
+pub use outbox::{OutboxQueue, ScheduledMessage, UndoSendBuffer};
 pub use plugin::{PluginAction, PluginEvent, PluginHost, PluginManifest, PluginPermission};
 pub use pop3::{
     Pop3Command, Pop3MessageInfo, Pop3UidlCache, parse_pop3_status, parse_pop3_uidl_response,
 };
 pub use sieve::{ManageSieveCommand, SieveResponse, SieveScript, SieveValidator};
+pub use snooze::{SnoozeManager, SnoozedThread};
 pub use spam::{BayesClassifier, SpamScore};
 pub use worker::{AccountWorker, WorkerCommand};
 
