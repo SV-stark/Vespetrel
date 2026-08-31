@@ -11,9 +11,9 @@ pub struct BlobStore {
 
 impl BlobStore {
     pub fn new(base: impl Into<PathBuf>) -> Self {
-        // Max 50MB in memory, max 1000 items
+        // 50MB max total in-memory weight
         let cache = Cache::builder()
-            .max_capacity(1000)
+            .max_capacity(50 * 1024 * 1024)
             .weigher(|_k, v: &Bytes| v.len() as u32)
             .build();
         Self {
@@ -26,20 +26,35 @@ impl BlobStore {
         std::fs::create_dir_all(&self.base)
     }
 
-    fn blob_path(&self, id: &str) -> PathBuf {
+    fn blob_path(&self, id: &str) -> std::io::Result<PathBuf> {
+        if id.is_empty()
+            || !id
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+        {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "Invalid blob ID: must be alphanumeric or hyphen/underscore",
+            ));
+        }
         // Shard by first 2 chars to avoid huge directories
         let shard = &id[..2.min(id.len())];
-        self.base.join(shard).join(format!("{id}.lz4"))
+        Ok(self.base.join(shard).join(format!("{id}.lz4")))
     }
 
     pub fn write(&self, id: &str, data: &[u8]) -> std::io::Result<PathBuf> {
         self.ensure_base()?;
-        let path = self.blob_path(id);
+        let path = self.blob_path(id)?;
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
         }
         let compressed = lz4_flex::compress_prepend_size(data);
-        std::fs::write(&path, compressed)?;
+
+        // Atomic write via temporary file
+        let tmp_path = path.with_extension("tmp");
+        std::fs::write(&tmp_path, compressed)?;
+        std::fs::rename(&tmp_path, &path)?;
+
         self.cache
             .insert(id.to_string(), Bytes::copy_from_slice(data));
         Ok(path)
@@ -49,7 +64,7 @@ impl BlobStore {
         if let Some(cached) = self.cache.get(id) {
             return Ok(cached.to_vec());
         }
-        let path = self.blob_path(id);
+        let path = self.blob_path(id)?;
         let data = self.read_path(&path)?;
         self.cache
             .insert(id.to_string(), Bytes::copy_from_slice(&data));
@@ -66,6 +81,17 @@ impl BlobStore {
 
     pub fn read_path(&self, path: &Path) -> std::io::Result<Vec<u8>> {
         let compressed = std::fs::read(path)?;
+        if compressed.len() >= 4 {
+            let uncompressed_size =
+                u32::from_le_bytes([compressed[0], compressed[1], compressed[2], compressed[3]]);
+            // Max 100MB decompression limit guard
+            if uncompressed_size > 100 * 1024 * 1024 {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "Blob uncompressed size exceeds 100MB limit",
+                ));
+            }
+        }
         lz4_flex::decompress_size_prepended(&compressed)
             .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string()))
     }
@@ -81,7 +107,7 @@ impl BlobStore {
 
     pub fn delete(&self, id: &str) -> std::io::Result<()> {
         self.cache.invalidate(id);
-        let path = self.blob_path(id);
+        let path = self.blob_path(id)?;
         if path.exists() {
             std::fs::remove_file(path)?;
         }
@@ -91,13 +117,25 @@ impl BlobStore {
     /// Write with zstd (higher compression, slower) - for archival
     pub fn write_zstd(&self, id: &str, data: &[u8]) -> std::io::Result<PathBuf> {
         self.ensure_base()?;
+        if id.is_empty()
+            || !id
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+        {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "Invalid blob ID: must be alphanumeric or hyphen/underscore",
+            ));
+        }
         let shard = &id[..2.min(id.len())];
         let path = self.base.join(shard).join(format!("{id}.zst"));
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
         }
         let compressed = zstd::encode_all(data, 3).map_err(std::io::Error::other)?;
-        std::fs::write(&path, compressed)?;
+        let tmp_path = path.with_extension("tmp");
+        std::fs::write(&tmp_path, compressed)?;
+        std::fs::rename(&tmp_path, &path)?;
         Ok(path)
     }
 }

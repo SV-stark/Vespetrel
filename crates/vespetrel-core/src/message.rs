@@ -10,7 +10,12 @@ pub struct Address {
 impl std::fmt::Display for Address {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         if let Some(name) = &self.name {
-            write!(f, "{name} <{}>", self.email)
+            if name.contains([',', '<', '>', '"', '@', ';', ':']) {
+                let escaped = name.replace('"', "\\\"");
+                write!(f, "\"{escaped}\" <{}>", self.email)
+            } else {
+                write!(f, "{name} <{}>", self.email)
+            }
         } else {
             write!(f, "{}", self.email)
         }
@@ -49,6 +54,7 @@ pub struct Message {
     pub remote_uid: u32,
     pub message_id_header: Option<String>,
     pub in_reply_to: Option<String>,
+    pub references: Option<String>,
     pub subject: Option<String>,
     pub from_address: String,
     pub from_name: Option<String>,
@@ -86,6 +92,7 @@ impl Message {
             remote_uid,
             message_id_header: None,
             in_reply_to: None,
+            references: None,
             subject: Some(subject.into()),
             from_address: from_address.into(),
             from_name: None,

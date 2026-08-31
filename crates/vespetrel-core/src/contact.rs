@@ -3,6 +3,7 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Contact {
     pub id: String,
+    pub remote_id: Option<String>,
     pub display_name: Option<String>,
     pub email: String,
     pub vcard_data: Option<String>,
@@ -18,6 +19,7 @@ pub struct CalendarEvent {
     pub end: chrono::DateTime<chrono::Utc>,
     pub location: Option<String>,
     pub ical_uid: Option<String>,
+    pub raw_ical: Option<String>,
 }
 
 /// RFC 5545 VTODO item representation

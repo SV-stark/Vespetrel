@@ -175,7 +175,9 @@ pub fn list_messages_in_folder(
             remote_uid: row.get::<_, i64>(4)? as u32,
             message_id_header: row.get(5)?,
             in_reply_to: row.get(6)?,
+            references: None,
             subject: row.get(7)?,
+
             from_address: row.get(8)?,
             from_name: row.get(9)?,
             to_addresses: serde_json::from_str(&row.get::<_, String>(10)?).unwrap_or_default(),
@@ -206,23 +208,26 @@ pub fn update_message_flags(
     is_read: Option<bool>,
     is_flagged: Option<bool>,
 ) -> anyhow::Result<()> {
-    if let Some(read) = is_read {
-        conn.execute(
-            "UPDATE messages SET is_read = ?1 WHERE id = ?2",
-            params![if read { 1 } else { 0 }, message_id],
-        )?;
-    }
-    if let Some(flagged) = is_flagged {
-        conn.execute(
-            "UPDATE messages SET is_flagged = ?1 WHERE id = ?2",
-            params![if flagged { 1 } else { 0 }, message_id],
-        )?;
+    let read_val = is_read.map(|r| if r { 1 } else { 0 });
+    let flag_val = is_flagged.map(|f| if f { 1 } else { 0 });
+    let rows = conn.execute(
+        "UPDATE messages SET 
+            is_read = COALESCE(?1, is_read),
+            is_flagged = COALESCE(?2, is_flagged)
+         WHERE id = ?3",
+        params![read_val, flag_val, message_id],
+    )?;
+    if rows == 0 {
+        return Err(crate::StorageError::NotFound(message_id.to_string()).into());
     }
     Ok(())
 }
 
 pub fn delete_message(conn: &Connection, message_id: &str) -> anyhow::Result<()> {
-    conn.execute("DELETE FROM messages WHERE id = ?1", params![message_id])?;
+    let rows = conn.execute("DELETE FROM messages WHERE id = ?1", params![message_id])?;
+    if rows == 0 {
+        return Err(crate::StorageError::NotFound(message_id.to_string()).into());
+    }
     Ok(())
 }
 
@@ -275,11 +280,11 @@ pub fn upsert_contact(
         r#"INSERT INTO contacts (id, account_id, remote_id, display_name, email, vcard_data)
            VALUES (?1, ?2, ?3, ?4, ?5, ?6)
            ON CONFLICT(id) DO UPDATE SET
-             display_name=excluded.display_name, email=excluded.email, vcard_data=excluded.vcard_data"#,
+             remote_id=excluded.remote_id, display_name=excluded.display_name, email=excluded.email, vcard_data=excluded.vcard_data"#,
         params![
             contact.id,
             account_id,
-            contact.id,
+            contact.remote_id,
             contact.display_name,
             contact.email,
             contact.vcard_data,
@@ -292,13 +297,14 @@ pub fn list_contacts(
     conn: &Connection,
     account_id: &str,
 ) -> anyhow::Result<Vec<vespetrel_core::Contact>> {
-    let mut stmt = conn.prepare("SELECT id, display_name, email, vcard_data FROM contacts WHERE account_id = ?1 ORDER BY display_name ASC")?;
+    let mut stmt = conn.prepare("SELECT id, remote_id, display_name, email, vcard_data FROM contacts WHERE account_id = ?1 ORDER BY display_name ASC")?;
     let rows = stmt.query_map(params![account_id], |row| {
         Ok(vespetrel_core::Contact {
             id: row.get(0)?,
-            display_name: row.get(1)?,
-            email: row.get(2)?,
-            vcard_data: row.get(3)?,
+            remote_id: row.get(1)?,
+            display_name: row.get(2)?,
+            email: row.get(3)?,
+            vcard_data: row.get(4)?,
         })
     })?;
     rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
@@ -323,7 +329,7 @@ pub fn upsert_calendar_event(
             event.start.timestamp(),
             event.end.timestamp(),
             event.location,
-            "",
+            event.raw_ical.as_deref().unwrap_or(""),
         ],
     )?;
     Ok(())
@@ -333,7 +339,7 @@ pub fn list_calendar_events(
     conn: &Connection,
     calendar_id: &str,
 ) -> anyhow::Result<Vec<vespetrel_core::CalendarEvent>> {
-    let mut stmt = conn.prepare("SELECT id, calendar_id, ical_uid, title, description, start_at, end_at, location FROM calendar_events WHERE calendar_id = ?1 ORDER BY start_at ASC")?;
+    let mut stmt = conn.prepare("SELECT id, calendar_id, ical_uid, title, description, start_at, end_at, location, raw_ical FROM calendar_events WHERE calendar_id = ?1 ORDER BY start_at ASC")?;
     let rows = stmt.query_map(params![calendar_id], |row| {
         Ok(vespetrel_core::CalendarEvent {
             id: row.get(0)?,
@@ -344,6 +350,7 @@ pub fn list_calendar_events(
             start: DateTime::from_timestamp(row.get::<_, i64>(5)?, 0).unwrap_or_else(Utc::now),
             end: DateTime::from_timestamp(row.get::<_, i64>(6)?, 0).unwrap_or_else(Utc::now),
             location: row.get(7)?,
+            raw_ical: row.get(8)?,
         })
     })?;
     rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
@@ -393,7 +400,7 @@ pub fn list_tasks(
             completed_at: row
                 .get::<_, Option<i64>>(7)?
                 .and_then(|ts| DateTime::from_timestamp(ts, 0)),
-            priority: row.get::<_, u8>(8)?,
+            priority: (row.get::<_, i64>(8)?).clamp(0, 255) as u8,
         })
     })?;
     rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
@@ -472,6 +479,7 @@ mod tests {
         // 5. Contact
         let contact = Contact {
             id: "c1".into(),
+            remote_id: Some("rem_c1".into()),
             display_name: Some("Bob".into()),
             email: "bob@example.com".into(),
             vcard_data: None,
@@ -480,6 +488,7 @@ mod tests {
         let contacts = list_contacts(&conn, &acct.id).unwrap();
         assert_eq!(contacts.len(), 1);
         assert_eq!(contacts[0].email, "bob@example.com");
+        assert_eq!(contacts[0].remote_id.as_deref(), Some("rem_c1"));
 
         // 6. Delete message
         delete_message(&conn, &msg.id).unwrap();

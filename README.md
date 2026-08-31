@@ -176,8 +176,9 @@ Pre-built rolling releases are built and published on every push to `main`:
 
 | Package | Format | Direct Download |
 |---|---|---|
-| **Windows Setup Installer** | `.exe` (Inno Setup) | [**`vespetrel-windows-x64-setup.exe`**](https://github.com/SV-stark/Vespetrel/releases/download/nightly/vespetrel-windows-x64-setup.exe) |
+| **Windows Setup Installer** | `.exe` (NSIS) | [**`vespetrel-setup-windows-x86_64.exe`**](https://github.com/SV-stark/Vespetrel/releases/download/nightly/vespetrel-setup-windows-x86_64.exe) |
 | **Portable Archive** | `.zip` | [**`vespetrel-windows-x86_64.zip`**](https://github.com/SV-stark/Vespetrel/releases/download/nightly/vespetrel-windows-x86_64.zip) |
+
 | **Checksums** | `SHA256` | [**`SHA256SUMS.txt`**](https://github.com/SV-stark/Vespetrel/releases/download/nightly/SHA256SUMS.txt) |
 
 ---
@@ -251,7 +252,8 @@ cargo run --package vespetrel-app -- --memory
   - [x] `mimalloc` global allocator integration (-40% RAM fragmentation)
   - [x] Bounded in-memory TinyLFU cache (`moka`) & zero-copy byte slicing (`bytes`)
   - [x] Lock-free `ArcSwap` shared UI state for 120 FPS GPUI rendering
-  - [x] Native OS packaging scripts (Inno Setup `.iss`, Windows manifest, Linux `.desktop`, macOS `Info.plist`)
+  - [x] Native OS packaging scripts (NSIS `.nsi`, Windows manifest, Linux `.desktop`, macOS `Info.plist`)
+
   - [x] GitHub Actions multi-platform CI matrix workflow (`.github/workflows/ci.yml`)
 
 - [ ] **P5: Power-User Capabilities, Interoperability & Migration**

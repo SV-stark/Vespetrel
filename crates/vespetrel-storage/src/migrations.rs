@@ -20,12 +20,13 @@ pub fn run_migrations(conn: &Connection) -> anyhow::Result<()> {
             [],
             |r| r.get::<_, i64>(0),
         )
-        .map(|count| count > 0)
-        .unwrap_or(false);
+        .map(|count| count > 0)?;
 
     if !is_v1_applied {
         conn.execute_batch(
             r#"
+            BEGIN EXCLUSIVE;
+
             -- Accounts
             CREATE TABLE IF NOT EXISTS accounts (
                 id TEXT PRIMARY KEY,
@@ -95,6 +96,7 @@ pub fn run_migrations(conn: &Connection) -> anyhow::Result<()> {
                 UNIQUE(folder_id, remote_uid)
             );
             CREATE INDEX IF NOT EXISTS idx_messages_folder ON messages(folder_id);
+            CREATE INDEX IF NOT EXISTS idx_messages_folder_sent ON messages(folder_id, sent_at DESC);
             CREATE INDEX IF NOT EXISTS idx_messages_thread ON messages(thread_id);
             CREATE INDEX IF NOT EXISTS idx_messages_account ON messages(account_id);
             CREATE INDEX IF NOT EXISTS idx_messages_sent ON messages(sent_at DESC);
@@ -141,7 +143,13 @@ pub fn run_migrations(conn: &Connection) -> anyhow::Result<()> {
                 DELETE FROM messages_fts WHERE message_id = old.id;
             END;
 
-            CREATE TRIGGER IF NOT EXISTS messages_au AFTER UPDATE ON messages BEGIN
+            CREATE TRIGGER IF NOT EXISTS messages_au AFTER UPDATE ON messages
+            WHEN old.subject IS NOT new.subject
+              OR old.body_text_preview IS NOT new.body_text_preview
+              OR old.from_address IS NOT new.from_address
+              OR old.from_name IS NOT new.from_name
+              OR old.to_addresses IS NOT new.to_addresses
+            BEGIN
                 DELETE FROM messages_fts WHERE message_id = old.id;
                 INSERT INTO messages_fts(message_id, account_id, subject, from_address, from_name, to_addresses, body_content)
                 VALUES (new.id, new.account_id, new.subject, new.from_address, new.from_name, new.to_addresses, new.body_text_preview);
@@ -166,8 +174,9 @@ pub fn run_migrations(conn: &Connection) -> anyhow::Result<()> {
                 start_at INTEGER NOT NULL,
                 end_at INTEGER NOT NULL,
                 location TEXT,
-                raw_ical TEXT NOT NULL
+                raw_ical TEXT NOT NULL DEFAULT ''
             );
+            CREATE INDEX IF NOT EXISTS idx_calendar_events_calendar ON calendar_events(calendar_id);
 
             CREATE TABLE IF NOT EXISTS contacts (
                 id TEXT PRIMARY KEY,
@@ -177,6 +186,7 @@ pub fn run_migrations(conn: &Connection) -> anyhow::Result<()> {
                 email TEXT NOT NULL,
                 vcard_data TEXT
             );
+            CREATE INDEX IF NOT EXISTS idx_contacts_account ON contacts(account_id);
 
             CREATE TABLE IF NOT EXISTS tasks (
                 id TEXT PRIMARY KEY,
@@ -189,6 +199,9 @@ pub fn run_migrations(conn: &Connection) -> anyhow::Result<()> {
                 completed_at INTEGER,
                 priority INTEGER NOT NULL DEFAULT 0
             );
+            CREATE INDEX IF NOT EXISTS idx_tasks_calendar ON tasks(calendar_id);
+
+            COMMIT;
             "#,
         )?;
 

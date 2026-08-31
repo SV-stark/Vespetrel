@@ -417,7 +417,8 @@ impl MessageListView {
 │  ├── [x] SIMD accelerations & mimalloc global memory allocator         │
 │  ├── [x] RFC 5545 VTODO Tasks engine & CalDAV task synchronization     │
 │  ├── [x] Autocrypt 1.1 automated header injection & keyring ingest     │
-│  ├── [x] Native OS packaging (.iss, .manifest, .desktop, Info.plist)   │
+│  ├── [x] Native OS packaging (.nsi, .manifest, .desktop, Info.plist)   │
+
 │  └── [x] GitHub Actions multi-platform CI matrix workflow              │
 │                                                                        │
 │  Phase 5: Power-User Automation, Migration & Interoperability          │

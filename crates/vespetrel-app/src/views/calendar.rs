@@ -105,6 +105,7 @@ mod tests {
             end,
             location: Some("Room A".into()),
             ical_uid: Some("uid-1".into()),
+            raw_ical: None,
         };
         view.add_event(event);
 

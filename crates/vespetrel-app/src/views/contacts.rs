@@ -103,18 +103,21 @@ mod tests {
     fn test_contacts_view_grouping_and_autocomplete() {
         let c1 = Contact {
             id: "1".into(),
+            remote_id: None,
             display_name: Some("Alice Smith".into()),
             email: "alice@example.com".into(),
             vcard_data: None,
         };
         let c2 = Contact {
             id: "2".into(),
+            remote_id: None,
             display_name: Some("Bob Jones".into()),
             email: "bob@example.com".into(),
             vcard_data: None,
         };
         let c3 = Contact {
             id: "3".into(),
+            remote_id: None,
             display_name: Some("Albert Einstein".into()),
             email: "albert@example.com".into(),
             vcard_data: None,

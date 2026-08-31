@@ -1,4 +1,4 @@
-use deadpool_sqlite::{Config as PoolConfig, Pool, Runtime};
+use deadpool_sqlite::{Config as PoolConfig, Hook, HookError, Pool, Runtime};
 use rusqlite::Connection;
 
 use crate::migrations::run_migrations;
@@ -17,8 +17,19 @@ pub const PRAGMAS: &[&str] = &[
 pub type StoragePool = Pool;
 
 pub fn create_pool(db_path: &str) -> anyhow::Result<StoragePool> {
-    let cfg = PoolConfig::new(db_path);
-    let pool = cfg.create_pool(Runtime::Tokio1)?;
+    let mut cfg = PoolConfig::new(db_path);
+    cfg.pool = Some(deadpool_sqlite::PoolConfig::new(8));
+    let pool = cfg
+        .builder(Runtime::Tokio1)?
+        .post_create(Hook::async_fn(|conn, _metrics| {
+            Box::pin(async move {
+                conn.interact(|c| init_connection(c))
+                    .await
+                    .map_err(|e| HookError::message(e.to_string()))?
+                    .map_err(|e| HookError::message(e.to_string()))
+            })
+        }))
+        .build()?;
     Ok(pool)
 }
 
@@ -26,6 +37,11 @@ pub fn create_pool(db_path: &str) -> anyhow::Result<StoragePool> {
 pub fn init_connection(conn: &Connection) -> anyhow::Result<()> {
     for pragma in PRAGMAS {
         conn.execute_batch(pragma)?;
+    }
+    // Verify foreign keys are enabled
+    let fk_enabled: i64 = conn.query_row("PRAGMA foreign_keys", [], |r| r.get(0))?;
+    if fk_enabled != 1 {
+        conn.execute_batch("PRAGMA foreign_keys = ON")?;
     }
     run_migrations(conn)?;
     Ok(())

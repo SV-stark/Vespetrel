@@ -1,6 +1,6 @@
 //! Configurable Keybinding Engine (Thunderbird, Gmail, Vim Presets) §7 Phase 6
-use ahash::AHashMap;
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum KeyAction {
@@ -35,14 +35,14 @@ pub enum KeyPreset {
 pub struct KeybindingMap {
     pub preset: KeyPreset,
     /// Maps key sequence (e.g. "j", "k", "g i", "Ctrl+r") to action
-    pub bindings: AHashMap<String, KeyAction>,
+    pub bindings: HashMap<String, KeyAction>,
 }
 
 impl KeybindingMap {
     pub fn new(preset: KeyPreset) -> Self {
         let mut map = Self {
             preset,
-            bindings: AHashMap::new(),
+            bindings: HashMap::new(),
         };
         map.load_preset(preset);
         map

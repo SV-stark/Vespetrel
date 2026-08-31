@@ -1,4 +1,4 @@
-use ahash::AHashMap;
+use ahash::{AHashMap, AHashSet};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
@@ -47,7 +47,7 @@ pub struct ThreadTree {
 
 impl ThreadTree {
     /// Build thread trees from a flat slice of messages using RFC 5322 In-Reply-To & References
-    /// Uses AHashMap for hardware-accelerated (AES-NI) hashing
+    /// Uses AHashMap for hardware-accelerated (AES-NI) hashing and cycle detection
     pub fn build(messages: &[crate::Message]) -> Self {
         if messages.is_empty() {
             return Self {
@@ -67,15 +67,21 @@ impl ThreadTree {
                 .unwrap_or_else(|| msg.id.clone());
             id_to_msg.insert(key.clone(), msg);
 
-            if let Some(in_reply) = &msg.in_reply_to {
-                let trimmed = in_reply
-                    .trim()
-                    .trim_matches('<')
-                    .trim_matches('>')
-                    .to_string();
-                if !trimmed.is_empty() {
-                    child_to_parent.insert(key, trimmed);
-                }
+            // Resolve parent from In-Reply-To or last ID in References
+            let parent = msg
+                .in_reply_to
+                .as_deref()
+                .map(clean_message_id)
+                .filter(|t| !t.is_empty())
+                .or_else(|| {
+                    msg.references
+                        .as_deref()
+                        .and_then(|refs| refs.split_whitespace().last().map(clean_message_id))
+                        .filter(|t| !t.is_empty())
+                });
+
+            if let Some(p) = parent {
+                child_to_parent.insert(key, p);
             }
         }
 
@@ -107,12 +113,20 @@ impl ThreadTree {
             key: &str,
             id_to_msg: &AHashMap<String, &crate::Message>,
             parent_to_children: &AHashMap<String, Vec<String>>,
+            visited: &mut AHashSet<String>,
+            depth: usize,
         ) -> Option<ThreadNode> {
+            if depth > 100 || !visited.insert(key.to_string()) {
+                return None; // Guard against infinite recursion & cycles
+            }
+
             let msg = id_to_msg.get(key)?;
             let mut children = Vec::new();
             if let Some(child_keys) = parent_to_children.get(key) {
                 for ck in child_keys {
-                    if let Some(child_node) = build_node(ck, id_to_msg, parent_to_children) {
+                    if let Some(child_node) =
+                        build_node(ck, id_to_msg, parent_to_children, visited, depth + 1)
+                    {
                         children.push(child_node);
                     }
                 }
@@ -132,14 +146,29 @@ impl ThreadTree {
         }
 
         let mut root_nodes = Vec::new();
+        let mut visited = AHashSet::with_capacity(messages.len());
         for rk in root_keys {
-            if let Some(node) = build_node(&rk, &id_to_msg, &parent_to_children) {
+            if let Some(node) = build_node(&rk, &id_to_msg, &parent_to_children, &mut visited, 0) {
                 root_nodes.push(node);
             }
         }
 
-        // Sort root threads by latest message date descending
-        root_nodes.sort_by_key(|a| std::cmp::Reverse(a.sent_at));
+        // Break cycles: any messages not reached from roots become roots
+        for key in id_to_msg.keys() {
+            if !visited.contains(key) {
+                if let Some(node) =
+                    build_node(key, &id_to_msg, &parent_to_children, &mut visited, 0)
+                {
+                    root_nodes.push(node);
+                }
+            }
+        }
+
+        // Sort root threads by latest message date across all descendants descending
+        root_nodes.sort_by_key(|node| {
+            let (_, _, latest_date) = Self::summarize_node(node);
+            std::cmp::Reverse(latest_date)
+        });
 
         Self { root_nodes }
     }
@@ -161,6 +190,18 @@ impl ThreadTree {
 
         (total, unread, latest)
     }
+}
+
+fn clean_message_id(s: &str) -> String {
+    let s = s.trim();
+    let extracted = s
+        .split_once('<')
+        .and_then(|(_, rest)| rest.split_once('>'))
+        .map(|(inner, _)| inner.trim());
+    if let Some(inner) = extracted {
+        return inner.to_string();
+    }
+    s.trim_matches('<').trim_matches('>').trim().to_string()
 }
 
 /// Helper to normalize email subjects by stripping Re:, Fwd:, etc.
@@ -256,5 +297,19 @@ mod tests {
         let (total, unread, _) = ThreadTree::summarize_node(root);
         assert_eq!(total, 3);
         assert_eq!(unread, 2);
+    }
+
+    #[test]
+    fn test_cyclic_thread_prevention() {
+        let mut msg1 = Message::new("acct1", "inbox", 101, "Loop A", "a@example.com", vec![]);
+        msg1.message_id_header = Some("id_a".into());
+        msg1.in_reply_to = Some("id_b".into());
+
+        let mut msg2 = Message::new("acct1", "inbox", 102, "Loop B", "b@example.com", vec![]);
+        msg2.message_id_header = Some("id_b".into());
+        msg2.in_reply_to = Some("id_a".into());
+
+        let tree = ThreadTree::build(&[msg1, msg2]);
+        assert!(!tree.root_nodes.is_empty());
     }
 }

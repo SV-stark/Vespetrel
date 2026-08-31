@@ -7,8 +7,8 @@ pub mod migrations;
 pub mod repo;
 
 pub use blob::BlobStore;
-pub use db::{PRAGMAS, StoragePool, create_pool};
-pub use fts::{SearchResult, search_messages};
+pub use db::{PRAGMAS, StoragePool, create_pool, init_connection, open_in_memory};
+pub use fts::{SearchResult, escape_fts5_query, search_messages};
 
 use thiserror::Error;
 
