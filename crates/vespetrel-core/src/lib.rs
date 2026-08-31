@@ -10,7 +10,9 @@ pub mod mailing_list;
 pub mod message;
 pub mod provider;
 pub mod richtext;
+pub mod settings;
 pub mod signature;
+
 pub mod split_inbox;
 pub mod tag;
 pub mod template;
@@ -27,6 +29,7 @@ pub use mailing_list::{MailingList, MailingListExpander};
 pub use message::{Address, ComposedAttachment, ComposedMessage, Flag, Message, MessageSummary};
 pub use provider::{MailProvider, RemoteFolder, SyncDelta, SyncEvent};
 pub use richtext::{BlockKind, InlineStyle, RichTextDocument, TextSpan};
+pub use settings::*;
 pub use signature::{Signature, SignatureProfile, SignatureStore, SignatureTemplate};
 pub use split_inbox::{InboxCategory, classify_inbox_category};
 pub use tag::{MessageTag, TagStore};

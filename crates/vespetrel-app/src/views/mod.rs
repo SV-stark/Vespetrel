@@ -6,5 +6,6 @@ pub mod message_list;
 pub mod message_viewer;
 pub mod navigation;
 pub mod quick_filter;
+pub mod settings;
 pub mod tasks;
 pub mod workspace;

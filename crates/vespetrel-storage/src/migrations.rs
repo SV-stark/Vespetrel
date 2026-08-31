@@ -219,6 +219,13 @@ pub fn run_migrations(conn: &Connection) -> anyhow::Result<()> {
                 updated_at INTEGER NOT NULL
             );
             CREATE INDEX IF NOT EXISTS idx_signatures_account ON signatures(account_id);
+
+            -- User Settings Key-Value JSON store
+            CREATE TABLE IF NOT EXISTS user_settings (
+                key TEXT PRIMARY KEY,
+                value TEXT NOT NULL,
+                updated_at INTEGER NOT NULL
+            );
             "#,
         )?;
 

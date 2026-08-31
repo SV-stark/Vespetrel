@@ -553,6 +553,31 @@ pub fn delete_signature(conn: &Connection, id: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
+pub fn save_user_settings(
+    conn: &Connection,
+    settings: &vespetrel_core::UserSettings,
+) -> anyhow::Result<()> {
+    let json = serde_json::to_string(settings)?;
+    let now = chrono::Utc::now().timestamp();
+    conn.execute(
+        r#"INSERT INTO user_settings (key, value, updated_at)
+           VALUES ('global', ?1, ?2)
+           ON CONFLICT(key) DO UPDATE SET
+             value=excluded.value, updated_at=excluded.updated_at"#,
+        params![json, now],
+    )?;
+    Ok(())
+}
+
+pub fn get_user_settings(conn: &Connection) -> anyhow::Result<vespetrel_core::UserSettings> {
+    let mut stmt = conn.prepare("SELECT value FROM user_settings WHERE key = 'global'")?;
+    let opt_json: Option<String> = stmt.query_row([], |row| row.get(0)).optional()?;
+    match opt_json {
+        Some(json) => Ok(serde_json::from_str(&json).unwrap_or_default()),
+        None => Ok(vespetrel_core::UserSettings::default()),
+    }
+}
+
 #[cfg(test)]
 mod tests {
 
@@ -669,5 +694,26 @@ mod tests {
             list_signatures_for_account(&conn, &acct.id).unwrap().len(),
             0
         );
+
+        // 9. User Settings
+        let default_settings = get_user_settings(&conn).unwrap();
+        assert_eq!(
+            default_settings.layout,
+            vespetrel_core::PaneLayout::ThreePaneVertical
+        );
+        assert_eq!(default_settings.accent_color, "#3b82f6");
+
+        let mut custom_settings = default_settings.clone();
+        custom_settings.theme = vespetrel_core::ColorTheme::CatppuccinMocha;
+        custom_settings.layout = vespetrel_core::PaneLayout::ClassicHorizontal;
+        custom_settings.accent_color = "#cba6f7".into();
+        custom_settings.undo_send_seconds = 15;
+        save_user_settings(&conn, &custom_settings).unwrap();
+
+        let loaded = get_user_settings(&conn).unwrap();
+        assert_eq!(loaded.theme, vespetrel_core::ColorTheme::CatppuccinMocha);
+        assert_eq!(loaded.layout, vespetrel_core::PaneLayout::ClassicHorizontal);
+        assert_eq!(loaded.accent_color, "#cba6f7");
+        assert_eq!(loaded.undo_send_seconds, 15);
     }
 }
