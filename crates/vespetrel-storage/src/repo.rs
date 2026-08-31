@@ -141,6 +141,7 @@ pub fn insert_message(conn: &Connection, msg: &Message) -> anyhow::Result<()> {
            VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22,?23,?24,?25)
            ON CONFLICT(folder_id, remote_uid) DO UPDATE SET
              thread_id=excluded.thread_id,
+             message_id_header=excluded.message_id_header,
              in_reply_to=excluded.in_reply_to,
              references_header=excluded.references_header,
              subject=excluded.subject,
@@ -188,6 +189,7 @@ pub fn insert_message(conn: &Connection, msg: &Message) -> anyhow::Result<()> {
             msg.size_bytes,
         ],
     )?;
+
     Ok(())
 }
 
@@ -272,7 +274,12 @@ pub fn delete_message(conn: &Connection, message_id: &str) -> anyhow::Result<()>
 
     if let Some(path_str) = blob_path {
         let p = std::path::Path::new(&path_str);
-        if p.exists() {
+        let is_safe_ext = p
+            .extension()
+            .and_then(|e| e.to_str())
+            .is_some_and(|ext| ext == "lz4" || ext == "zst" || ext == "blob");
+
+        if is_safe_ext && !path_str.contains("..") && p.is_file() {
             let _ = std::fs::remove_file(p);
         }
     }

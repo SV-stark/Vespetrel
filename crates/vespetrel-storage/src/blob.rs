@@ -26,22 +26,6 @@ impl BlobStore {
         std::fs::create_dir_all(&self.base)
     }
 
-    fn blob_path(&self, id: &str) -> std::io::Result<PathBuf> {
-        if id.is_empty()
-            || !id
-                .chars()
-                .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
-        {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::InvalidInput,
-                "Invalid blob ID: must be alphanumeric or hyphen/underscore",
-            ));
-        }
-        // Shard by first 2 chars to avoid huge directories
-        let shard = &id[..2.min(id.len())];
-        Ok(self.base.join(shard).join(format!("{id}.lz4")))
-    }
-
     pub fn write(&self, id: &str, data: &[u8]) -> std::io::Result<PathBuf> {
         self.ensure_base()?;
         let path = self.blob_path(id)?;
@@ -58,6 +42,29 @@ impl BlobStore {
         self.cache
             .insert(id.to_string(), Bytes::copy_from_slice(data));
         Ok(path)
+    }
+
+    pub fn blob_path(&self, id: &str) -> std::io::Result<PathBuf> {
+        if id.is_empty()
+            || !id
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+        {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "Invalid blob ID: must be alphanumeric or hyphen/underscore",
+            ));
+        }
+        let shard = &id[..2.min(id.len())];
+        let lz4_path = self.base.join(shard).join(format!("{id}.lz4"));
+        if lz4_path.exists() {
+            return Ok(lz4_path);
+        }
+        let zst_path = self.base.join(shard).join(format!("{id}.zst"));
+        if zst_path.exists() {
+            return Ok(zst_path);
+        }
+        Ok(lz4_path)
     }
 
     pub fn read(&self, id: &str) -> std::io::Result<Vec<u8>> {
@@ -81,6 +88,11 @@ impl BlobStore {
 
     pub fn read_path(&self, path: &Path) -> std::io::Result<Vec<u8>> {
         let compressed = std::fs::read(path)?;
+        if path.extension().and_then(|e| e.to_str()) == Some("zst") {
+            return zstd::decode_all(&compressed[..])
+                .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string()));
+        }
+
         if compressed.len() >= 4 {
             let uncompressed_size =
                 u32::from_le_bytes([compressed[0], compressed[1], compressed[2], compressed[3]]);
@@ -133,7 +145,10 @@ impl BlobStore {
             std::fs::create_dir_all(parent)?;
         }
         let compressed = zstd::encode_all(data, 3).map_err(std::io::Error::other)?;
-        let tmp_path = path.with_extension("tmp");
+        let tmp_path = self
+            .base
+            .join(shard)
+            .join(format!("{id}.{}.tmp", uuid::Uuid::new_v4()));
         std::fs::write(&tmp_path, compressed)?;
         std::fs::rename(&tmp_path, &path)?;
         Ok(path)
@@ -154,6 +169,14 @@ mod tests {
         let out = store.read(id).unwrap();
         assert_eq!(out, data);
         store.delete(id).unwrap();
+
+        // Test zstd roundtrip
+        let zstd_id = "zstd5678";
+        store.write_zstd(zstd_id, data).unwrap();
+        let zstd_out = store.read(zstd_id).unwrap();
+        assert_eq!(zstd_out, data);
+        store.delete(zstd_id).unwrap();
+
         let _ = std::fs::remove_dir_all(dir);
     }
 }

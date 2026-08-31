@@ -74,6 +74,13 @@ fn parse_rss_item(block: &str) -> Option<FeedItem> {
     let author =
         extract_tag_content(block, "author").or_else(|| extract_tag_content(block, "dc:creator"));
     let summary = extract_tag_content(block, "description");
+    let published_at = extract_tag_content(block, "pubDate")
+        .and_then(|d| {
+            DateTime::parse_from_rfc2822(&d)
+                .ok()
+                .map(|dt| dt.with_timezone(&Utc))
+        })
+        .unwrap_or_else(Utc::now);
 
     Some(FeedItem {
         guid,
@@ -81,7 +88,7 @@ fn parse_rss_item(block: &str) -> Option<FeedItem> {
         link,
         author,
         summary,
-        published_at: Utc::now(),
+        published_at,
     })
 }
 
@@ -91,23 +98,44 @@ fn parse_atom_entry(block: &str) -> Option<FeedItem> {
     let summary =
         extract_tag_content(block, "summary").or_else(|| extract_tag_content(block, "content"));
     let author = extract_tag_content(block, "name");
+    let link = extract_atom_link(block).unwrap_or_default();
+    let published_at = extract_tag_content(block, "published")
+        .or_else(|| extract_tag_content(block, "updated"))
+        .and_then(|d| {
+            DateTime::parse_from_rfc3339(&d)
+                .ok()
+                .map(|dt| dt.with_timezone(&Utc))
+        })
+        .unwrap_or_else(Utc::now);
 
     Some(FeedItem {
         guid: if guid.is_empty() { title.clone() } else { guid },
         title,
-        link: String::new(),
+        link,
         author,
         summary,
-        published_at: Utc::now(),
+        published_at,
     })
 }
 
+fn extract_atom_link(xml: &str) -> Option<String> {
+    if let Some((_, rest)) = xml.split_once("<link")
+        && let Some((tag_attrs, _)) = rest.split_once('>')
+        && let Some((_, href_rest)) = tag_attrs.split_once("href=\"")
+        && let Some((href, _)) = href_rest.split_once('"')
+    {
+        return Some(href.to_string());
+    }
+    extract_tag_content(xml, "link")
+}
+
 fn extract_tag_content(xml: &str, tag: &str) -> Option<String> {
-    let open_tag = format!("<{tag}>");
+    let open_prefix = format!("<{tag}");
     let close_tag = format!("</{tag}>");
 
-    let (_, rest) = xml.split_once(&open_tag)?;
-    let (content, _) = rest.split_once(&close_tag)?;
+    let (_, rest) = xml.split_once(&open_prefix)?;
+    let (_, after_angle) = rest.split_once('>')?;
+    let (content, _) = after_angle.split_once(&close_tag)?;
 
     // Strip CDATA if present
     let clean = if content.starts_with("<![CDATA[") && content.ends_with("]]>") {

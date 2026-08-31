@@ -96,7 +96,7 @@ impl Signature {
         if let Some(avatar) = &p.avatar_url {
             html.push_str(&format!(
                 "      <td style=\"vertical-align: top; padding-right: 16px;\"><img src=\"{}\" width=\"56\" height=\"56\" style=\"border-radius: 50%; object-fit: cover; display: block; border: 1px solid #d4d4d8;\" alt=\"Avatar\" /></td>\n",
-                html_escape(avatar)
+                sanitize_url(avatar)
             ));
         }
 
@@ -133,7 +133,7 @@ impl Signature {
         if let Some(web) = &p.website {
             contact_items.push(format!(
                 "<a href=\"{}\" style=\"color: #2563eb; text-decoration: none;\">🌐 {}</a>",
-                html_escape(web),
+                sanitize_url(web),
                 html_escape(web)
             ));
         }
@@ -145,7 +145,7 @@ impl Signature {
 
         if !p.social_links.is_empty() {
             let links: Vec<String> = p.social_links.iter().map(|(net, url)| {
-                format!("<a href=\"{}\" style=\"color: #4f46e5; text-decoration: none; font-size: 11px; margin-right: 8px; font-weight: 500;\">{}</a>", html_escape(url), html_escape(net))
+                format!("<a href=\"{}\" style=\"color: #4f46e5; text-decoration: none; font-size: 11px; margin-right: 8px; font-weight: 500;\">{}</a>", sanitize_url(url), html_escape(net))
             }).collect();
             html.push_str(&format!(
                 "        <div style=\"margin-top: 6px;\">{}</div>\n",
@@ -228,11 +228,26 @@ impl Signature {
     }
 }
 
+fn sanitize_url(url: &str) -> String {
+    let trimmed = url.trim();
+    let lower = trimmed.to_ascii_lowercase();
+    if lower.starts_with("https://")
+        || lower.starts_with("http://")
+        || lower.starts_with("mailto:")
+        || lower.starts_with("tel:")
+    {
+        html_escape(trimmed)
+    } else {
+        "#".into()
+    }
+}
+
 fn html_escape(s: &str) -> String {
     s.replace('&', "&amp;")
         .replace('<', "&lt;")
         .replace('>', "&gt;")
         .replace('"', "&quot;")
+        .replace('\'', "&#39;")
 }
 
 #[derive(Debug, Clone, Default)]

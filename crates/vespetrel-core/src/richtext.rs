@@ -86,12 +86,12 @@ impl RichTextDocument {
 
         for line in markdown.lines() {
             let line_trimmed = line.trim_start();
-            let (block_kind, text_content) = if let Some(h1) = line_trimmed.strip_prefix("# ") {
-                (BlockKind::Heading(1), h1)
+            let (block_kind, text_content) = if let Some(h3) = line_trimmed.strip_prefix("### ") {
+                (BlockKind::Heading(3), h3)
             } else if let Some(h2) = line_trimmed.strip_prefix("## ") {
                 (BlockKind::Heading(2), h2)
-            } else if let Some(h3) = line_trimmed.strip_prefix("### ") {
-                (BlockKind::Heading(3), h3)
+            } else if let Some(h1) = line_trimmed.strip_prefix("# ") {
+                (BlockKind::Heading(1), h1)
             } else if let Some(bullet) = line_trimmed
                 .strip_prefix("- ")
                 .or_else(|| line_trimmed.strip_prefix("* "))
@@ -150,7 +150,7 @@ impl RichTextDocument {
                     }
                     BlockKind::BulletList => {
                         html.push_str(&format!(
-                            "<li style=\"margin-left: 20px;\">{formatted_inner}</li>\n"
+                            "<li style=\"margin: 4px 0;\">{formatted_inner}</li>\n"
                         ));
                     }
                     BlockKind::NumberedList(num) => {
@@ -165,7 +165,7 @@ impl RichTextDocument {
                         html.push_str(&format!("<pre style=\"background: #f4f4f5; padding: 12px; border-radius: 6px;\"><code>{formatted_inner}</code></pre>\n"));
                     }
                     BlockKind::Paragraph => {
-                        if formatted_inner.trim().is_empty() {
+                        if range.is_empty() {
                             html.push_str("<p><br/></p>\n");
                         } else {
                             html.push_str(&format!(
@@ -194,50 +194,95 @@ fn parse_inline_markdown(line: &str, base_offset: usize) -> (String, Vec<TextSpa
     while let Some(c) = chars.next() {
         if c == '*' && chars.peek() == Some(&'*') {
             chars.next(); // skip second *
-            let start = base_offset + plain.len();
             let mut bold_content = String::new();
+            let mut closed = false;
             while let Some(bc) = chars.next() {
                 if bc == '*' && chars.peek() == Some(&'*') {
                     chars.next();
+                    closed = true;
                     break;
                 }
                 bold_content.push(bc);
             }
-            let end = start + bold_content.len();
-            plain.push_str(&bold_content);
-            spans.push(TextSpan {
-                range: start..end,
-                style: InlineStyle::Bold,
-                link_url: None,
-            });
+            if closed {
+                let start = base_offset + plain.len();
+                let end = start + bold_content.len();
+                plain.push_str(&bold_content);
+                spans.push(TextSpan {
+                    range: start..end,
+                    style: InlineStyle::Bold,
+                    link_url: None,
+                });
+            } else {
+                plain.push_str("**");
+                plain.push_str(&bold_content);
+            }
+        } else if c == '`' {
+            let mut code_content = String::new();
+            let mut closed = false;
+            for cc in chars.by_ref() {
+                if cc == '`' {
+                    closed = true;
+                    break;
+                }
+                code_content.push(cc);
+            }
+
+            if closed {
+                let start = base_offset + plain.len();
+                let end = start + code_content.len();
+                plain.push_str(&code_content);
+                spans.push(TextSpan {
+                    range: start..end,
+                    style: InlineStyle::InlineCode,
+                    link_url: None,
+                });
+            } else {
+                plain.push('`');
+                plain.push_str(&code_content);
+            }
         } else if c == '[' {
             let mut text = String::new();
+            let mut closed_bracket = false;
             for tc in chars.by_ref() {
                 if tc == ']' {
+                    closed_bracket = true;
                     break;
                 }
                 text.push(tc);
             }
-            if chars.peek() == Some(&'(') {
+            if closed_bracket && chars.peek() == Some(&'(') {
                 chars.next();
                 let mut url = String::new();
+                let mut closed_paren = false;
                 for uc in chars.by_ref() {
                     if uc == ')' {
+                        closed_paren = true;
                         break;
                     }
                     url.push(uc);
                 }
-                let start = base_offset + plain.len();
-                let end = start + text.len();
-                plain.push_str(&text);
-                spans.push(TextSpan {
-                    range: start..end,
-                    style: InlineStyle::Underline,
-                    link_url: Some(url),
-                });
+                if closed_paren {
+                    let start = base_offset + plain.len();
+                    let end = start + text.len();
+                    plain.push_str(&text);
+                    spans.push(TextSpan {
+                        range: start..end,
+                        style: InlineStyle::Underline,
+                        link_url: Some(url),
+                    });
+                } else {
+                    plain.push('[');
+                    plain.push_str(&text);
+                    plain.push_str("](");
+                    plain.push_str(&url);
+                }
             } else {
                 plain.push('[');
                 plain.push_str(&text);
+                if closed_bracket {
+                    plain.push(']');
+                }
             }
         } else {
             plain.push(c);
@@ -245,6 +290,20 @@ fn parse_inline_markdown(line: &str, base_offset: usize) -> (String, Vec<TextSpa
     }
 
     (plain, spans)
+}
+
+fn sanitize_link_url(url: &str) -> String {
+    let trimmed = url.trim();
+    let lower = trimmed.to_ascii_lowercase();
+    if lower.starts_with("https://")
+        || lower.starts_with("http://")
+        || lower.starts_with("mailto:")
+        || lower.starts_with("tel:")
+    {
+        html_escape(trimmed)
+    } else {
+        "#".into()
+    }
 }
 
 fn render_inline_spans(full_text: &str, block_range: Range<usize>, spans: &[TextSpan]) -> String {
@@ -287,10 +346,12 @@ fn render_inline_spans(full_text: &str, block_range: Range<usize>, spans: &[Text
         if full_text.is_char_boundary(span_start) && full_text.is_char_boundary(span_end) {
             let inner = html_escape(&full_text[span_start..span_end]);
             let formatted = match (&span.style, &span.link_url) {
-                (_, Some(url)) => format!(
-                    "<a href=\"{}\" style=\"color: #2563eb; text-decoration: underline;\">{inner}</a>",
-                    html_escape(url)
-                ),
+                (_, Some(url)) => {
+                    let safe_url = sanitize_link_url(url);
+                    format!(
+                        "<a href=\"{safe_url}\" target=\"_blank\" rel=\"noopener noreferrer\" style=\"color: #2563eb; text-decoration: underline;\">{inner}</a>"
+                    )
+                }
                 (InlineStyle::Bold, None) => format!("<strong>{inner}</strong>"),
                 (InlineStyle::Italic, None) => format!("<em>{inner}</em>"),
                 (InlineStyle::Underline, None) => format!("<u>{inner}</u>"),
@@ -316,6 +377,7 @@ fn html_escape(s: &str) -> String {
         .replace('<', "&lt;")
         .replace('>', "&gt;")
         .replace('"', "&quot;")
+        .replace('\'', "&#39;")
 }
 
 #[cfg(test)]

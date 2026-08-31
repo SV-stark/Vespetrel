@@ -1,3 +1,4 @@
+use mail_parser::MessageParser;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -137,14 +138,76 @@ impl AccountWorker {
                     let mut summaries = Vec::new();
 
                     for sync_msg in &delta.inserted {
-                        let msg = vespetrel_core::Message::new(
-                            &self.account_id,
-                            &folder_db_id,
-                            sync_msg.remote_uid,
-                            format!("Message {}", sync_msg.remote_uid),
-                            "sender@example.com",
-                            vec![self.account_id.clone()],
-                        );
+                        let mut msg = if let Some(ref raw_bytes) = sync_msg.raw_rfc822 {
+                            if let Some(parsed) = MessageParser::default().parse(raw_bytes) {
+                                let subject = parsed.subject().unwrap_or("No Subject").to_string();
+                                let from_addr = parsed
+                                    .from()
+                                    .and_then(|f| f.first())
+                                    .and_then(|a| a.address.as_deref())
+                                    .unwrap_or("unknown@sender.com")
+                                    .to_string();
+                                let from_name = parsed
+                                    .from()
+                                    .and_then(|f| f.first())
+                                    .and_then(|a| a.name.as_deref())
+                                    .map(|s| s.to_string());
+                                let to_addrs: Vec<String> = parsed
+                                    .to()
+                                    .map(|addrs| {
+                                        addrs
+                                            .iter()
+                                            .filter_map(|a| {
+                                                a.address.as_deref().map(|s| s.to_string())
+                                            })
+                                            .collect()
+                                    })
+                                    .unwrap_or_else(|| vec![self.account_id.clone()]);
+
+                                let mut m = vespetrel_core::Message::new(
+                                    &self.account_id,
+                                    &folder_db_id,
+                                    sync_msg.remote_uid,
+                                    subject,
+                                    from_addr,
+                                    to_addrs,
+                                );
+                                m.from_name = from_name;
+                                m.message_id_header = parsed.message_id().map(|s| s.to_string());
+                                m.in_reply_to =
+                                    parsed.in_reply_to().as_text().map(|s| s.to_string());
+                                m.body_snippet = parsed
+                                    .body_text(0)
+                                    .map(|t| t.chars().take(200).collect::<String>());
+                                m.body_text_preview = parsed.body_text(0).map(|t| t.to_string());
+                                m.size_bytes = raw_bytes.len() as i64;
+                                m
+                            } else {
+                                vespetrel_core::Message::new(
+                                    &self.account_id,
+                                    &folder_db_id,
+                                    sync_msg.remote_uid,
+                                    format!("Message {}", sync_msg.remote_uid),
+                                    "sender@example.com",
+                                    vec![self.account_id.clone()],
+                                )
+                            }
+                        } else {
+                            vespetrel_core::Message::new(
+                                &self.account_id,
+                                &folder_db_id,
+                                sync_msg.remote_uid,
+                                format!("Message {}", sync_msg.remote_uid),
+                                "sender@example.com",
+                                vec![self.account_id.clone()],
+                            )
+                        };
+
+                        // Apply synced flags
+                        msg.is_read = sync_msg.flags.contains(&vespetrel_core::Flag::Seen);
+                        msg.is_flagged = sync_msg.flags.contains(&vespetrel_core::Flag::Flagged);
+                        msg.is_draft = sync_msg.flags.contains(&vespetrel_core::Flag::Draft);
+
                         summaries.push(msg.summary());
 
                         // Persist synced message to storage

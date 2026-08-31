@@ -36,7 +36,8 @@ impl Contact {
             .email
             .first()
             .map(|e| e.value.clone())
-            .unwrap_or_default();
+            .filter(|e| !e.trim().is_empty())
+            .ok_or_else(|| anyhow::anyhow!("vCard missing required EMAIL property"))?;
 
         Ok(Self {
             id: uuid::Uuid::new_v4().to_string(),

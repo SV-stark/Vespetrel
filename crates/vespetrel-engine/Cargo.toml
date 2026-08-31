@@ -23,6 +23,8 @@ parking_lot = { workspace = true }
 uuid = { workspace = true }
 memchr = { workspace = true }
 ahash = { workspace = true }
+mail-parser = { workspace = true }
+
 
 
 

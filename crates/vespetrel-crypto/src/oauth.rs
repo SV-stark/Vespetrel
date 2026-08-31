@@ -100,9 +100,24 @@ impl OAuth2Engine {
             let listener = TcpListener::bind(&addr).await?;
 
             let (mut socket, _) = listener.accept().await?;
-            let mut buf = vec![0u8; 8192];
-            let n = socket.read(&mut buf).await?;
-            let request_str = String::from_utf8_lossy(&buf[..n]);
+            let mut request_bytes = Vec::new();
+            let mut chunk = [0u8; 1024];
+
+            // Read until complete HTTP header delimiter \r\n\r\n or \n\n (up to 16KB limit)
+            while request_bytes.len() < 16384 {
+                let n = socket.read(&mut chunk).await?;
+                if n == 0 {
+                    break;
+                }
+                request_bytes.extend_from_slice(&chunk[..n]);
+                if request_bytes.windows(4).any(|w| w == b"\r\n\r\n")
+                    || request_bytes.windows(2).any(|w| w == b"\n\n")
+                {
+                    break;
+                }
+            }
+
+            let request_str = String::from_utf8_lossy(&request_bytes);
 
             if let Some(expected) = expected_state {
                 let state = parse_param_from_http_request(&request_str, "state");

@@ -85,7 +85,7 @@ impl MeetingInvitation {
             {
                 end_at = dt;
             } else if line.starts_with("ORGANIZER") {
-                if let Some((params, mail)) = line.split_once(':') {
+                if let Some((params, mail)) = split_ical_line(line) {
                     organizer_email = mail
                         .trim_start_matches("mailto:")
                         .trim_start_matches("MAILTO:")
@@ -96,9 +96,8 @@ impl MeetingInvitation {
                             .map(|s| s.trim_matches('"').to_string());
                     }
                 }
-            } else if let Some((_, mail_part)) = line
-                .strip_prefix("ATTENDEE")
-                .and_then(|r| r.split_once(':'))
+            } else if line.starts_with("ATTENDEE")
+                && let Some((_, mail_part)) = split_ical_line(line)
             {
                 let mail = mail_part
                     .trim_start_matches("mailto:")
@@ -144,7 +143,7 @@ impl MeetingInvitation {
         let dtend = self.end_at.format("%Y%m%dT%H%M%SZ");
 
         let name_attr = responder_name
-            .map(|n| format!(";CN=\"{}\"", n))
+            .map(|n| format!(";CN=\"{}\"", escape_ical_param(n)))
             .unwrap_or_default();
 
         format!(
@@ -163,18 +162,43 @@ impl MeetingInvitation {
              SUMMARY:{}\r\n\
              END:VEVENT\r\n\
              END:VCALENDAR\r\n",
-            self.uid,
+            escape_ical_text(&self.uid),
             self.sequence,
             dtstamp,
             dtstart,
             dtend,
-            self.organizer_email,
+            escape_ical_param(&self.organizer_email),
             name_attr,
             rsvp.as_partstat(),
-            responder_email,
-            self.summary
+            escape_ical_param(responder_email),
+            escape_ical_text(&self.summary)
         )
     }
+}
+
+/// Split an iCalendar line into (Property+Params, Value) ignoring colons inside quoted strings
+fn split_ical_line(line: &str) -> Option<(&str, &str)> {
+    let mut in_quotes = false;
+    for (i, c) in line.char_indices() {
+        if c == '"' {
+            in_quotes = !in_quotes;
+        } else if c == ':' && !in_quotes {
+            return Some((&line[..i], &line[i + 1..]));
+        }
+    }
+    None
+}
+
+fn escape_ical_text(val: &str) -> String {
+    val.replace('\\', "\\\\")
+        .replace(';', "\\;")
+        .replace(',', "\\,")
+        .replace('\n', "\\n")
+        .replace('\r', "")
+}
+
+fn escape_ical_param(val: &str) -> String {
+    val.replace(['\r', '\n', '"'], "")
 }
 
 fn parse_ical_datetime(val: &str) -> Option<DateTime<Utc>> {

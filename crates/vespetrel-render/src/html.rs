@@ -60,13 +60,13 @@ fn rewrite_html(input: &str, opts: &RewriteOptions) -> anyhow::Result<String> {
 
     let settings = Settings::new()
         .append_element_content_handler(element!(
-            "script, iframe, object, embed, applet, base",
+            "script, iframe, object, embed, applet, base, form, input, button, select, textarea, link, meta",
             |el| {
                 el.remove();
                 Ok(())
             }
         ))
-        .append_element_content_handler(element!("img", |el| {
+        .append_element_content_handler(element!("img, source, video", |el| {
             // Remove tracking pixels
             if is_tracking_pixel(el) {
                 el.remove();
@@ -83,6 +83,21 @@ fn rewrite_html(input: &str, opts: &RewriteOptions) -> anyhow::Result<String> {
                     el.remove_attribute("src");
                 }
             }
+            if let Some(srcset) = el.get_attribute("srcset")
+                && opts.block_remote_images
+                && (srcset.contains("http://") || srcset.contains("https://"))
+            {
+                el.set_attribute("data-blocked-srcset", &srcset)?;
+                el.remove_attribute("srcset");
+            }
+            if let Some(poster) = el.get_attribute("poster")
+                && opts.block_remote_images
+                && (poster.starts_with("http://") || poster.starts_with("https://"))
+            {
+                el.set_attribute("data-blocked-poster", &poster)?;
+                el.remove_attribute("poster");
+            }
+
             Ok(())
         }))
         .append_element_content_handler(element!("a", |el| {

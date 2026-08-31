@@ -151,21 +151,21 @@ pub fn parse_imap_list_line(line: &str) -> Option<vespetrel_core::RemoteFolder> 
     }
 
     let rest = line[close_paren + 1..].trim();
-    let name = if let Some(last_quote_start) = rest.rfind('"') {
-        let before = &rest[..last_quote_start];
-        if let Some(first_quote) = before.rfind('"') {
-            &rest[first_quote + 1..last_quote_start]
+    let name_str: String = if let Some(last_quote_end) = rest.rfind('"') {
+        let before = &rest[..last_quote_end];
+        if let Some(first_quote_start) = before.rfind('"') {
+            before[first_quote_start + 1..].replace("\\\"", "\"")
         } else {
-            rest.trim_matches('"')
+            rest.trim_matches('"').to_string()
         }
     } else {
-        rest.split_whitespace().last().unwrap_or(rest)
+        rest.split_whitespace().last().unwrap_or(rest).to_string()
     };
 
     Some(vespetrel_core::RemoteFolder {
-        remote_id: name.to_string(),
-        name: name.to_string(),
-        path: name.to_string(),
+        remote_id: name_str.clone(),
+        name: name_str.clone(),
+        path: name_str,
         role_hint,
         uid_validity: Some(1),
         highest_mod_seq: Some(1),

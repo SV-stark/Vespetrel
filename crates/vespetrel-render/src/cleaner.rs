@@ -1,5 +1,11 @@
 //! URL Tracker Cleaner & Anti-Phishing Link Analyzer §7 Phase 5
 use ahash::AHashSet;
+use std::net::IpAddr;
+use std::str::FromStr;
+use std::sync::LazyLock;
+
+static TRACKING_SET: LazyLock<AHashSet<&'static str>> =
+    LazyLock::new(|| TRACKING_PARAMS.iter().copied().collect());
 
 const TRACKING_PARAMS: &[&str] = &[
     "utm_source",
@@ -68,8 +74,6 @@ pub fn clean_tracking_url(raw_url: &str) -> String {
         None => (query_and_fragment, None),
     };
 
-    let track_set: AHashSet<&str> = TRACKING_PARAMS.iter().copied().collect();
-
     let cleaned_pairs: Vec<&str> = query
         .split('&')
         .filter(|pair| {
@@ -81,7 +85,7 @@ pub fn clean_tracking_url(raw_url: &str) -> String {
                 None => *pair,
             };
             let key_lower = key.to_ascii_lowercase();
-            !track_set.contains(key_lower.as_str())
+            !TRACKING_SET.contains(key_lower.as_str())
         })
         .collect();
 
@@ -104,19 +108,24 @@ pub fn analyze_phishing_risk(href: &str, display_text: &str) -> PhishingRisk {
     let href_clean = href.trim();
     let text_clean = display_text.trim();
 
+    if href_clean.is_empty() || text_clean.is_empty() {
+        return PhishingRisk::Safe;
+    }
+
     let href_lower = href_clean.to_lowercase();
     let text_lower = text_clean.to_lowercase();
 
-    // 1. Check for raw IP address target
+    // 1. Check for raw IP address target (IPv4 or IPv6)
     if let Some(host) = extract_host(&href_lower) {
-        if host.split('.').all(|part| part.parse::<u8>().is_ok()) && host.split('.').count() == 4 {
+        let clean_host = host.trim_matches('[').trim_matches(']');
+        if IpAddr::from_str(clean_host).is_ok() {
             return PhishingRisk::RawIpAddress {
                 ip: host.to_string(),
             };
         }
 
         // 2. Check for Punycode homograph
-        if host.starts_with("xn--") || host.contains(".xn--") {
+        if host.split('.').any(|part| part.starts_with("xn--")) {
             return PhishingRisk::PunycodeHomograph {
                 domain: host.to_string(),
             };

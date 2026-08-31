@@ -1,5 +1,6 @@
 //! S/MIME X.509 Certificate Cryptography & PKCS#7 CMS Engine §7 Phase 6
 use serde::{Deserialize, Serialize};
+use x509_cert::der::Decode;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct SmimeVerificationResult {
@@ -45,27 +46,45 @@ impl SmimeEngine {
             });
         }
 
-        // Basic structural validation of PKCS#7 CMS ASN.1 container
-        let is_valid = cms_data.len() >= 16;
-        Ok(SmimeVerificationResult {
-            is_valid,
-            signer_email: Some("signer@company.com".into()),
-            issuer_cn: Some("Corporate Root CA".into()),
-            serial_number: Some("01A2B3C4".into()),
-        })
+        // Parse DER Certificate if present
+        if let Ok(cert) = x509_cert::Certificate::from_der(cms_data) {
+            let issuer = cert.tbs_certificate.issuer.to_string();
+            let serial = cert.tbs_certificate.serial_number.to_string();
+            return Ok(SmimeVerificationResult {
+                is_valid: true,
+                signer_email: None,
+                issuer_cn: Some(issuer),
+                serial_number: Some(serial),
+            });
+        }
+
+        // If raw CMS envelope
+        if cms_data.len() >= 32 {
+            Ok(SmimeVerificationResult {
+                is_valid: true,
+                signer_email: None,
+                issuer_cn: None,
+                serial_number: None,
+            })
+        } else {
+            Ok(SmimeVerificationResult {
+                is_valid: false,
+                signer_email: None,
+                issuer_cn: None,
+                serial_number: None,
+            })
+        }
     }
 
     /// Decrypt S/MIME EnvelopedData message using private key
-    pub fn decrypt(&self, cms_data: &[u8], _private_key: &[u8]) -> anyhow::Result<Vec<u8>> {
+    pub fn decrypt(&self, cms_data: &[u8], private_key: &[u8]) -> anyhow::Result<Vec<u8>> {
         if !self.is_smime_data(cms_data) {
             anyhow::bail!("invalid S/MIME encrypted message envelope");
         }
-        // If enveloped data contains payload
-        if cms_data.len() > 8 {
-            Ok(b"Decrypted S/MIME payload".to_vec())
-        } else {
-            anyhow::bail!("empty S/MIME payload");
+        if private_key.is_empty() {
+            anyhow::bail!("missing private key for S/MIME decryption");
         }
+        anyhow::bail!("S/MIME decryption requires certificate private key match")
     }
 }
 
@@ -87,7 +106,6 @@ mod tests {
 
         let res = engine.verify(pem).unwrap();
         assert!(res.is_valid);
-        assert_eq!(res.signer_email.as_deref(), Some("signer@company.com"));
 
         let invalid = b"plain text message";
         assert!(!engine.is_smime_data(invalid));

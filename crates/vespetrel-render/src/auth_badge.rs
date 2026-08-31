@@ -42,40 +42,48 @@ impl AuthBadgeParser {
     /// e.g. "mx.google.com; dkim=pass header.i=@github.com; spf=pass (google.com: domain of support@github.com designates 192.30.252.204 as permitted sender); dmarc=pass"
     pub fn parse_authentication_results(header: &str) -> EmailSecuritySummary {
         let lower = header.to_lowercase();
+        let segments: Vec<&str> = lower.split(';').map(|s| s.trim()).collect();
 
-        let dkim = if lower.contains("dkim=pass") {
-            AuthStatus::Pass
-        } else if lower.contains("dkim=fail") {
-            AuthStatus::Fail
-        } else if lower.contains("dkim=neutral") {
-            AuthStatus::Neutral
-        } else {
-            AuthStatus::None
-        };
+        let mut dkim = AuthStatus::None;
+        let mut spf = AuthStatus::None;
+        let mut dmarc = AuthStatus::None;
 
-        let spf = if lower.contains("spf=pass") {
-            AuthStatus::Pass
-        } else if lower.contains("spf=fail") {
-            AuthStatus::Fail
-        } else if lower.contains("spf=softfail") {
-            AuthStatus::SoftFail
-        } else if lower.contains("spf=neutral") {
-            AuthStatus::Neutral
-        } else {
-            AuthStatus::None
-        };
-
-        let dmarc = if lower.contains("dmarc=pass") {
-            AuthStatus::Pass
-        } else if lower.contains("dmarc=fail") {
-            AuthStatus::Fail
-        } else {
-            AuthStatus::None
-        };
+        for seg in &segments {
+            // Match DKIM
+            if seg.starts_with("dkim=") || seg.contains(" dkim=") {
+                if seg.contains("dkim=pass") {
+                    dkim = AuthStatus::Pass;
+                } else if seg.contains("dkim=fail") {
+                    dkim = AuthStatus::Fail;
+                } else if seg.contains("dkim=neutral") {
+                    dkim = AuthStatus::Neutral;
+                }
+            }
+            // Match SPF
+            if seg.starts_with("spf=") || seg.contains(" spf=") {
+                if seg.contains("spf=pass") {
+                    spf = AuthStatus::Pass;
+                } else if seg.contains("spf=softfail") {
+                    spf = AuthStatus::SoftFail;
+                } else if seg.contains("spf=fail") {
+                    spf = AuthStatus::Fail;
+                } else if seg.contains("spf=neutral") {
+                    spf = AuthStatus::Neutral;
+                }
+            }
+            // Match DMARC
+            if seg.starts_with("dmarc=") || seg.contains(" dmarc=") {
+                if seg.contains("dmarc=pass") {
+                    dmarc = AuthStatus::Pass;
+                } else if seg.contains("dmarc=fail") {
+                    dmarc = AuthStatus::Fail;
+                }
+            }
+        }
 
         // Extract DKIM signing domain if present (header.i=@domain.com or header.d=domain.com)
-        let dkim_domain = lower
-            .split(';')
+        let dkim_domain = segments
+            .iter()
             .find(|part| part.contains("header.i=") || part.contains("header.d="))
             .and_then(|part| {
                 part.split_whitespace().find_map(|w| {

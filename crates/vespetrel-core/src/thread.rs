@@ -116,13 +116,15 @@ impl ThreadTree {
             visited: &mut AHashSet<String>,
             depth: usize,
         ) -> Option<ThreadNode> {
-            if depth > 100 || !visited.insert(key.to_string()) {
-                return None; // Guard against infinite recursion & cycles
+            if !visited.insert(key.to_string()) {
+                return None; // Guard against cyclic references
             }
 
             let msg = id_to_msg.get(key)?;
             let mut children = Vec::new();
-            if let Some(child_keys) = parent_to_children.get(key) {
+            if depth <= 100
+                && let Some(child_keys) = parent_to_children.get(key)
+            {
                 for ck in child_keys {
                     if let Some(child_node) =
                         build_node(ck, id_to_msg, parent_to_children, visited, depth + 1)
@@ -131,6 +133,7 @@ impl ThreadTree {
                     }
                 }
             }
+
             // Sort children by date ascending
             children.sort_by_key(|c| c.sent_at);
 

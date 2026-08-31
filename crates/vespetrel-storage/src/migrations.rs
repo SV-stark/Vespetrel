@@ -150,6 +150,7 @@ pub fn run_migrations(conn: &Connection) -> anyhow::Result<()> {
 
             CREATE TRIGGER IF NOT EXISTS messages_au AFTER UPDATE ON messages
             WHEN old.subject IS NOT new.subject
+              OR old.account_id IS NOT new.account_id
               OR old.body_text_preview IS NOT new.body_text_preview
               OR old.from_address IS NOT new.from_address
               OR old.from_name IS NOT new.from_name
@@ -159,6 +160,7 @@ pub fn run_migrations(conn: &Connection) -> anyhow::Result<()> {
                 INSERT INTO messages_fts(message_id, account_id, subject, from_address, from_name, to_addresses, body_content)
                 VALUES (new.id, new.account_id, new.subject, new.from_address, new.from_name, new.to_addresses, new.body_text_preview);
             END;
+
 
             -- Calendar & Contacts (PIM)
             CREATE TABLE IF NOT EXISTS calendars (

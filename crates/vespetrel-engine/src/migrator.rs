@@ -223,7 +223,7 @@ pub fn parse_mbox_data(raw: &[u8]) -> Vec<Vec<u8>> {
                 let end = start + rel_idx;
                 let slice = &raw[start..end];
                 if !slice.trim_ascii().is_empty() {
-                    messages.push(slice.to_vec());
+                    messages.push(unescape_mboxrd(slice));
                 }
                 // Skip the \nFrom ... line
                 let after_marker = end + 1;
@@ -236,7 +236,7 @@ pub fn parse_mbox_data(raw: &[u8]) -> Vec<Vec<u8>> {
             None => {
                 let slice = &raw[start..];
                 if !slice.trim_ascii().is_empty() {
-                    messages.push(slice.to_vec());
+                    messages.push(unescape_mboxrd(slice));
                 }
                 break;
             }
@@ -244,6 +244,21 @@ pub fn parse_mbox_data(raw: &[u8]) -> Vec<Vec<u8>> {
     }
 
     messages
+}
+
+fn unescape_mboxrd(raw: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(raw.len());
+    let mut i = 0;
+    while i < raw.len() {
+        if (i == 0 || raw[i - 1] == b'\n') && raw[i..].starts_with(b">From ") {
+            i += 1; // Strip leading >
+        }
+        if i < raw.len() {
+            out.push(raw[i]);
+            i += 1;
+        }
+    }
+    out
 }
 
 #[cfg(test)]

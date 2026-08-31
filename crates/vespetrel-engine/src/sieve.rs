@@ -93,7 +93,7 @@ pub struct ManageSieveCommand;
 
 impl ManageSieveCommand {
     fn sanitize_name(name: &str) -> String {
-        name.replace(['\r', '\n', '"', '\\'], "")
+        name.replace(['\r', '\n', '"', '\\', '/', ';', '{', '}'], "")
     }
 
     pub fn put_script(name: &str, content: &str) -> String {

@@ -85,7 +85,10 @@ impl VirtualFolder {
                 format!("received_at >= {yesterday}")
             }
             VirtualFolderType::HasAttachments => "has_attachments = 1".to_string(),
-            VirtualFolderType::SavedSearch { .. } => "1 = 1".to_string(),
+            VirtualFolderType::SavedSearch { query } => {
+                let clean = query.replace('\'', "''");
+                format!("id IN (SELECT id FROM messages_fts WHERE messages_fts MATCH '{clean}')")
+            }
         }
     }
 }
