@@ -57,6 +57,105 @@ impl JmapProvider {
             ]
         })
     }
+
+    /// Build JMAP Email/query and Email/get request for a specific mailbox
+    pub fn build_email_query_request(&self, mailbox_id: &str, limit: usize) -> serde_json::Value {
+        serde_json::json!({
+            "using": ["urn:ietf:params:jmap:core", "urn:ietf:params:jmap:mail"],
+            "methodCalls": [
+                ["Email/query", {
+                    "accountId": self.config.username,
+                    "filter": { "inMailbox": mailbox_id },
+                    "sort": [{ "property": "receivedAt", "isAscending": false }],
+                    "limit": limit
+                }, "0"],
+                ["Email/get", {
+                    "accountId": self.config.username,
+                    "#ids": {
+                        "resultOf": "0",
+                        "name": "Email/query",
+                        "path": "/ids"
+                    },
+                    "properties": ["id", "blobId", "threadId", "mailboxIds", "keywords", "size", "receivedAt", "from", "to", "subject", "preview"]
+                }, "1"]
+            ]
+        })
+    }
+
+    /// Build JMAP EmailSubmission request for outbound email
+    pub fn build_email_submission_request(&self, msg: &ComposedMessage) -> serde_json::Value {
+        serde_json::json!({
+            "using": ["urn:ietf:params:jmap:core", "urn:ietf:params:jmap:mail", "urn:ietf:params:jmap:submission"],
+            "methodCalls": [
+                ["Email/set", {
+                    "accountId": self.config.username,
+                    "create": {
+                        "draftMsg": {
+                            "from": [{ "name": msg.from.name.clone().unwrap_or_default(), "email": msg.from.email }],
+                            "to": msg.to.iter().map(|t| serde_json::json!({ "name": t.name.clone().unwrap_or_default(), "email": t.email })).collect::<Vec<_>>(),
+                            "subject": msg.subject,
+                            "bodyValues": {
+                                "1": { "value": msg.body_text }
+                            },
+                            "textBody": [{ "partId": "1", "type": "text/plain" }]
+                        }
+                    }
+                }, "0"],
+                ["EmailSubmission/create", {
+                    "accountId": self.config.username,
+                    "create": {
+                        "sub1": {
+                            "emailId": "#draftMsg",
+                            "identityId": self.config.username
+                        }
+                    }
+                }, "1"]
+            ]
+        })
+    }
+}
+
+/// Parse JMAP Mailbox/get response into RemoteFolder list
+pub fn parse_jmap_mailbox_response(resp: &serde_json::Value) -> Vec<RemoteFolder> {
+    let mut folders = Vec::new();
+    let calls = resp
+        .get("methodResponses")
+        .and_then(|v| v.as_array())
+        .map(|a| a.as_slice())
+        .unwrap_or_default();
+
+    for call in calls {
+        let is_mailbox_get = call.get(0).and_then(|n| n.as_str()) == Some("Mailbox/get");
+        if is_mailbox_get {
+            let list = call
+                .get(1)
+                .and_then(|o| o.get("list"))
+                .and_then(|l| l.as_array())
+                .map(|a| a.as_slice())
+                .unwrap_or_default();
+
+            for item in list {
+                if let (Some(id), Some(name)) = (
+                    item.get("id").and_then(|i| i.as_str()),
+                    item.get("name").and_then(|n| n.as_str()),
+                ) {
+                    let role = item
+                        .get("role")
+                        .and_then(|r| r.as_str())
+                        .map(|r| r.to_string());
+                    folders.push(RemoteFolder {
+                        remote_id: id.to_string(),
+                        name: name.to_string(),
+                        path: name.to_string(),
+                        role_hint: role,
+                        uid_validity: None,
+                        highest_mod_seq: None,
+                    });
+                }
+            }
+        }
+    }
+    folders
 }
 
 #[async_trait]
@@ -117,5 +216,41 @@ impl MailProvider for JmapProvider {
     ) -> anyhow::Result<()> {
         debug!(uids=?remote_ids, add=?add, remove=?remove, "JMAP Email/set keywords");
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_jmap_requests_and_parsing() {
+        let cfg = JmapConfig::new(
+            "https://api.fastmail.com/jmap",
+            "user@fastmail.com",
+            "token123",
+        );
+        let provider = JmapProvider::new(cfg);
+
+        let req = provider.build_get_mailboxes_request();
+        assert!(req.get("using").is_some());
+        assert!(req.get("methodCalls").is_some());
+
+        let mock_resp = serde_json::json!({
+            "methodResponses": [
+                ["Mailbox/get", {
+                    "list": [
+                        { "id": "mbx-inbox", "name": "Inbox", "role": "inbox" },
+                        { "id": "mbx-sent", "name": "Sent Items", "role": "sent" }
+                    ]
+                }, "0"]
+            ]
+        });
+
+        let folders = parse_jmap_mailbox_response(&mock_resp);
+        assert_eq!(folders.len(), 2);
+        assert_eq!(folders[0].remote_id, "mbx-inbox");
+        assert_eq!(folders[0].role_hint.as_deref(), Some("inbox"));
+        assert_eq!(folders[1].name, "Sent Items");
     }
 }

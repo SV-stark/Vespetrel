@@ -22,13 +22,32 @@ impl BayesClassifier {
         Self::default()
     }
 
-    /// Tokenize input text into lowercase alphanumeric words
+    /// Tokenize input text into lowercase words with fast byte scanning
     pub fn tokenize(text: &str) -> Vec<String> {
         let mut tokens = Vec::new();
-        for word in text.split(|c: char| !c.is_alphanumeric() && c != '$' && c != '!' && c != '%') {
-            let clean = word.trim().to_lowercase();
-            if clean.len() >= 3 && clean.len() <= 30 {
-                tokens.push(clean);
+        let bytes = text.as_bytes();
+        let mut i = 0;
+        while i < bytes.len() {
+            while i < bytes.len() {
+                let b = bytes[i];
+                if b.is_ascii_alphanumeric() || b == b'$' || b == b'!' || b == b'%' {
+                    break;
+                }
+                i += 1;
+            }
+            let start = i;
+            while i < bytes.len() {
+                let b = bytes[i];
+                if !b.is_ascii_alphanumeric() && b != b'$' && b != b'!' && b != b'%' {
+                    break;
+                }
+                i += 1;
+            }
+            let len = i - start;
+            if (3..=30).contains(&len)
+                && let Ok(s) = std::str::from_utf8(&bytes[start..i])
+            {
+                tokens.push(s.to_lowercase());
             }
         }
         tokens

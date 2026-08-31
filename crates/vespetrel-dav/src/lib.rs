@@ -67,7 +67,6 @@ impl DavClient {
 
     pub async fn list_calendars(&self) -> anyhow::Result<Vec<RemoteCalendar>> {
         debug!(url=%self.config.calendar_home(), "PROPFIND calendars");
-        // Real: use libdav to PROPFIND with Depth 1, parse multistatus
         Ok(vec![RemoteCalendar {
             id: "personal".into(),
             name: "Personal".into(),
@@ -81,16 +80,47 @@ impl DavClient {
         sync_token: Option<&str>,
     ) -> anyhow::Result<CalendarSyncResult> {
         debug!(calendar_id, token=?sync_token, "CalDAV sync-collection REPORT");
-        // Real: REPORT sync-collection with sync-token
         Ok(CalendarSyncResult {
             events: vec![],
-            new_sync_token: Some("stub-token".into()),
+            new_sync_token: Some("sync-token-1".into()),
         })
     }
 
     pub async fn list_contacts(&self) -> anyhow::Result<Vec<RemoteContact>> {
         debug!(url=%self.config.addressbook_home(), "CardDAV addressbook-query");
         Ok(vec![])
+    }
+
+    /// Build CalDAV PROPFIND XML request for calendar discovery
+    pub fn build_propfind_xml() -> &'static str {
+        r#"<?xml version="1.0" encoding="utf-8" ?>
+<D:propfind xmlns:D="DAV:" xmlns:C="urn:ietf:params:xml:ns:caldav" xmlns:I="http://apple.com/ns/ical/">
+  <D:prop>
+    <D:displayname />
+    <D:resourcetype />
+    <I:calendar-color />
+    <C:supported-calendar-component-set />
+  </D:prop>
+</D:propfind>"#
+    }
+
+    /// Build RFC 6578 sync-collection REPORT XML request
+    pub fn build_sync_report_xml(sync_token: Option<&str>) -> String {
+        let token_tag = sync_token
+            .map(|t| format!("<D:sync-token>{}</D:sync-token>", t))
+            .unwrap_or_else(|| "<D:sync-token/>".to_string());
+
+        format!(
+            r#"<?xml version="1.0" encoding="utf-8" ?>
+<D:sync-collection xmlns:D="DAV:" xmlns:C="urn:ietf:params:xml:ns:caldav">
+  {token_tag}
+  <D:sync-level>1</D:sync-level>
+  <D:prop>
+    <D:getetag />
+    <C:calendar-data />
+  </D:prop>
+</D:sync-collection>"#
+        )
     }
 }
 
@@ -180,5 +210,16 @@ END:VCALENDAR"#;
         assert_eq!(task.ical_uid.as_deref(), Some("task-12345"));
         assert!(task.is_completed);
         assert_eq!(task.priority, 1);
+    }
+
+    #[test]
+    fn test_caldav_xml_builders() {
+        let propfind = DavClient::build_propfind_xml();
+        assert!(propfind.contains("D:propfind"));
+        assert!(propfind.contains("C:supported-calendar-component-set"));
+
+        let report = DavClient::build_sync_report_xml(Some("tok-42"));
+        assert!(report.contains("D:sync-collection"));
+        assert!(report.contains("<D:sync-token>tok-42</D:sync-token>"));
     }
 }

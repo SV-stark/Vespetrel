@@ -20,4 +20,6 @@ zeroize = { workspace = true }
 rustls = { workspace = true }
 reqwest = { workspace = true }
 chrono = { workspace = true }
+memchr = { workspace = true }
 anyhow = { workspace = true }
+

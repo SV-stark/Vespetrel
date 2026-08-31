@@ -206,28 +206,41 @@ fn clean_message_id(s: &str) -> String {
 }
 
 /// Helper to normalize email subjects by stripping Re:, Fwd:, etc.
-/// Uses memchr for fast delimiter scanning
+/// Uses zero-allocation SIMD byte checking and memchr
 pub fn normalize_subject(subject: &str) -> String {
-    let mut s = subject.trim();
+    let mut bytes = subject.trim().as_bytes();
     loop {
-        let lower = s.to_lowercase();
-        if lower.starts_with("re:") || lower.starts_with("fw:") {
-            s = s[3..].trim();
-        } else if lower.starts_with("fwd:") {
-            s = s[4..].trim();
-        } else if lower.starts_with("re[") || lower.starts_with("fw[") {
-            if let Some(idx) =
-                memchr::memchr(b']', s.as_bytes()).filter(|&idx| s[idx + 1..].starts_with(':'))
-            {
-                s = s[idx + 2..].trim();
-                continue;
+        // Fast skip whitespace
+        while let Some(&b) = bytes.first() {
+            if b == b' ' || b == b'\t' {
+                bytes = &bytes[1..];
+            } else {
+                break;
             }
-            break;
-        } else {
-            break;
         }
+        if bytes.len() >= 3
+            && (bytes[..3].eq_ignore_ascii_case(b"re:") || bytes[..3].eq_ignore_ascii_case(b"fw:"))
+        {
+            bytes = &bytes[3..];
+            continue;
+        }
+        if bytes.len() >= 4 && bytes[..4].eq_ignore_ascii_case(b"fwd:") {
+            bytes = &bytes[4..];
+            continue;
+        }
+        if bytes.len() >= 4
+            && (bytes[..3].eq_ignore_ascii_case(b"re[") || bytes[..3].eq_ignore_ascii_case(b"fw["))
+            && let Some(idx) = memchr::memchr(b']', bytes)
+            && idx + 1 < bytes.len()
+            && bytes[idx + 1] == b':'
+        {
+            bytes = &bytes[idx + 2..];
+            continue;
+        }
+        break;
     }
-    s.to_string()
+
+    String::from_utf8_lossy(bytes).trim().to_string()
 }
 
 #[cfg(test)]

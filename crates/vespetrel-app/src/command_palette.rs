@@ -116,18 +116,24 @@ impl CommandPalette {
         ];
     }
 
-    /// Filter actions matching query case-insensitively across titles and keywords
+    /// Filter actions matching query case-insensitively using SIMD vector scanning
     pub fn filtered_actions(&self) -> Vec<&PaletteAction> {
-        let q = self.query.trim().to_lowercase();
+        let q = self.query.trim();
         if q.is_empty() {
             return self.actions.iter().collect();
         }
+        let q_bytes = q.as_bytes();
 
         self.actions
             .iter()
             .filter(|a| {
-                a.title.to_lowercase().contains(&q)
-                    || a.keywords.iter().any(|k| k.to_lowercase().contains(&q))
+                crate::views::message_list::contains_ignore_case_ascii(a.title.as_bytes(), q_bytes)
+                    || a.keywords.iter().any(|k| {
+                        crate::views::message_list::contains_ignore_case_ascii(
+                            k.as_bytes(),
+                            q_bytes,
+                        )
+                    })
             })
             .collect()
     }

@@ -73,9 +73,10 @@ impl PgpEngine {
 
     /// Check if a raw body string contains OpenPGP ASCII armor
     pub fn is_armored_pgp(&self, text: &str) -> bool {
-        text.contains("-----BEGIN PGP MESSAGE-----")
-            || text.contains("-----BEGIN PGP SIGNED MESSAGE-----")
-            || text.contains("-----BEGIN PGP PUBLIC KEY BLOCK-----")
+        let bytes = text.as_bytes();
+        memchr::memmem::find(bytes, b"-----BEGIN PGP MESSAGE-----").is_some()
+            || memchr::memmem::find(bytes, b"-----BEGIN PGP SIGNED MESSAGE-----").is_some()
+            || memchr::memmem::find(bytes, b"-----BEGIN PGP PUBLIC KEY BLOCK-----").is_some()
     }
 
     /// Parse OpenPGP message from ASCII-armored string (RFC 9580 v6)

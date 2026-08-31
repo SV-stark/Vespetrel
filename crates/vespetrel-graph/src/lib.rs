@@ -42,6 +42,74 @@ impl GraphConfig {
     pub fn folders_url(&self) -> String {
         format!("{}/me/mailFolders", self.base_url)
     }
+
+    pub fn send_mail_url(&self) -> String {
+        format!("{}/me/sendMail", self.base_url)
+    }
+
+    pub fn message_mime_url(&self, message_id: &str) -> String {
+        format!("{}/me/messages/{message_id}/$value", self.base_url)
+    }
+}
+
+/// Convert ComposedMessage into Microsoft Graph sendMail JSON payload
+pub fn build_graph_sendmail_payload(msg: &ComposedMessage) -> serde_json::Value {
+    let to_recipients: Vec<serde_json::Value> = msg
+        .to
+        .iter()
+        .map(|a| {
+            serde_json::json!({
+                "emailAddress": {
+                    "name": a.name.clone().unwrap_or_default(),
+                    "address": a.email
+                }
+            })
+        })
+        .collect();
+
+    serde_json::json!({
+        "message": {
+            "subject": msg.subject,
+            "body": {
+                "contentType": if msg.body_html.is_some() { "HTML" } else { "Text" },
+                "content": msg.body_html.clone().unwrap_or_else(|| msg.body_text.clone())
+            },
+            "toRecipients": to_recipients
+        },
+        "saveToSentItems": true
+    })
+}
+
+/// Parse Microsoft Graph `/me/mailFolders` response into RemoteFolder list
+pub fn parse_graph_folders_response(json: &serde_json::Value) -> Vec<RemoteFolder> {
+    let mut folders = Vec::new();
+    if let Some(list) = json.get("value").and_then(|v| v.as_array()) {
+        for item in list {
+            if let (Some(id), Some(display_name)) = (
+                item.get("id").and_then(|i| i.as_str()),
+                item.get("displayName").and_then(|n| n.as_str()),
+            ) {
+                let role = match display_name.to_lowercase().as_str() {
+                    "inbox" => Some("inbox".into()),
+                    "sent items" => Some("sent".into()),
+                    "drafts" => Some("drafts".into()),
+                    "deleted items" => Some("trash".into()),
+                    "junk email" => Some("junk".into()),
+                    "archive" => Some("archive".into()),
+                    _ => None,
+                };
+                folders.push(RemoteFolder {
+                    remote_id: id.to_string(),
+                    name: display_name.to_string(),
+                    path: display_name.to_string(),
+                    role_hint: role,
+                    uid_validity: None,
+                    highest_mod_seq: None,
+                });
+            }
+        }
+    }
+    folders
 }
 
 #[allow(dead_code)]
@@ -148,5 +216,61 @@ impl MailProvider for GraphProvider {
         // Real: PATCH /me/messages/{id} with {"isRead": true}
         let _ = (add, remove);
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use vespetrel_core::Address;
+
+    #[test]
+    fn test_graph_urls_and_payloads() {
+        let cfg = GraphConfig::new("mock_token_123");
+        assert_eq!(
+            cfg.folders_url(),
+            "https://graph.microsoft.com/v1.0/me/mailFolders"
+        );
+        assert_eq!(
+            cfg.delta_url("inbox_id", Some("tok_abc")),
+            "https://graph.microsoft.com/v1.0/me/mailFolders/inbox_id/messages/delta?$deltatoken=tok_abc"
+        );
+
+        let msg = ComposedMessage {
+            from: Address {
+                name: None,
+                email: "me@example.com".into(),
+            },
+            to: vec![Address {
+                name: Some("Boss".into()),
+                email: "boss@example.com".into(),
+            }],
+            cc: vec![],
+            bcc: vec![],
+            subject: "Quarterly Review".into(),
+            body_text: "Attached".into(),
+            body_html: Some("<p>Attached</p>".into()),
+            in_reply_to: None,
+            references: vec![],
+            attachments: vec![],
+        };
+
+        let payload = build_graph_sendmail_payload(&msg);
+        assert!(payload.get("message").is_some());
+        assert_eq!(
+            payload["message"]["toRecipients"][0]["emailAddress"]["address"],
+            "boss@example.com"
+        );
+
+        let mock_folders_json = serde_json::json!({
+            "value": [
+                { "id": "fld_1", "displayName": "Inbox" },
+                { "id": "fld_2", "displayName": "Sent Items" }
+            ]
+        });
+        let folders = parse_graph_folders_response(&mock_folders_json);
+        assert_eq!(folders.len(), 2);
+        assert_eq!(folders[0].role_hint.as_deref(), Some("inbox"));
+        assert_eq!(folders[1].role_hint.as_deref(), Some("sent"));
     }
 }

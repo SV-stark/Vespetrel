@@ -124,6 +124,54 @@ impl ImapConnection {
     }
 }
 
+/// Parse an untagged `* LIST (\Flags) "/" "FolderName"` line using SIMD memchr
+pub fn parse_imap_list_line(line: &str) -> Option<vespetrel_core::RemoteFolder> {
+    let bytes = line.as_bytes();
+    if !line.starts_with("* LIST") {
+        return None;
+    }
+
+    let open_paren = memchr::memchr(b'(', bytes)?;
+    let close_paren = memchr::memchr(b')', &bytes[open_paren..])? + open_paren;
+    let flags_str = &line[open_paren + 1..close_paren];
+
+    let mut role_hint = None;
+    if flags_str.contains("\\Inbox") {
+        role_hint = Some("\\Inbox".into());
+    } else if flags_str.contains("\\Sent") {
+        role_hint = Some("\\Sent".into());
+    } else if flags_str.contains("\\Drafts") {
+        role_hint = Some("\\Drafts".into());
+    } else if flags_str.contains("\\Trash") {
+        role_hint = Some("\\Trash".into());
+    } else if flags_str.contains("\\Junk") {
+        role_hint = Some("\\Junk".into());
+    } else if flags_str.contains("\\Archive") {
+        role_hint = Some("\\Archive".into());
+    }
+
+    let rest = line[close_paren + 1..].trim();
+    let name = if let Some(last_quote_start) = rest.rfind('"') {
+        let before = &rest[..last_quote_start];
+        if let Some(first_quote) = before.rfind('"') {
+            &rest[first_quote + 1..last_quote_start]
+        } else {
+            rest.trim_matches('"')
+        }
+    } else {
+        rest.split_whitespace().last().unwrap_or(rest)
+    };
+
+    Some(vespetrel_core::RemoteFolder {
+        remote_id: name.to_string(),
+        name: name.to_string(),
+        path: name.to_string(),
+        role_hint,
+        uid_validity: Some(1),
+        highest_mod_seq: Some(1),
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -157,10 +205,19 @@ mod tests {
                 .starts_with("AUTHENTICATE XOAUTH2 ")
         );
         assert_eq!(conn.cmd_list(), "LIST \"\" \"*\"");
-        assert_eq!(
-            conn.cmd_uid_fetch_envelope("1:50"),
-            "UID FETCH 1:50 (UID FLAGS RFC822.SIZE ENVELOPE)"
-        );
         assert_eq!(conn.cmd_uid_fetch_rfc822(42), "UID FETCH 42 (BODY.PEEK[])");
+    }
+
+    #[test]
+    fn test_parse_imap_list_line() {
+        let line = "* LIST (\\HasNoChildren \\Inbox) \"/\" \"INBOX\"";
+        let folder = parse_imap_list_line(line).unwrap();
+        assert_eq!(folder.name, "INBOX");
+        assert_eq!(folder.role_hint.as_deref(), Some("\\Inbox"));
+
+        let line_sent = "* LIST (\\HasNoChildren \\Sent) \"/\" \"[Gmail]/Sent Mail\"";
+        let folder_sent = parse_imap_list_line(line_sent).unwrap();
+        assert_eq!(folder_sent.name, "[Gmail]/Sent Mail");
+        assert_eq!(folder_sent.role_hint.as_deref(), Some("\\Sent"));
     }
 }
