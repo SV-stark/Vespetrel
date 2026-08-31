@@ -1,3 +1,4 @@
+use vespetrel_core::Signature;
 use vespetrel_core::message::{Address, ComposedAttachment, ComposedMessage};
 
 pub struct ComposeState {
@@ -9,6 +10,7 @@ pub struct ComposeState {
     pub is_encrypted: bool,
     pub is_signed: bool,
     pub is_markdown_mode: bool,
+    pub selected_signature: Option<Signature>,
 }
 
 impl ComposeState {
@@ -32,6 +34,31 @@ impl ComposeState {
             is_encrypted: false,
             is_signed: false,
             is_markdown_mode: false,
+            selected_signature: None,
+        }
+    }
+
+    /// Attach an HTML signature to the message body
+    pub fn apply_signature(&mut self, sig: &Signature) {
+        self.selected_signature = Some(sig.clone());
+        let current_html = self.draft.body_html.clone().unwrap_or_default();
+        if !current_html.contains("class=\"vespetrel-signature\"") {
+            let new_html = if current_html.trim().is_empty() {
+                sig.raw_html.clone()
+            } else {
+                format!("{current_html}\n{}", sig.raw_html)
+            };
+            self.draft.body_html = Some(new_html);
+        }
+
+        if let Some(plain) = &sig.plain_text
+            && !self.draft.body_text.contains("-- \n")
+        {
+            if self.draft.body_text.trim().is_empty() {
+                self.draft.body_text = plain.clone();
+            } else {
+                self.draft.body_text = format!("{}\n\n{plain}", self.draft.body_text);
+            }
         }
     }
 
@@ -139,5 +166,35 @@ mod tests {
         assert_eq!(compose.total_attachments_size(), 4);
         compose.remove_attachment(0);
         assert_eq!(compose.total_attachments_size(), 0);
+    }
+
+    #[test]
+    fn test_compose_signature_injection() {
+        let from = Address {
+            name: Some("Me".into()),
+            email: "me@example.com".into(),
+        };
+        let mut compose = ComposeState::new(from);
+        compose.set_body("Hello Team,", Some("<p>Hello Team,</p>".into()));
+
+        let sig = Signature::new(
+            "acc_1",
+            "Work",
+            "<div class=\"vespetrel-signature\">Best Regards</div>",
+            Some("-- \nBest Regards".into()),
+            true,
+            true,
+        );
+        compose.apply_signature(&sig);
+
+        assert!(
+            compose
+                .draft
+                .body_html
+                .as_ref()
+                .unwrap()
+                .contains("class=\"vespetrel-signature\"")
+        );
+        assert!(compose.draft.body_text.contains("-- \nBest Regards"));
     }
 }

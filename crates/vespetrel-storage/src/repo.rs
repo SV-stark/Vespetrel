@@ -471,8 +471,85 @@ pub fn delete_task(conn: &Connection, id: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
+pub fn upsert_signature(conn: &Connection, sig: &vespetrel_core::Signature) -> anyhow::Result<()> {
+    if sig.is_default {
+        conn.execute(
+            "UPDATE signatures SET is_default = 0 WHERE account_id = ?1",
+            params![sig.account_id],
+        )?;
+    }
+
+    conn.execute(
+        r#"INSERT INTO signatures (id, account_id, name, raw_html, plain_text, is_default, include_in_replies, created_at, updated_at)
+           VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+           ON CONFLICT(id) DO UPDATE SET
+             account_id=excluded.account_id, name=excluded.name, raw_html=excluded.raw_html,
+             plain_text=excluded.plain_text, is_default=excluded.is_default,
+             include_in_replies=excluded.include_in_replies, updated_at=excluded.updated_at"#,
+        params![
+            sig.id,
+            sig.account_id,
+            sig.name,
+            sig.raw_html,
+            sig.plain_text,
+            if sig.is_default { 1 } else { 0 },
+            if sig.include_in_replies { 1 } else { 0 },
+            sig.created_at.timestamp(),
+            sig.updated_at.timestamp(),
+        ],
+    )?;
+    Ok(())
+}
+
+pub fn list_signatures_for_account(
+    conn: &Connection,
+    account_id: &str,
+) -> anyhow::Result<Vec<vespetrel_core::Signature>> {
+    let mut stmt = conn.prepare(
+        "SELECT id, account_id, name, raw_html, plain_text, is_default, include_in_replies, created_at, updated_at
+         FROM signatures
+         WHERE account_id = ?1 OR account_id = '*'
+         ORDER BY is_default DESC, name ASC",
+    )?;
+
+    let rows = stmt.query_map(params![account_id], |row| {
+        let is_def: i64 = row.get(5)?;
+        let inc_rep: i64 = row.get(6)?;
+        let created_ts: i64 = row.get(7)?;
+        let updated_ts: i64 = row.get(8)?;
+
+        Ok(vespetrel_core::Signature {
+            id: row.get(0)?,
+            account_id: row.get(1)?,
+            name: row.get(2)?,
+            raw_html: row.get(3)?,
+            plain_text: row.get(4)?,
+            is_default: is_def != 0,
+            include_in_replies: inc_rep != 0,
+            created_at: DateTime::from_timestamp(created_ts, 0).unwrap_or_else(Utc::now),
+            updated_at: DateTime::from_timestamp(updated_ts, 0).unwrap_or_else(Utc::now),
+        })
+    })?;
+
+    rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+}
+
+pub fn get_default_signature(
+    conn: &Connection,
+    account_id: &str,
+) -> anyhow::Result<Option<vespetrel_core::Signature>> {
+    let list = list_signatures_for_account(conn, account_id)?;
+    Ok(list.into_iter().find(|s| s.is_default))
+}
+
+pub fn delete_signature(conn: &Connection, id: &str) -> anyhow::Result<()> {
+    conn.execute("DELETE FROM signatures WHERE id = ?1", params![id])?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
+
     use super::*;
     use crate::db::open_in_memory;
     use vespetrel_core::{Account, Contact, Folder, Message, TaskItem};
@@ -557,5 +634,31 @@ mod tests {
 
         delete_task(&conn, &task.id).unwrap();
         assert_eq!(list_tasks(&conn, "cal1").unwrap().len(), 0);
+
+        // 8. Signatures
+        let sig = vespetrel_core::Signature::new(
+            &acct.id,
+            "Work Formal",
+            "<div class=\"vespetrel-signature\">Alice &bull; Staff Engineer</div>",
+            Some("-- \nAlice".into()),
+            true,
+            true,
+        );
+        upsert_signature(&conn, &sig).unwrap();
+
+        let sigs = list_signatures_for_account(&conn, &acct.id).unwrap();
+        assert_eq!(sigs.len(), 1);
+        assert_eq!(sigs[0].name, "Work Formal");
+        assert!(sigs[0].is_default);
+
+        let def = get_default_signature(&conn, &acct.id).unwrap();
+        assert!(def.is_some());
+        assert_eq!(def.unwrap().name, "Work Formal");
+
+        delete_signature(&conn, &sig.id).unwrap();
+        assert_eq!(
+            list_signatures_for_account(&conn, &acct.id).unwrap().len(),
+            0
+        );
     }
 }

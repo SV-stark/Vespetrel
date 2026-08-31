@@ -202,6 +202,20 @@ pub fn run_migrations(conn: &Connection) -> anyhow::Result<()> {
                 priority INTEGER NOT NULL DEFAULT 0
             );
             CREATE INDEX IF NOT EXISTS idx_tasks_calendar ON tasks(calendar_id);
+
+            -- Signatures
+            CREATE TABLE IF NOT EXISTS signatures (
+                id TEXT PRIMARY KEY,
+                account_id TEXT NOT NULL,
+                name TEXT NOT NULL,
+                raw_html TEXT NOT NULL,
+                plain_text TEXT,
+                is_default INTEGER NOT NULL DEFAULT 0,
+                include_in_replies INTEGER NOT NULL DEFAULT 1,
+                created_at INTEGER NOT NULL,
+                updated_at INTEGER NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_signatures_account ON signatures(account_id);
             "#,
         )?;
 
