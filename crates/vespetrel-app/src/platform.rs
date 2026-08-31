@@ -12,12 +12,12 @@ pub fn enable_high_dpi() {
     #[cfg(windows)]
     {
         use windows_sys::Win32::UI::HiDpi::{
-            DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2, SetProcessDpiAwarenessContext,
+            PROCESS_PER_MONITOR_DPI_AWARE, SetProcessDpiAwareness,
         };
         unsafe {
-            let res = SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
-            if res != 0 {
-                debug!("Windows Per-Monitor V2 DPI awareness enabled successfully");
+            let res = SetProcessDpiAwareness(PROCESS_PER_MONITOR_DPI_AWARE);
+            if res == 0 {
+                debug!("Windows Per-Monitor DPI awareness enabled successfully");
             }
         }
     }

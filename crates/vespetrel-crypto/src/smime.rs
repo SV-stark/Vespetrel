@@ -48,8 +48,8 @@ impl SmimeEngine {
 
         // Parse DER Certificate if present
         if let Ok(cert) = x509_cert::Certificate::from_der(cms_data) {
-            let issuer = cert.tbs_certificate.issuer.to_string();
-            let serial = cert.tbs_certificate.serial_number.to_string();
+            let issuer = cert.tbs_certificate().issuer().to_string();
+            let serial = cert.tbs_certificate().serial_number().to_string();
             return Ok(SmimeVerificationResult {
                 is_valid: true,
                 signer_email: None,

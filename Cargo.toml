@@ -42,15 +42,15 @@ reqwest = { version = "0.12", default-features = false, features = ["json", "rus
 
 # PIM (Calendar & Contacts)
 libdav = "0.10"
-icalendar = "0.16"
-vcard4 = "0.4"
+icalendar = "0.17"
+vcard4 = "0.7"
 
 # Security & Crypto
 rustls = { version = "0.23", default-features = false, features = ["aws_lc_rs"] }
-oauth2 = "4.4"
+oauth2 = { version = "5.0", default-features = false }
 keyring = { version = "4.1", features = ["apple-native-keyring-store", "windows-native-keyring-store", "linux-keyutils-keyring-store"] }
 rpgp = { package = "pgp", version = "0.14" }
-x509-cert = "0.2"
+x509-cert = "0.3"
 cms = "0.2"
 zeroize = { version = "1.8", features = ["zeroize_derive"] }
 
@@ -74,10 +74,10 @@ memchr = "2.7"
 ahash = { version = "0.8", features = ["serde"] }
 mimalloc = { version = "0.1", default-features = false }
 
-compact_str = { version = "0.8", features = ["serde"] }
+compact_str = { version = "0.10", features = ["serde"] }
 smallvec = { version = "1.13", features = ["serde", "const_generics"] }
 parking_lot = "0.12"
-flume = "0.11"
+flume = "0.12"
 moka = { version = "0.12", features = ["sync", "future"] }
 bytes = "1.6"
 arc-swap = "1.7"

@@ -1,10 +1,14 @@
-name: Vespetrel CI & Multi-Platform Release
+name: Vespetrel CI & Multi-Platform Test
 
 on:
   push:
     branches: [ "main" ]
   pull_request:
     branches: [ "main" ]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 env:
   CARGO_TERM_COLOR: always
@@ -21,6 +25,12 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
+
+      - name: Install Linux Dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libkeyutils-dev libdbus-1-dev pkg-config libssl-dev
 
       - name: Install Rust ${{ matrix.rust }}
         uses: dtolnay/rust-toolchain@stable
@@ -44,4 +54,5 @@ jobs:
         run: cargo build --release --workspace
 
       - name: Verify In-Memory Headless Startup
-        run: cargo run --release -p vespetrel-app -- --memory
+        run: cargo run --release -p vespetrel-app --bin vespetrel -- --memory
+
