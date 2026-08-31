@@ -165,10 +165,69 @@ pub struct TaskSyncResult {
     pub new_sync_token: Option<String>,
 }
 
-/// Simple iCalendar parsing helper using `icalendar` crate
-pub fn parse_ical(ical_str: &str) -> anyhow::Result<Vec<icalendar::Calendar>> {
-    debug!(len=%ical_str.len(), "parsing iCalendar");
-    Ok(vec![])
+/// Parse VEVENT blocks into CalendarEvent instances
+pub fn parse_ical_events(
+    calendar_id: &str,
+    ical_str: &str,
+) -> anyhow::Result<Vec<vespetrel_core::CalendarEvent>> {
+    let mut events = Vec::new();
+    let mut in_vevent = false;
+    let mut title = String::new();
+    let mut description = None;
+    let mut location = None;
+    let mut ical_uid = None;
+    let mut start = chrono::Utc::now();
+    let mut end = start + chrono::Duration::hours(1);
+
+    for line in ical_str.lines() {
+        let line = line.trim();
+        if line.eq_ignore_ascii_case("BEGIN:VEVENT") {
+            in_vevent = true;
+            title.clear();
+            description = None;
+            location = None;
+            ical_uid = None;
+        } else if line.eq_ignore_ascii_case("END:VEVENT") {
+            if in_vevent {
+                events.push(vespetrel_core::CalendarEvent {
+                    id: uuid::Uuid::new_v4().to_string(),
+                    calendar_id: calendar_id.to_string(),
+                    title: if title.is_empty() {
+                        "Untitled Event".into()
+                    } else {
+                        title.clone()
+                    },
+                    description: description.clone(),
+                    start,
+                    end,
+                    location: location.clone(),
+                    ical_uid: ical_uid.clone(),
+                    raw_ical: Some(ical_str.to_string()),
+                });
+                in_vevent = false;
+            }
+        } else if in_vevent {
+            if let Some(val) = line.strip_prefix("SUMMARY:") {
+                title = val.to_string();
+            } else if let Some(val) = line.strip_prefix("DESCRIPTION:") {
+                description = Some(val.to_string());
+            } else if let Some(val) = line.strip_prefix("LOCATION:") {
+                location = Some(val.to_string());
+            } else if let Some(val) = line.strip_prefix("UID:") {
+                ical_uid = Some(val.to_string());
+            } else if let Some(val) = line.strip_prefix("DTSTART:")
+                && let Ok(dt) = chrono::DateTime::parse_from_rfc3339(val)
+            {
+                start = dt.with_timezone(&chrono::Utc);
+            } else if let Some(val) = line.strip_prefix("DTEND:")
+                && let Ok(dt) = chrono::DateTime::parse_from_rfc3339(val)
+            {
+                end = dt.with_timezone(&chrono::Utc);
+            }
+        }
+    }
+
+    Ok(events)
 }
 
 /// Parse RFC 5545 VTODO component from raw iCalendar string
@@ -218,6 +277,25 @@ END:VCALENDAR"#;
         assert_eq!(task.ical_uid.as_deref(), Some("task-12345"));
         assert!(task.is_completed);
         assert_eq!(task.priority, 1);
+    }
+
+    #[test]
+    fn test_parse_vevent_component() {
+        let ical = r#"BEGIN:VCALENDAR
+VERSION:2.0
+BEGIN:VEVENT
+UID:event-99
+SUMMARY:Product Planning
+DESCRIPTION:Discuss roadmap
+LOCATION:Conference Room A
+END:VEVENT
+END:VCALENDAR"#;
+
+        let events = parse_ical_events("cal_main", ical).unwrap();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].title, "Product Planning");
+        assert_eq!(events[0].description.as_deref(), Some("Discuss roadmap"));
+        assert_eq!(events[0].location.as_deref(), Some("Conference Room A"));
     }
 
     #[test]

@@ -54,22 +54,35 @@ impl AccountWorker {
     pub async fn run(mut self) {
         info!(account_id = %self.account_id, "starting account worker");
         let mut interval = tokio::time::interval(self.poll_interval);
-        // For IMAP IDLE, provider handles long-poll internally; this interval is fallback/delta poll for JMAP/Graph
+        let mut backoff = Duration::from_secs(1);
+        let max_backoff = Duration::from_secs(60);
 
         loop {
             tokio::select! {
                 _ = interval.tick() => {
-                    if let Err(e) = self.sync_once().await {
-                        warn!(account_id=%self.account_id, error=%e, "periodic sync failed");
-                        self.emit(SyncEvent::SyncError{ folder: "all".into(), error: e.to_string() });
+                    match self.sync_once().await {
+                        Ok(_) => {
+                            backoff = Duration::from_secs(1);
+                        }
+                        Err(e) => {
+                            warn!(account_id=%self.account_id, error=%e, backoff_secs=backoff.as_secs(), "periodic sync failed, backing off");
+                            self.emit(SyncEvent::SyncError{ folder: "all".into(), error: e.to_string() });
+                            tokio::time::sleep(backoff).await;
+                            backoff = (backoff * 2).min(max_backoff);
+                        }
                     }
                 }
                 cmd = self.cmd_rx.recv() => {
                     match cmd {
                         Some(WorkerCommand::SyncNow) => {
-                            if let Err(e) = self.sync_once().await {
-                                error!(error=%e, "on-demand sync failed");
-                                self.emit(SyncEvent::SyncError{ folder: "all".into(), error:e.to_string() });
+                            match self.sync_once().await {
+                                Ok(_) => {
+                                    backoff = Duration::from_secs(1);
+                                }
+                                Err(e) => {
+                                    error!(error=%e, "on-demand sync failed");
+                                    self.emit(SyncEvent::SyncError{ folder: "all".into(), error: e.to_string() });
+                                }
                             }
                         }
                         Some(WorkerCommand::UpdateFlags{ folder_remote_id: _, uids, add, remove }) => {
@@ -123,6 +136,19 @@ impl AccountWorker {
             }
         }
 
+        // Load persistent sync state for account from storage
+        let mut account_sync_state = vespetrel_core::account::SyncState::default();
+        if let Some(conn) = &storage_conn {
+            let acct_id = self.account_id.clone();
+            if let Ok(Ok(accounts)) = conn
+                .interact(|c| vespetrel_storage::repo::list_accounts(c))
+                .await
+                && let Some(acct) = accounts.into_iter().find(|a| a.id == acct_id)
+            {
+                account_sync_state = acct.sync_state;
+            }
+        }
+
         for rf in &folders {
             let folder_record = folder_records
                 .get(&rf.remote_id)
@@ -131,7 +157,7 @@ impl AccountWorker {
                     vespetrel_core::Folder::new(&self.account_id, &rf.remote_id, &rf.name, &rf.path)
                 });
             let folder_db_id = folder_record.id.clone();
-            let state = vespetrel_core::account::SyncState::default();
+            let state = account_sync_state.clone();
 
             match self.provider.sync_messages(&folder_record, state).await {
                 Ok(delta) => {

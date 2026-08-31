@@ -86,8 +86,32 @@ impl VirtualFolder {
             }
             VirtualFolderType::HasAttachments => "has_attachments = 1".to_string(),
             VirtualFolderType::SavedSearch { query } => {
-                let clean = query.replace('\'', "''");
-                format!("id IN (SELECT id FROM messages_fts WHERE messages_fts MATCH '{clean}')")
+                let clean_terms: Vec<String> = query
+                    .split_whitespace()
+                    .map(|w| {
+                        let filtered: String = w
+                            .chars()
+                            .filter(|c| {
+                                c.is_alphanumeric()
+                                    || *c == '@'
+                                    || *c == '.'
+                                    || *c == '_'
+                                    || *c == '-'
+                            })
+                            .collect();
+                        format!("\"{filtered}\"")
+                    })
+                    .filter(|s| s.len() > 2)
+                    .collect();
+                let fts_query = if clean_terms.is_empty() {
+                    "\"*\"".to_string()
+                } else {
+                    clean_terms.join(" ")
+                };
+                let escaped = fts_query.replace('\'', "''");
+                format!(
+                    "id IN (SELECT message_id FROM messages_fts WHERE messages_fts MATCH '{escaped}')"
+                )
             }
         }
     }

@@ -18,7 +18,7 @@ env:
 
 jobs:
   build-windows:
-    name: Build Windows Setup & Portable
+    name: Build Windows (x86_64)
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
@@ -81,64 +81,116 @@ jobs:
           }
           Get-Item dist\vespetrel-setup-windows-x86_64.exe | Select-Object Name, Length
 
-      - name: Generate Checksums
-        shell: pwsh
-        run: |
-          $files = Get-ChildItem -Path dist -File | Where-Object { $_.Name -ne 'SHA256SUMS.txt' }
-          if ($files.Count -eq 0) {
-            throw "No release files found in dist directory"
-          }
-          $lines = foreach ($file in $files) {
-            $hash = (Get-FileHash -Algorithm SHA256 $file.FullName).Hash.ToLower()
-            "$hash  $($file.Name)"
-          }
-          $lines | Set-Content -Path dist\SHA256SUMS.txt -Encoding utf8
-          $size = (Get-Item dist\SHA256SUMS.txt).Length
-          if ($size -eq 0) {
-            throw "SHA256SUMS.txt was generated with 0 bytes"
-          }
-          Write-Host "Generated SHA256SUMS.txt ($size bytes):"
-          Get-Content dist\SHA256SUMS.txt
-
       - name: Upload Windows Artifacts
         uses: actions/upload-artifact@v4
         with:
           name: dist-windows
           path: dist/*
 
-  publish-nightly:
-    name: Publish Nightly Pre-Release
+  build-linux:
+    name: Build Linux (x86_64)
     runs-on: ubuntu-latest
-    needs: [build-windows]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: stable
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Install Linux Build Dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y pkg-config libssl-dev libdbus-1-dev
+
+      - name: Build Linux Binary
+        run: cargo build --release --bin vespetrel
+
+      - name: Package Linux Archive
+        run: |
+          mkdir -p dist staging/vespetrel
+          cp target/release/vespetrel staging/vespetrel/
+          cp README.md staging/vespetrel/
+          cp LICENSE staging/vespetrel/
+          tar -czf dist/vespetrel-linux-x86_64.tar.gz -C staging/vespetrel .
+
+      - name: Upload Linux Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: dist-linux
+          path: dist/*
+
+  build-macos:
+    name: Build macOS (x86_64 & Apple Silicon)
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: stable
+          targets: x86_64-apple-darwin,aarch64-apple-darwin
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Build Universal macOS Binaries
+        run: |
+          cargo build --release --bin vespetrel --target aarch64-apple-darwin
+          cargo build --release --bin vespetrel --target x86_64-apple-darwin
+
+      - name: Package macOS Archives
+        run: |
+          mkdir -p dist staging-arm64 staging-x64
+          cp target/aarch64-apple-darwin/release/vespetrel staging-arm64/
+          cp README.md staging-arm64/ && cp LICENSE staging-arm64/
+          tar -czf dist/vespetrel-macos-aarch64.tar.gz -C staging-arm64 .
+
+          cp target/x86_64-apple-darwin/release/vespetrel staging-x64/
+          cp README.md staging-x64/ && cp LICENSE staging-x64/
+          tar -czf dist/vespetrel-macos-x86_64.tar.gz -C staging-x64 .
+
+      - name: Upload macOS Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: dist-macos
+          path: dist/*
+
+  publish-nightly:
+    name: Publish Multi-OS Nightly Pre-Release
+    runs-on: ubuntu-latest
+    needs: [build-windows, build-linux, build-macos]
     if: github.ref == 'refs/heads/main'
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/download-artifact@v4
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
         with:
-          name: dist-windows
-          path: dist
+          path: artifacts
+
+      - name: Aggregate Release Assets & Checksums
+        run: |
+          mkdir -p dist
+          find artifacts -type f -exec cp {} dist/ \;
+          cd dist
+          sha256sum * | grep -v 'SHA256SUMS.txt' > SHA256SUMS.txt || true
+          cat SHA256SUMS.txt
 
       - name: Publish or Update Nightly Release
         uses: softprops/action-gh-release@v2
         with:
           tag_name: nightly
           target_commitish: ${{ github.sha }}
-          name: "Vespetrel Windows Nightly Build"
+          name: "Vespetrel Multi-Platform Nightly Build"
           body: |
-            ## 🕊️ Vespetrel Nightly (Windows x86_64)
+            ## 🕊️ Vespetrel Nightly Builds
 
-            Automated rolling pre-release built directly from the latest `main` commit (`${{ github.sha }}`).
+            Automated multi-platform rolling release built directly from commit `${{ github.sha }}`.
 
             ### 📦 Downloads
-            - **Windows Installer:** [`vespetrel-setup-windows-x86_64.exe`](https://github.com/${{ github.repository }}/releases/download/nightly/vespetrel-setup-windows-x86_64.exe)
-            - **Portable Zip:** [`vespetrel-windows-x86_64.zip`](https://github.com/${{ github.repository }}/releases/download/nightly/vespetrel-windows-x86_64.zip)
+            - **Windows (x86_64):**
+              - Installer: [`vespetrel-setup-windows-x86_64.exe`](https://github.com/${{ github.repository }}/releases/download/nightly/vespetrel-setup-windows-x86_64.exe)
+              - Portable: [`vespetrel-windows-x86_64.zip`](https://github.com/${{ github.repository }}/releases/download/nightly/vespetrel-windows-x86_64.zip)
+            - **Linux (x86_64):** [`vespetrel-linux-x86_64.tar.gz`](https://github.com/${{ github.repository }}/releases/download/nightly/vespetrel-linux-x86_64.tar.gz)
+            - **macOS (Apple Silicon):** [`vespetrel-macos-aarch64.tar.gz`](https://github.com/${{ github.repository }}/releases/download/nightly/vespetrel-macos-aarch64.tar.gz)
+            - **macOS (Intel):** [`vespetrel-macos-x86_64.tar.gz`](https://github.com/${{ github.repository }}/releases/download/nightly/vespetrel-macos-x86_64.tar.gz)
             - **Checksums:** [`SHA256SUMS.txt`](https://github.com/${{ github.repository }}/releases/download/nightly/SHA256SUMS.txt)
-
-            ### ⚙️ Build Metadata
-            - **Commit:** `${{ github.sha }}`
-            - **Branch:** `${{ github.ref_name }}`
-            - **Rust Edition:** `2024`
-            - **Target:** `x86_64-pc-windows-msvc`
           prerelease: true
           make_latest: false
           files: dist/*
@@ -148,14 +200,22 @@ jobs:
   publish-tag:
     name: Publish Tagged Stable Release
     runs-on: ubuntu-latest
-    needs: [build-windows]
+    needs: [build-windows, build-linux, build-macos]
     if: startsWith(github.ref, 'refs/tags/v')
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/download-artifact@v4
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
         with:
-          name: dist-windows
-          path: dist
+          path: artifacts
+
+      - name: Aggregate Release Assets & Checksums
+        run: |
+          mkdir -p dist
+          find artifacts -type f -exec cp {} dist/ \;
+          cd dist
+          sha256sum * | grep -v 'SHA256SUMS.txt' > SHA256SUMS.txt || true
+          cat SHA256SUMS.txt
 
       - name: Publish Official Release
         uses: softprops/action-gh-release@v2

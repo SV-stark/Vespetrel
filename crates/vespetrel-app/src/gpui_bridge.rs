@@ -1,22 +1,18 @@
-﻿//! Tokio -> GPUI bridge §6.2
-//! This module is only compiled with `--features gpui`
-
-use vespetrel_core::provider::SyncEvent;
+//! Tokio -> GPUI bridge §6.2
 use tokio::sync::mpsc;
+use vespetrel_core::provider::SyncEvent;
 
-/// Spawn a Tokio listener bound to GPUI event loop.
-/// Mirrors the spec example exactly.
-pub fn spawn_sync_bridge(
-    cx: &mut gpui::ViewContext<crate::views::message_list::MessageListView>,
-    mut rx: mpsc::UnboundedReceiver<SyncEvent>,
-) {
-    cx.spawn(|this, mut cx| async move {
-        while let Some(event) = rx.recv().await {
-            let _ = cx.update(|cx| {
-                this.update(cx, |view, cx| {
-                    view.handle_sync_event(event, cx);
-                });
-            });
-        }
-    }).detach();
+/// Event bridge receiver converting Tokio SyncEvents to UI view updates
+pub struct SyncBridgeReceiver {
+    rx: mpsc::UnboundedReceiver<SyncEvent>,
+}
+
+impl SyncBridgeReceiver {
+    pub fn new(rx: mpsc::UnboundedReceiver<SyncEvent>) -> Self {
+        Self { rx }
+    }
+
+    pub async fn next_event(&mut self) -> Option<SyncEvent> {
+        self.rx.recv().await
+    }
 }

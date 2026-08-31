@@ -22,4 +22,5 @@ reqwest = { workspace = true }
 chrono = { workspace = true }
 memchr = { workspace = true }
 anyhow = { workspace = true }
+base64 = "0.22"
 

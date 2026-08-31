@@ -240,6 +240,48 @@ pub fn run_migrations(conn: &Connection) -> anyhow::Result<()> {
         tx.commit()?;
     }
 
+    // Check if migration version 2 has been applied (FTS5 unicode61 remove_diacritics 2 + rebuild)
+    let is_v2_applied: bool = conn
+        .query_row(
+            "SELECT count(*) FROM _schema_migrations WHERE version = 2",
+            [],
+            |r| r.get::<_, i64>(0),
+        )
+        .map(|count| count > 0)?;
+
+    if !is_v2_applied {
+        let tx = conn.unchecked_transaction()?;
+        // Recreate FTS5 table with accent-folding unicode61 tokenizer
+        tx.execute_batch(
+            r#"
+            DROP TABLE IF EXISTS messages_fts;
+
+            CREATE VIRTUAL TABLE IF NOT EXISTS messages_fts USING fts5(
+                message_id UNINDEXED,
+                account_id UNINDEXED,
+                subject,
+                from_address,
+                from_name,
+                to_addresses,
+                body_content,
+                tokenize = 'unicode61 remove_diacritics 2'
+            );
+
+            -- Re-populate FTS5 index from messages table
+            INSERT INTO messages_fts(message_id, account_id, subject, from_address, from_name, to_addresses, body_content)
+            SELECT id, account_id, subject, from_address, from_name, to_addresses, COALESCE(body_text_preview, body_snippet, '')
+            FROM messages;
+            "#,
+        )?;
+
+        let now = chrono::Utc::now().timestamp();
+        tx.execute(
+            "INSERT OR IGNORE INTO _schema_migrations (version, name, applied_at) VALUES (2, 'fts5_unicode61_diacritics_rebuild', ?1)",
+            [now],
+        )?;
+        tx.commit()?;
+    }
+
     Ok(())
 }
 
@@ -271,5 +313,14 @@ mod tests {
             )
             .unwrap();
         assert_eq!(v1_count, 1);
+
+        let v2_count: i64 = conn
+            .query_row(
+                "SELECT count(*) FROM _schema_migrations WHERE version = 2",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(v2_count, 1);
     }
 }

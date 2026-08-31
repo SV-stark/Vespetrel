@@ -10,6 +10,4 @@ pub mod views;
 pub use command_palette::{ActionCategory, CommandPalette, PaletteAction};
 pub use views::quick_filter::QuickFilterState;
 
-// Real GPUI bridge lives here when gpui dep is enabled (uncomment in Cargo.toml):
-// #[cfg(feature = "gpui")]
-// pub mod gpui_bridge;
+pub mod gpui_bridge;

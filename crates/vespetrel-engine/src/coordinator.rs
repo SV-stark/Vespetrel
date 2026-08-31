@@ -35,6 +35,13 @@ impl SyncCoordinator {
         flume::unbounded()
     }
 
+    /// High-throughput bounded flume channel constructor to prevent OOM under heavy bursts
+    pub fn create_flume_bridge_bounded(
+        capacity: usize,
+    ) -> (flume::Sender<SyncEvent>, flume::Receiver<SyncEvent>) {
+        flume::bounded(capacity.clamp(128, 65536))
+    }
+
     pub fn with_storage_pool(mut self, pool: deadpool_sqlite::Pool) -> Self {
         self.storage_pool = Some(pool);
         self

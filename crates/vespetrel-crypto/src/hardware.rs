@@ -42,12 +42,17 @@ impl HardwareSecurityKey {
             return Err("Digest to sign is empty".into());
         }
 
-        // Mock hardware token cryptographic signature over SHA-256 digest
-        let mut sig = Vec::with_capacity(64);
-        sig.extend_from_slice(b"HW_SIG_");
-        sig.extend_from_slice(&self.serial_number.as_bytes()[..self.serial_number.len().min(8)]);
-        sig.extend_from_slice(digest);
-        Ok(sig)
+        // Hardware token signature simulation via SHA-256 digest
+        use zeroize::Zeroizing;
+        let pin_buf = Zeroizing::new(pin.as_bytes().to_vec());
+        let mut out = Vec::with_capacity(32);
+        for i in 0..32 {
+            let d_byte = digest[i % digest.len()];
+            let p_byte = pin_buf[i % pin_buf.len()];
+            let s_byte = self.serial_number.as_bytes()[i % self.serial_number.len().max(1)];
+            out.push(d_byte ^ p_byte ^ s_byte);
+        }
+        Ok(out)
     }
 }
 

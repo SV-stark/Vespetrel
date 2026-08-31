@@ -76,4 +76,23 @@ mod tests {
         );
         assert_eq!(escape_fts5_query("   "), "");
     }
+
+    #[test]
+    fn test_fts5_accent_folding_search() {
+        let conn = crate::db::open_in_memory().unwrap();
+        conn.execute(
+            "INSERT INTO messages_fts(message_id, account_id, subject, from_address, from_name, to_addresses, body_content)
+             VALUES ('msg-1', 'acct-1', 'Meeting at the Café', 'boss@example.com', 'Boss', 'me@example.com', 'Let us discuss the résumé at the café')",
+            [],
+        ).unwrap();
+
+        // Search with unaccented "cafe" should match "Café"
+        let results = search_messages(&conn, "cafe", None, 10).unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].message_id, "msg-1");
+
+        // Search with unaccented "resume" should match "résumé"
+        let results_resume = search_messages(&conn, "resume", None, 10).unwrap();
+        assert_eq!(results_resume.len(), 1);
+    }
 }
