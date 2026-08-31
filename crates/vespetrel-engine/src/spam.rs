@@ -44,10 +44,15 @@ impl BayesClassifier {
                 i += 1;
             }
             let len = i - start;
-            if (3..=30).contains(&len)
-                && let Ok(s) = std::str::from_utf8(&bytes[start..i])
-            {
-                tokens.push(s.to_lowercase());
+            if (3..=30).contains(&len) {
+                let token_slice = &bytes[start..i];
+                if simdutf8::basic::from_utf8(token_slice).is_ok() {
+                    let mut lower = String::with_capacity(token_slice.len());
+                    for &b in token_slice {
+                        lower.push(b.to_ascii_lowercase() as char);
+                    }
+                    tokens.push(lower);
+                }
             }
         }
         tokens

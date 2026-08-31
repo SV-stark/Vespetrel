@@ -178,12 +178,23 @@ impl MeetingInvitation {
 
 /// Split an iCalendar line into (Property+Params, Value) ignoring colons inside quoted strings
 fn split_ical_line(line: &str) -> Option<(&str, &str)> {
+    let bytes = line.as_bytes();
     let mut in_quotes = false;
-    for (i, c) in line.char_indices() {
-        if c == '"' {
-            in_quotes = !in_quotes;
-        } else if c == ':' && !in_quotes {
-            return Some((&line[..i], &line[i + 1..]));
+    let mut cursor = 0;
+
+    while cursor < bytes.len() {
+        if let Some(pos) = memchr::memchr2(b'"', b':', &bytes[cursor..]) {
+            let hit = cursor + pos;
+            if bytes[hit] == b'"' {
+                in_quotes = !in_quotes;
+                cursor = hit + 1;
+            } else if !in_quotes {
+                return Some((&line[..hit], &line[hit + 1..]));
+            } else {
+                cursor = hit + 1;
+            }
+        } else {
+            break;
         }
     }
     None

@@ -18,5 +18,6 @@ memchr = { workspace = true }
 vcard4 = { workspace = true }
 icalendar = { workspace = true }
 urlencoding = { workspace = true }
+simdutf8 = { workspace = true }
 
 

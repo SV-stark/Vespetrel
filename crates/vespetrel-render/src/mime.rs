@@ -88,10 +88,90 @@ impl ParsedMail {
     }
 }
 
-fn html_escape(s: &str) -> String {
-    s.replace('&', "&amp;")
-        .replace('<', "&lt;")
-        .replace('>', "&gt;")
+/// High-throughput SIMD Quoted-Printable byte decoder using memchr
+pub fn decode_quoted_printable_simd(input: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(input.len());
+    let mut cursor = 0;
+
+    while cursor < input.len() {
+        if let Some(pos) = memchr::memchr(b'=', &input[cursor..]) {
+            let eq_idx = cursor + pos;
+            out.extend_from_slice(&input[cursor..eq_idx]);
+            cursor = eq_idx;
+
+            if cursor + 1 < input.len()
+                && (input[cursor + 1] == b'\r' || input[cursor + 1] == b'\n')
+            {
+                // Soft line break =\r\n or =\n
+                cursor += 2;
+                if cursor <= input.len()
+                    && input[cursor - 1] == b'\r'
+                    && cursor < input.len()
+                    && input[cursor] == b'\n'
+                {
+                    cursor += 1;
+                }
+            } else if cursor + 2 < input.len() {
+                let h1 = hex_val(input[cursor + 1]);
+                let h2 = hex_val(input[cursor + 2]);
+                if let (Some(v1), Some(v2)) = (h1, h2) {
+                    out.push((v1 << 4) | v2);
+                    cursor += 3;
+                } else {
+                    out.push(b'=');
+                    cursor += 1;
+                }
+            } else {
+                out.push(b'=');
+                cursor += 1;
+            }
+        } else {
+            out.extend_from_slice(&input[cursor..]);
+            break;
+        }
+    }
+    out
+}
+
+#[inline(always)]
+fn hex_val(b: u8) -> Option<u8> {
+    match b {
+        b'0'..=b'9' => Some(b - b'0'),
+        b'a'..=b'f' => Some(b - b'a' + 10),
+        b'A'..=b'F' => Some(b - b'A' + 10),
+        _ => None,
+    }
+}
+
+pub fn html_escape(s: &str) -> String {
+    let bytes = s.as_bytes();
+    if memchr::memchr3(b'&', b'<', b'>', bytes).is_none() {
+        return s.to_string();
+    }
+
+    let mut out = String::with_capacity(s.len() + 16);
+    let mut cursor = 0;
+    while cursor < bytes.len() {
+        if let Some(pos) = memchr::memchr3(b'&', b'<', b'>', &bytes[cursor..]) {
+            let special_idx = cursor + pos;
+            if let Ok(clean) = simdutf8::basic::from_utf8(&bytes[cursor..special_idx]) {
+                out.push_str(clean);
+            }
+            match bytes[special_idx] {
+                b'&' => out.push_str("&amp;"),
+                b'<' => out.push_str("&lt;"),
+                b'>' => out.push_str("&gt;"),
+                _ => {}
+            }
+            cursor = special_idx + 1;
+        } else {
+            if let Ok(clean) = simdutf8::basic::from_utf8(&bytes[cursor..]) {
+                out.push_str(clean);
+            }
+            break;
+        }
+    }
+    out
 }
 
 #[cfg(test)]
@@ -115,5 +195,25 @@ mod tests {
             Some("Plain text message <test>")
         );
         assert!(parsed_text.render_body().contains("Plain text message"));
+    }
+
+    #[test]
+    fn test_decode_quoted_printable_simd() {
+        let input = b"Hello=20World=21=0D=0AThis is a soft line break=\r\ncontinuation.";
+        let decoded = decode_quoted_printable_simd(input);
+        assert_eq!(
+            String::from_utf8_lossy(&decoded),
+            "Hello World!\r\nThis is a soft line breakcontinuation."
+        );
+    }
+
+    #[test]
+    fn test_html_escape_simd() {
+        let raw = "<script>alert('hello & welcome');</script>";
+        let escaped = html_escape(raw);
+        assert_eq!(
+            escaped,
+            "&lt;script&gt;alert('hello &amp; welcome');&lt;/script&gt;"
+        );
     }
 }
