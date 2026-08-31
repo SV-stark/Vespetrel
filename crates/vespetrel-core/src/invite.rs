@@ -49,7 +49,8 @@ impl MeetingInvitation {
         let mut end_at = Utc::now();
         let mut status = RsvpStatus::NeedsAction;
 
-        for line in ics_str.lines() {
+        let unfolded = unfold_ical(ics_str);
+        for line in &unfolded {
             let line = line.trim();
             if let Some(val) = line.strip_prefix("UID:") {
                 uid = Some(val.to_string());
@@ -199,6 +200,28 @@ fn parse_ical_datetime(val: &str) -> Option<DateTime<Utc>> {
     None
 }
 
+/// Unfold multiline iCalendar continuation lines (RFC 5545 §3.1)
+pub fn unfold_ical(ics_str: &str) -> Vec<String> {
+    let mut lines = Vec::new();
+    let mut current_line = String::new();
+
+    for raw_line in ics_str.lines() {
+        let trimmed_end = raw_line.trim_end_matches('\r');
+        if trimmed_end.starts_with(' ') || trimmed_end.starts_with('\t') {
+            current_line.push_str(&trimmed_end[1..]);
+        } else {
+            if !current_line.is_empty() {
+                lines.push(current_line);
+            }
+            current_line = trimmed_end.to_string();
+        }
+    }
+    if !current_line.is_empty() {
+        lines.push(current_line);
+    }
+    lines
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -247,5 +270,17 @@ END:VCALENDAR";
         let invite = MeetingInvitation::parse_ics(ics, "test@example.com").unwrap();
         assert_eq!(invite.start_at.timestamp(), 1786788000);
         assert_eq!(invite.end_at.timestamp(), 1786791600);
+    }
+
+    #[test]
+    fn test_unfold_ical_continuation_lines() {
+        let folded = "SUMMARY:This is a very long \r\n summary that was \r\n\tfolded across lines\r\nUID:fold-123\r\n";
+        let unfolded = unfold_ical(folded);
+        assert_eq!(unfolded.len(), 2);
+        assert_eq!(
+            unfolded[0],
+            "SUMMARY:This is a very long summary that was folded across lines"
+        );
+        assert_eq!(unfolded[1], "UID:fold-123");
     }
 }

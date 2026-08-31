@@ -110,8 +110,14 @@ impl AccountWorker {
                 let res = conn
                     .interact(move |c| vespetrel_storage::repo::upsert_folder(c, &rec))
                     .await;
-                if let Err(e) = res {
-                    warn!(folder=%rf.name, error=%e, "failed to upsert folder in storage");
+                match res {
+                    Ok(Ok(_)) => {}
+                    Ok(Err(db_err)) => {
+                        warn!(folder=%rf.name, error=%db_err, "failed to upsert folder in storage");
+                    }
+                    Err(interact_err) => {
+                        warn!(folder=%rf.name, error=%interact_err, "storage interact error");
+                    }
                 }
             }
         }
@@ -149,8 +155,14 @@ impl AccountWorker {
                                     vespetrel_storage::repo::insert_message(c, &msg_to_store)
                                 })
                                 .await;
-                            if let Err(e) = res {
-                                error!(msg_id=%msg.id, error=%e, "failed to store message in DB");
+                            match res {
+                                Ok(Ok(_)) => {}
+                                Ok(Err(db_err)) => {
+                                    error!(msg_id=%msg.id, error=%db_err, "failed to store message in DB");
+                                }
+                                Err(interact_err) => {
+                                    error!(msg_id=%msg.id, error=%interact_err, "storage interact error");
+                                }
                             }
                         }
                     }

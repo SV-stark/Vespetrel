@@ -251,10 +251,26 @@ pub fn update_message_flags(
 }
 
 pub fn delete_message(conn: &Connection, message_id: &str) -> anyhow::Result<()> {
+    let blob_path: Option<String> = conn
+        .query_row(
+            "SELECT blob_path FROM messages WHERE id = ?1",
+            params![message_id],
+            |r| r.get(0),
+        )
+        .optional()?;
+
     let rows = conn.execute("DELETE FROM messages WHERE id = ?1", params![message_id])?;
     if rows == 0 {
         return Err(crate::StorageError::NotFound(message_id.to_string()).into());
     }
+
+    if let Some(path_str) = blob_path {
+        let p = std::path::Path::new(&path_str);
+        if p.exists() {
+            let _ = std::fs::remove_file(p);
+        }
+    }
+
     Ok(())
 }
 

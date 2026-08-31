@@ -21,21 +21,54 @@ pub fn sanitize(html: &str, opts: &SanitizeOptions) -> anyhow::Result<String> {
     Ok(cleaned)
 }
 
+const MAX_HTML_INPUT_BYTES: usize = 10 * 1024 * 1024; // 10MB safety limit
+
+fn is_tracking_pixel(el: &lol_html::html_content::Element) -> bool {
+    let width = el.get_attribute("width").unwrap_or_default().to_lowercase();
+    let height = el
+        .get_attribute("height")
+        .unwrap_or_default()
+        .to_lowercase();
+    let style = el.get_attribute("style").unwrap_or_default().to_lowercase();
+
+    let is_zero_or_one = |s: &str| s == "0" || s == "1" || s == "0px" || s == "1px";
+
+    if is_zero_or_one(&width) || is_zero_or_one(&height) {
+        return true;
+    }
+
+    if style.contains("width: 1px")
+        || style.contains("width:1px")
+        || style.contains("width: 0px")
+        || style.contains("width:0px")
+        || style.contains("display: none")
+        || style.contains("display:none")
+        || style.contains("visibility: hidden")
+    {
+        return true;
+    }
+
+    false
+}
+
 fn rewrite_html(input: &str, opts: &RewriteOptions) -> anyhow::Result<String> {
-    let mut output = Vec::new();
+    if input.len() > MAX_HTML_INPUT_BYTES {
+        anyhow::bail!("HTML input exceeds maximum allowable size");
+    }
+
+    let mut output = Vec::with_capacity(input.len());
 
     let settings = Settings::new()
-        .append_element_content_handler(element!("script, iframe, object, embed, applet", |el| {
-            el.remove();
-            Ok(())
-        }))
+        .append_element_content_handler(element!(
+            "script, iframe, object, embed, applet, base",
+            |el| {
+                el.remove();
+                Ok(())
+            }
+        ))
         .append_element_content_handler(element!("img", |el| {
-            // Tag 1x1 tracking pixels
-            if (
-                el.get_attribute("width").as_deref(),
-                el.get_attribute("height").as_deref(),
-            ) == (Some("1"), Some("1"))
-            {
+            // Remove tracking pixels
+            if is_tracking_pixel(el) {
                 el.remove();
                 return Ok(());
             }
@@ -80,9 +113,8 @@ fn ammonia_clean(html: &str) -> String {
         ])
         .link_rel(Some("noopener noreferrer"))
         .add_generic_attributes(["data-blocked-src"])
-        .add_url_schemes(["blob", "cid", "data"]);
+        .add_url_schemes(["blob", "cid"]);
 
-    // Enforce allowlist - ammonia does this by default (removes script etc.)
     builder.clean(html).to_string()
 }
 

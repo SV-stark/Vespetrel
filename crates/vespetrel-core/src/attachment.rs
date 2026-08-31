@@ -13,6 +13,20 @@ pub struct Attachment {
 }
 
 impl Attachment {
+    pub fn sanitize_filename(raw: &str) -> String {
+        let clean = raw.replace(['\0', '/', '\\'], "_");
+        let name = std::path::Path::new(&clean)
+            .file_name()
+            .and_then(|f| f.to_str())
+            .unwrap_or("attachment")
+            .trim();
+        if name.is_empty() || name == ".." || name == "." {
+            "attachment".to_string()
+        } else {
+            name.to_string()
+        }
+    }
+
     pub fn new(
         message_id: impl Into<String>,
         filename: impl Into<String>,
@@ -20,11 +34,12 @@ impl Attachment {
         size_bytes: i64,
         blob_path: impl Into<String>,
     ) -> Self {
+        let safe_filename = Self::sanitize_filename(&filename.into());
         Self {
             id: uuid::Uuid::new_v4().to_string(),
             message_id: message_id.into(),
             content_id: None,
-            filename: filename.into(),
+            filename: safe_filename,
             content_type: content_type.into(),
             size_bytes,
             blob_path: blob_path.into(),
@@ -49,5 +64,19 @@ mod tests {
         assert_eq!(att.filename, "invoice.pdf");
         assert_eq!(att.size_bytes, 1024);
         assert!(!att.is_inline);
+    }
+
+    #[test]
+    fn test_attachment_filename_sanitization() {
+        let att = Attachment::new(
+            "msg_1",
+            "../../etc/passwd\0evil.exe",
+            "application/octet-stream",
+            50,
+            "blobs/1.lz4",
+        );
+        assert!(!att.filename.contains('/'));
+        assert!(!att.filename.contains('\\'));
+        assert!(!att.filename.contains('\0'));
     }
 }

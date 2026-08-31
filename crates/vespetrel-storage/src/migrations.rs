@@ -23,11 +23,11 @@ pub fn run_migrations(conn: &Connection) -> anyhow::Result<()> {
         .map(|count| count > 0)?;
 
     if !is_v1_applied {
-        conn.execute_batch(
+        let tx = conn.unchecked_transaction()?;
+        tx.execute_batch(
             r#"
-            BEGIN EXCLUSIVE;
-
             -- Accounts
+
             CREATE TABLE IF NOT EXISTS accounts (
                 id TEXT PRIMARY KEY,
                 name TEXT NOT NULL,
@@ -202,17 +202,16 @@ pub fn run_migrations(conn: &Connection) -> anyhow::Result<()> {
                 priority INTEGER NOT NULL DEFAULT 0
             );
             CREATE INDEX IF NOT EXISTS idx_tasks_calendar ON tasks(calendar_id);
-
-            COMMIT;
             "#,
         )?;
 
         // Record migration version 1
         let now = chrono::Utc::now().timestamp();
-        conn.execute(
-            "INSERT INTO _schema_migrations (version, name, applied_at) VALUES (1, 'initial_schema_fts5', ?1)",
+        tx.execute(
+            "INSERT OR IGNORE INTO _schema_migrations (version, name, applied_at) VALUES (1, 'initial_schema_fts5', ?1)",
             [now],
         )?;
+        tx.commit()?;
     }
 
     Ok(())

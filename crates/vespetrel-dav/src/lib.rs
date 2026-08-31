@@ -107,7 +107,7 @@ impl DavClient {
     /// Build RFC 6578 sync-collection REPORT XML request
     pub fn build_sync_report_xml(sync_token: Option<&str>) -> String {
         let token_tag = sync_token
-            .map(|t| format!("<D:sync-token>{}</D:sync-token>", t))
+            .map(|t| format!("<D:sync-token>{}</D:sync-token>", xml_escape(t)))
             .unwrap_or_else(|| "<D:sync-token/>".to_string());
 
         format!(
@@ -122,6 +122,14 @@ impl DavClient {
 </D:sync-collection>"#
         )
     }
+}
+
+fn xml_escape(s: &str) -> String {
+    s.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+        .replace('\'', "&apos;")
 }
 
 #[derive(Debug, Clone)]

@@ -43,10 +43,13 @@ impl MatrixBridge {
     /// Build `/sync` endpoint URL with since token
     pub fn sync_url(&self, since_token: Option<&str>) -> String {
         match since_token {
-            Some(token) => format!(
-                "{}/_matrix/client/v3/sync?since={token}&timeout=30000",
-                self.homeserver_url
-            ),
+            Some(token) => {
+                let enc = url_encode(token);
+                format!(
+                    "{}/_matrix/client/v3/sync?since={enc}&timeout=30000",
+                    self.homeserver_url
+                )
+            }
             None => format!(
                 "{}/_matrix/client/v3/sync?timeout=30000",
                 self.homeserver_url
@@ -56,8 +59,10 @@ impl MatrixBridge {
 
     /// Build send message endpoint URL
     pub fn send_message_url(&self, room_id: &str, txn_id: &str) -> String {
+        let enc_room = url_encode(room_id);
+        let enc_txn = url_encode(txn_id);
         format!(
-            "{}/_matrix/client/v3/rooms/{room_id}/send/m.room.message/{txn_id}",
+            "{}/_matrix/client/v3/rooms/{enc_room}/send/m.room.message/{enc_txn}",
             self.homeserver_url
         )
     }
@@ -85,8 +90,21 @@ impl MatrixBridge {
     }
 }
 
+fn url_encode(input: &str) -> String {
+    let mut encoded = String::new();
+    for b in input.bytes() {
+        if b.is_ascii_alphanumeric() || b == b'-' || b == b'_' || b == b'.' || b == b'~' {
+            encoded.push(b as char);
+        } else {
+            encoded.push_str(&format!("%{:02X}", b));
+        }
+    }
+    encoded
+}
+
 #[cfg(test)]
 mod tests {
+
     use super::*;
 
     #[test]

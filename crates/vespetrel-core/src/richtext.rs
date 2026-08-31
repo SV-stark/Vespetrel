@@ -137,43 +137,40 @@ impl RichTextDocument {
             }
         } else {
             for (range, kind) in &self.blocks {
-                let content = if range.start <= range.end && range.end <= self.text.len() {
-                    &self.text[range.clone()]
-                } else {
-                    ""
-                };
-                let escaped = html_escape(content);
+                let formatted_inner = render_inline_spans(&self.text, range.clone(), &self.spans);
                 match kind {
                     BlockKind::Heading(1) => {
-                        html.push_str(&format!("<h1 style=\"font-size: 1.5rem; font-weight: 700; margin: 16px 0 8px;\">{escaped}</h1>\n"));
+                        html.push_str(&format!("<h1 style=\"font-size: 1.5rem; font-weight: 700; margin: 16px 0 8px;\">{formatted_inner}</h1>\n"));
                     }
                     BlockKind::Heading(2) => {
-                        html.push_str(&format!("<h2 style=\"font-size: 1.25rem; font-weight: 600; margin: 14px 0 6px;\">{escaped}</h2>\n"));
+                        html.push_str(&format!("<h2 style=\"font-size: 1.25rem; font-weight: 600; margin: 14px 0 6px;\">{formatted_inner}</h2>\n"));
                     }
                     BlockKind::Heading(_) => {
-                        html.push_str(&format!("<h3 style=\"font-size: 1.1rem; font-weight: 600; margin: 12px 0 4px;\">{escaped}</h3>\n"));
+                        html.push_str(&format!("<h3 style=\"font-size: 1.1rem; font-weight: 600; margin: 12px 0 4px;\">{formatted_inner}</h3>\n"));
                     }
                     BlockKind::BulletList => {
                         html.push_str(&format!(
-                            "<li style=\"margin-left: 20px;\">{escaped}</li>\n"
+                            "<li style=\"margin-left: 20px;\">{formatted_inner}</li>\n"
                         ));
                     }
                     BlockKind::NumberedList(num) => {
                         html.push_str(&format!(
-                            "<li value=\"{num}\" style=\"margin-left: 20px;\">{escaped}</li>\n"
+                            "<li value=\"{num}\" style=\"margin-left: 20px;\">{formatted_inner}</li>\n"
                         ));
                     }
                     BlockKind::Blockquote => {
-                        html.push_str(&format!("<blockquote style=\"border-left: 3px solid #d4d4d8; padding-left: 12px; margin: 8px 0; color: #71717a;\">{escaped}</blockquote>\n"));
+                        html.push_str(&format!("<blockquote style=\"border-left: 3px solid #d4d4d8; padding-left: 12px; margin: 8px 0; color: #71717a;\">{formatted_inner}</blockquote>\n"));
                     }
                     BlockKind::CodeBlock(_) => {
-                        html.push_str(&format!("<pre style=\"background: #f4f4f5; padding: 12px; border-radius: 6px;\"><code>{escaped}</code></pre>\n"));
+                        html.push_str(&format!("<pre style=\"background: #f4f4f5; padding: 12px; border-radius: 6px;\"><code>{formatted_inner}</code></pre>\n"));
                     }
                     BlockKind::Paragraph => {
-                        if escaped.trim().is_empty() {
+                        if formatted_inner.trim().is_empty() {
                             html.push_str("<p><br/></p>\n");
                         } else {
-                            html.push_str(&format!("<p style=\"margin: 6px 0;\">{escaped}</p>\n"));
+                            html.push_str(&format!(
+                                "<p style=\"margin: 6px 0;\">{formatted_inner}</p>\n"
+                            ));
                         }
                     }
                 }
@@ -250,6 +247,70 @@ fn parse_inline_markdown(line: &str, base_offset: usize) -> (String, Vec<TextSpa
     (plain, spans)
 }
 
+fn render_inline_spans(full_text: &str, block_range: Range<usize>, spans: &[TextSpan]) -> String {
+    let start = block_range.start;
+    let end = block_range.end;
+    if start >= end
+        || end > full_text.len()
+        || !full_text.is_char_boundary(start)
+        || !full_text.is_char_boundary(end)
+    {
+        return html_escape(&full_text[start.min(full_text.len())..end.min(full_text.len())]);
+    }
+
+    let block_text = &full_text[start..end];
+    let mut relevant_spans: Vec<&TextSpan> = spans
+        .iter()
+        .filter(|s| s.range.start >= start && s.range.end <= end && s.range.start < s.range.end)
+        .collect();
+
+    if relevant_spans.is_empty() {
+        return html_escape(block_text);
+    }
+
+    relevant_spans.sort_by_key(|s| s.range.start);
+
+    let mut result = String::new();
+    let mut curr = start;
+
+    for span in relevant_spans {
+        let span_start = span.range.start.clamp(start, end);
+        let span_end = span.range.end.clamp(start, end);
+
+        if span_start > curr
+            && full_text.is_char_boundary(curr)
+            && full_text.is_char_boundary(span_start)
+        {
+            result.push_str(&html_escape(&full_text[curr..span_start]));
+        }
+
+        if full_text.is_char_boundary(span_start) && full_text.is_char_boundary(span_end) {
+            let inner = html_escape(&full_text[span_start..span_end]);
+            let formatted = match (&span.style, &span.link_url) {
+                (_, Some(url)) => format!(
+                    "<a href=\"{}\" style=\"color: #2563eb; text-decoration: underline;\">{inner}</a>",
+                    html_escape(url)
+                ),
+                (InlineStyle::Bold, None) => format!("<strong>{inner}</strong>"),
+                (InlineStyle::Italic, None) => format!("<em>{inner}</em>"),
+                (InlineStyle::Underline, None) => format!("<u>{inner}</u>"),
+                (InlineStyle::Strikethrough, None) => format!("<del>{inner}</del>"),
+                (InlineStyle::InlineCode, None) => format!(
+                    "<code style=\"background: #f4f4f5; padding: 2px 4px; border-radius: 4px;\">{inner}</code>"
+                ),
+            };
+            result.push_str(&formatted);
+            curr = span_end;
+        }
+    }
+
+    if curr < end && full_text.is_char_boundary(curr) && full_text.is_char_boundary(end) {
+        result.push_str(&html_escape(&full_text[curr..end]));
+    }
+
+    result
+}
+
 fn html_escape(s: &str) -> String {
     s.replace('&', "&amp;")
         .replace('<', "&lt;")
@@ -294,5 +355,7 @@ mod tests {
         assert!(html.contains("<h1"));
         assert!(html.contains("<li"));
         assert!(html.contains("font-family"));
+        assert!(html.contains("<strong>critical</strong>"));
+        assert!(html.contains("<a href=\"https://vespetrel.org\""));
     }
 }

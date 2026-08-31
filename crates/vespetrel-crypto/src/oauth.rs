@@ -70,13 +70,20 @@ impl OAuth2Engine {
         (auth_url, csrf_token, verifier)
     }
 
-    /// Start local loopback listener on 127.0.0.1:8989 and wait for ?code= with 180s timeout
-    pub async fn wait_for_callback(&self) -> anyhow::Result<String> {
-        self.wait_for_callback_with_timeout(180, None).await
+    pub fn redirect_port(&self) -> u16 {
+        if let Some(rest) = self.config.redirect_uri.split("://").nth(1) {
+            let host_port = rest.split('/').next().unwrap_or("");
+            if let Some(port_str) = host_port.split(':').nth(1)
+                && let Ok(p) = port_str.parse::<u16>()
+            {
+                return p;
+            }
+        }
+        8989
     }
 
-    /// Start local loopback listener with timeout and optional state verification
-    pub async fn wait_for_callback_with_timeout(
+    /// Wait for loopback OAuth2 redirect with customizable timeout and CSRF state check
+    pub async fn wait_for_callback(
         &self,
         timeout_secs: u64,
         expected_state: Option<&str>,
@@ -85,9 +92,12 @@ impl OAuth2Engine {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
         use tokio::net::TcpListener;
 
+        let port = self.redirect_port();
+        let addr = format!("127.0.0.1:{port}");
+
         let future = async {
-            info!("starting loopback listener on 127.0.0.1:8989 for OAuth2 callback");
-            let listener = TcpListener::bind("127.0.0.1:8989").await?;
+            info!(addr=%addr, "starting loopback listener for OAuth2 callback");
+            let listener = TcpListener::bind(&addr).await?;
 
             let (mut socket, _) = listener.accept().await?;
             let mut buf = vec![0u8; 8192];
@@ -299,10 +309,13 @@ fn urlencoding(s: &str) -> String {
     encoded
 }
 
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[derive(
+    Debug, Clone, serde::Serialize, serde::Deserialize, zeroize::Zeroize, zeroize::ZeroizeOnDrop,
+)]
 pub struct TokenBundle {
     pub access_token: String,
     pub refresh_token: Option<String>,
+    #[zeroize(skip)]
     pub expires_in: u64,
 }
 

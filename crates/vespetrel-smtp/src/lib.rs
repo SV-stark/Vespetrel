@@ -73,40 +73,47 @@ impl SmtpClient {
     pub fn build_lettre_message(&self, msg: &ComposedMessage) -> anyhow::Result<lettre::Message> {
         use lettre::message::Message as LettreMessage;
 
+        let from_addr: lettre::Address = msg.from.email.trim().replace(['\r', '\n'], "").parse()?;
+        let from_name = msg
+            .from
+            .name
+            .as_ref()
+            .map(|n| n.replace(['\r', '\n', '"'], ""));
+        let from_mailbox = lettre::message::Mailbox::new(from_name, from_addr);
+
+        let clean_subject = msg.subject.replace(['\r', '\n'], " ");
         let mut builder = LettreMessage::builder()
-            .from(
-                format!(
-                    "{} <{}>",
-                    msg.from.name.as_deref().unwrap_or(""),
-                    msg.from.email
-                )
-                .parse()?,
-            )
-            .subject(&msg.subject);
+            .from(from_mailbox)
+            .subject(clean_subject);
 
         for to in &msg.to {
-            let addr: lettre::Address = to.email.parse()?;
-            let mailbox = lettre::message::Mailbox::new(to.name.clone(), addr);
+            let addr: lettre::Address = to.email.trim().replace(['\r', '\n'], "").parse()?;
+            let name = to.name.as_ref().map(|n| n.replace(['\r', '\n', '"'], ""));
+            let mailbox = lettre::message::Mailbox::new(name, addr);
             builder = builder.to(mailbox);
         }
         for cc in &msg.cc {
-            let addr: lettre::Address = cc.email.parse()?;
-            builder = builder.cc(lettre::message::Mailbox::new(cc.name.clone(), addr));
+            let addr: lettre::Address = cc.email.trim().replace(['\r', '\n'], "").parse()?;
+            let name = cc.name.as_ref().map(|n| n.replace(['\r', '\n', '"'], ""));
+            builder = builder.cc(lettre::message::Mailbox::new(name, addr));
         }
         for bcc in &msg.bcc {
-            let addr: lettre::Address = bcc.email.parse()?;
-            builder = builder.bcc(lettre::message::Mailbox::new(bcc.name.clone(), addr));
+            let addr: lettre::Address = bcc.email.trim().replace(['\r', '\n'], "").parse()?;
+            let name = bcc.name.as_ref().map(|n| n.replace(['\r', '\n', '"'], ""));
+            builder = builder.bcc(lettre::message::Mailbox::new(name, addr));
         }
 
         if let Some(in_reply_to) = &msg.in_reply_to {
+            let clean = in_reply_to.replace(['\r', '\n'], " ");
             let name = lettre::message::header::HeaderName::new_from_ascii_str("In-Reply-To");
-            let val = lettre::message::header::HeaderValue::new(name, in_reply_to.clone());
+            let val = lettre::message::header::HeaderValue::new(name, clean);
             builder = builder.raw_header(val);
         }
 
         if !msg.references.is_empty() {
+            let clean = msg.references.join(" ").replace(['\r', '\n'], " ");
             let name = lettre::message::header::HeaderName::new_from_ascii_str("References");
-            let val = lettre::message::header::HeaderValue::new(name, msg.references.join(" "));
+            let val = lettre::message::header::HeaderValue::new(name, clean);
             builder = builder.raw_header(val);
         }
 
@@ -117,13 +124,19 @@ impl SmtpClient {
             builder = builder.raw_header(val);
         }
 
-        let body = if let Some(html) = &msg.body_html {
-            html.clone()
+        let email = if let Some(html) = &msg.body_html {
+            if !msg.body_text.trim().is_empty() {
+                builder.multipart(lettre::message::MultiPart::alternative_plain_html(
+                    msg.body_text.clone(),
+                    html.clone(),
+                ))?
+            } else {
+                builder.body(html.clone())?
+            }
         } else {
-            msg.body_text.clone()
+            builder.body(msg.body_text.clone())?
         };
 
-        let email = builder.body(body)?;
         Ok(email)
     }
 

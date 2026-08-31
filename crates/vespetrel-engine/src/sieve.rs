@@ -92,17 +92,24 @@ impl SieveValidator {
 pub struct ManageSieveCommand;
 
 impl ManageSieveCommand {
+    fn sanitize_name(name: &str) -> String {
+        name.replace(['\r', '\n', '"', '\\'], "")
+    }
+
     pub fn put_script(name: &str, content: &str) -> String {
+        let clean = Self::sanitize_name(name);
         let bytes = content.len();
-        format!("PUTSCRIPT \"{name}\" {{{bytes}+}}\r\n{content}\r\n")
+        format!("PUTSCRIPT \"{clean}\" {{{bytes}+}}\r\n{content}\r\n")
     }
 
     pub fn get_script(name: &str) -> String {
-        format!("GETSCRIPT \"{name}\"\r\n")
+        let clean = Self::sanitize_name(name);
+        format!("GETSCRIPT \"{clean}\"\r\n")
     }
 
     pub fn set_active(name: &str) -> String {
-        format!("SETACTIVE \"{name}\"\r\n")
+        let clean = Self::sanitize_name(name);
+        format!("SETACTIVE \"{clean}\"\r\n")
     }
 
     pub fn list_scripts() -> &'static str {
@@ -110,11 +117,13 @@ impl ManageSieveCommand {
     }
 
     pub fn delete_script(name: &str) -> String {
-        format!("DELETESCRIPT \"{name}\"\r\n")
+        let clean = Self::sanitize_name(name);
+        format!("DELETESCRIPT \"{clean}\"\r\n")
     }
 
     pub fn check_space(name: &str, size_bytes: usize) -> String {
-        format!("HAVESPACE \"{name}\" {size_bytes}\r\n")
+        let clean = Self::sanitize_name(name);
+        format!("HAVESPACE \"{clean}\" {size_bytes}\r\n")
     }
 }
 

@@ -26,15 +26,17 @@ impl GraphConfig {
     }
 
     pub fn delta_url(&self, folder_id: &str, delta_token: Option<&str>) -> String {
+        let enc_folder = url_encode(folder_id);
         if let Some(tok) = delta_token {
+            let enc_tok = url_encode(tok);
             format!(
-                "{}/me/mailFolders/{}/messages/delta?$deltatoken={}",
-                self.base_url, folder_id, tok
+                "{}/me/mailFolders/{enc_folder}/messages/delta?$deltatoken={enc_tok}",
+                self.base_url
             )
         } else {
             format!(
-                "{}/me/mailFolders/{}/messages/delta",
-                self.base_url, folder_id
+                "{}/me/mailFolders/{enc_folder}/messages/delta",
+                self.base_url
             )
         }
     }
@@ -48,8 +50,21 @@ impl GraphConfig {
     }
 
     pub fn message_mime_url(&self, message_id: &str) -> String {
-        format!("{}/me/messages/{message_id}/$value", self.base_url)
+        let enc_id = url_encode(message_id);
+        format!("{}/me/messages/{enc_id}/$value", self.base_url)
     }
+}
+
+fn url_encode(input: &str) -> String {
+    let mut encoded = String::new();
+    for b in input.bytes() {
+        if b.is_ascii_alphanumeric() || b == b'-' || b == b'_' || b == b'.' || b == b'~' {
+            encoded.push(b as char);
+        } else {
+            encoded.push_str(&format!("%{:02X}", b));
+        }
+    }
+    encoded
 }
 
 /// Convert ComposedMessage into Microsoft Graph sendMail JSON payload
