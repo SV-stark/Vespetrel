@@ -138,3 +138,41 @@ impl Account {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_provider_type_formatting_and_parsing() {
+        assert_eq!(ProviderType::Imap.to_string(), "imap");
+        assert_eq!(ProviderType::Jmap.to_string(), "jmap");
+        assert_eq!(ProviderType::Graph.to_string(), "graph");
+        assert_eq!(ProviderType::Gmail.to_string(), "gmail");
+
+        assert_eq!("IMAP".parse::<ProviderType>().unwrap(), ProviderType::Imap);
+        assert_eq!("jmap".parse::<ProviderType>().unwrap(), ProviderType::Jmap);
+        assert_eq!(
+            "Graph".parse::<ProviderType>().unwrap(),
+            ProviderType::Graph
+        );
+        assert_eq!(
+            "gmail".parse::<ProviderType>().unwrap(),
+            ProviderType::Gmail
+        );
+        assert!("unknown".parse::<ProviderType>().is_err());
+    }
+
+    #[test]
+    fn test_account_creation_and_validation() {
+        let valid = Account::new("Work", "user@company.com", ProviderType::Imap);
+        assert!(valid.validate().is_ok());
+        assert!(valid.is_active);
+
+        let empty_name = Account::new("   ", "user@company.com", ProviderType::Jmap);
+        assert!(empty_name.validate().is_err());
+
+        let invalid_email = Account::new("Personal", "notanemail", ProviderType::Graph);
+        assert!(invalid_email.validate().is_err());
+    }
+}

@@ -74,3 +74,30 @@ where
     // Stub does not block forever in tests
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_idle_loop_events_and_renewal() {
+        let idle = IdleLoop::new();
+
+        assert!(matches!(
+            idle.handle_untagged("* 42 EXISTS"),
+            Some(IdleEvent::NewMail)
+        ));
+        assert!(matches!(
+            idle.handle_untagged("* 5 EXPUNGE"),
+            Some(IdleEvent::Expunged)
+        ));
+        assert!(matches!(
+            idle.handle_untagged("* 3 FETCH (FLAGS (\\Seen))"),
+            Some(IdleEvent::FlagChange)
+        ));
+        assert!(idle.handle_untagged("* OK [READ-ONLY]").is_none());
+
+        assert!(!idle.should_renew(Duration::from_secs(10 * 60)));
+        assert!(idle.should_renew(Duration::from_secs(26 * 60)));
+    }
+}

@@ -1,4 +1,4 @@
-﻿use tokio::sync::{broadcast, mpsc};
+use tokio::sync::{broadcast, mpsc};
 
 use vespetrel_core::provider::SyncEvent;
 
@@ -33,5 +33,31 @@ impl EventBus {
 impl Default for EventBus {
     fn default() -> Self {
         Self::new(1024)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn test_event_bus_broadcast() {
+        let bus = EventBus::new(32);
+        let mut rx1 = bus.subscribe();
+        let mut rx2 = bus.subscribe();
+
+        bus.send(SyncEvent::SyncFinished {
+            account_id: "acc_42".into(),
+        });
+
+        match rx1.recv().await.unwrap() {
+            SyncEvent::SyncFinished { account_id } => assert_eq!(account_id, "acc_42"),
+            _ => panic!("Unexpected event"),
+        }
+
+        match rx2.recv().await.unwrap() {
+            SyncEvent::SyncFinished { account_id } => assert_eq!(account_id, "acc_42"),
+            _ => panic!("Unexpected event"),
+        }
     }
 }

@@ -51,3 +51,25 @@ impl TaskItem {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_task_and_contact_creation() {
+        let task = TaskItem::new("cal_1", "Finish RFC 5545 Support");
+        assert_eq!(task.calendar_id, "cal_1");
+        assert_eq!(task.title, "Finish RFC 5545 Support");
+        assert!(!task.is_completed);
+
+        let contact = Contact {
+            id: "cnt_1".into(),
+            remote_id: Some("rem_1".into()),
+            display_name: Some("Alice Smith".into()),
+            email: "alice@example.com".into(),
+            vcard_data: None,
+        };
+        assert_eq!(contact.email, "alice@example.com");
+    }
+}

@@ -62,3 +62,18 @@ pub fn search_messages(
     }
     Ok(results)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_escape_fts5_query() {
+        assert_eq!(escape_fts5_query("hello world"), "\"hello\" \"world\"");
+        assert_eq!(
+            escape_fts5_query("user@example.com OR 1=1"),
+            "\"user@example.com\" \"OR\" \"11\""
+        );
+        assert_eq!(escape_fts5_query("   "), "");
+    }
+}

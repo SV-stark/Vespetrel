@@ -93,3 +93,27 @@ fn html_escape(s: &str) -> String {
         .replace('<', "&lt;")
         .replace('>', "&gt;")
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_parsed_mail_rendering_and_extraction() {
+        let raw = b"From: Alice <alice@example.com>\r\nTo: Bob <bob@example.com>\r\nSubject: Test Email\r\nContent-Type: text/html; charset=utf-8\r\n\r\n<h1>Hello Bob</h1>";
+        let parsed = ParsedMail::parse(raw).unwrap();
+        assert_eq!(parsed.subject.as_deref(), Some("Test Email"));
+        assert_eq!(parsed.from.as_deref(), Some("Alice <alice@example.com>"));
+        assert_eq!(parsed.to, vec!["bob@example.com"]);
+        assert!(parsed.html_body.is_some());
+        assert_eq!(parsed.render_body(), "<h1>Hello Bob</h1>");
+
+        let raw_text = b"From: Alice <alice@example.com>\r\nTo: Bob <bob@example.com>\r\nSubject: Text Email\r\nContent-Type: text/plain\r\n\r\nPlain text message <test>";
+        let parsed_text = ParsedMail::parse(raw_text).unwrap();
+        assert_eq!(
+            parsed_text.text_body.as_deref(),
+            Some("Plain text message <test>")
+        );
+        assert!(parsed_text.render_body().contains("Plain text message"));
+    }
+}

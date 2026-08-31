@@ -53,3 +53,17 @@ pub fn open_in_memory() -> anyhow::Result<Connection> {
     init_connection(&conn)?;
     Ok(conn)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_init_in_memory_connection() {
+        let conn = open_in_memory().unwrap();
+        let fk: i64 = conn
+            .query_row("PRAGMA foreign_keys", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(fk, 1);
+    }
+}

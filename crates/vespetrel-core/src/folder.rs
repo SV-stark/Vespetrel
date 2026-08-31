@@ -104,3 +104,43 @@ impl Folder {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_folder_role_formatting_and_parsing() {
+        assert_eq!(FolderRole::Inbox.to_string(), "inbox");
+        assert_eq!(FolderRole::Sent.to_string(), "sent");
+        assert_eq!(FolderRole::Drafts.to_string(), "drafts");
+        assert_eq!(FolderRole::Trash.to_string(), "trash");
+        assert_eq!(FolderRole::Archive.to_string(), "archive");
+        assert_eq!(FolderRole::Junk.to_string(), "junk");
+        assert_eq!(FolderRole::Custom.to_string(), "custom");
+
+        assert_eq!("INBOX".parse::<FolderRole>().unwrap(), FolderRole::Inbox);
+        assert_eq!("sent".parse::<FolderRole>().unwrap(), FolderRole::Sent);
+        assert_eq!("spam".parse::<FolderRole>().unwrap(), FolderRole::Junk);
+        assert_eq!(
+            "Work/Projects".parse::<FolderRole>().unwrap(),
+            FolderRole::Custom
+        );
+    }
+
+    #[test]
+    fn test_infer_role_special_use_and_name() {
+        assert_eq!(
+            Folder::infer_role("MySent", Some("\\Sent")),
+            FolderRole::Sent
+        );
+        assert_eq!(
+            Folder::infer_role("MyJunk", Some("\\Junk")),
+            FolderRole::Junk
+        );
+        assert_eq!(Folder::infer_role("Deleted Items", None), FolderRole::Trash);
+        assert_eq!(Folder::infer_role("Sent Items", None), FolderRole::Sent);
+        assert_eq!(Folder::infer_role("Archive", None), FolderRole::Archive);
+        assert_eq!(Folder::infer_role("RandomFolder", None), FolderRole::Custom);
+    }
+}

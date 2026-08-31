@@ -185,3 +185,29 @@ pub struct ComposedAttachment {
     pub content_type: String,
     pub data: Vec<u8>,
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_message_creation_and_summary() {
+        let msg = Message::new(
+            "acc_1",
+            "folder_inbox",
+            1001,
+            "Welcome to Vespetrel",
+            "team@vespetrel.org",
+            vec!["alice@example.com".into()],
+        );
+        assert_eq!(msg.remote_uid, 1001);
+        assert_eq!(msg.subject.as_deref(), Some("Welcome to Vespetrel"));
+        assert_eq!(msg.from_address, "team@vespetrel.org");
+        assert_eq!(msg.to_addresses.len(), 1);
+
+        let summary = msg.summary();
+        assert_eq!(summary.id, msg.id);
+        assert_eq!(summary.subject, msg.subject);
+        assert_eq!(summary.from_address, msg.from_address);
+    }
+}

@@ -98,6 +98,18 @@ impl SmtpClient {
             builder = builder.bcc(lettre::message::Mailbox::new(bcc.name.clone(), addr));
         }
 
+        if let Some(in_reply_to) = &msg.in_reply_to {
+            let name = lettre::message::header::HeaderName::new_from_ascii_str("In-Reply-To");
+            let val = lettre::message::header::HeaderValue::new(name, in_reply_to.clone());
+            builder = builder.raw_header(val);
+        }
+
+        if !msg.references.is_empty() {
+            let name = lettre::message::header::HeaderName::new_from_ascii_str("References");
+            let val = lettre::message::header::HeaderValue::new(name, msg.references.join(" "));
+            builder = builder.raw_header(val);
+        }
+
         if let Some(autocrypt) = &self.config.autocrypt_header {
             let sanitized_autocrypt = autocrypt.replace(['\r', '\n'], " ");
             let name = lettre::message::header::HeaderName::new_from_ascii_str("Autocrypt");
@@ -194,5 +206,42 @@ mod tests {
         let raw_str = String::from_utf8_lossy(&formatted);
         assert!(raw_str.contains("Autocrypt: addr=alice@example.com"));
         assert!(raw_str.contains("Subject: Encrypted discussion"));
+    }
+
+    #[test]
+    fn test_smtp_build_message_with_cc_bcc_and_html() {
+        let config = SmtpConfig::new("smtp.example.com", 465, "alice", "token");
+        let client = SmtpClient::new(config);
+
+        let msg = ComposedMessage {
+            from: Address {
+                name: Some("Alice".into()),
+                email: "alice@example.com".into(),
+            },
+            to: vec![Address {
+                name: Some("Bob".into()),
+                email: "bob@example.com".into(),
+            }],
+            cc: vec![Address {
+                name: Some("Carol".into()),
+                email: "carol@example.com".into(),
+            }],
+            bcc: vec![Address {
+                name: None,
+                email: "secret@example.com".into(),
+            }],
+            subject: "Sprint Update".into(),
+            body_text: "Update".into(),
+            body_html: Some("<h1>Sprint Update</h1>".into()),
+            in_reply_to: Some("<prev-msg@example.com>".into()),
+            references: vec!["<prev-msg@example.com>".into()],
+            attachments: Vec::new(),
+        };
+
+        let formatted = client.build_rfc822(&msg).unwrap();
+        let raw_str = String::from_utf8_lossy(&formatted);
+        assert!(raw_str.contains("Cc: Carol <carol@example.com>"));
+        assert!(raw_str.contains("In-Reply-To: <prev-msg@example.com>"));
+        assert!(raw_str.contains("<h1>Sprint Update</h1>"));
     }
 }
