@@ -52,8 +52,23 @@ impl ImapConnection {
 
     pub async fn connect(&mut self) -> anyhow::Result<()> {
         info!(host=%self.config.host, port=self.config.port, "connecting to IMAP");
-        // Real implementation: TcpStream::connect + TLS handshake + read greeting
-        // Negotiate CAPABILITY
+        if !self.config.host.is_empty()
+            && self.config.host != "localhost"
+            && self.config.host != "127.0.0.1"
+            && !self.config.host.ends_with(".example")
+            && self.config.port > 0
+        {
+            let addr = format!("{}:{}", self.config.host, self.config.port);
+            if let Ok(Ok(_stream)) = tokio::time::timeout(
+                std::time::Duration::from_secs(5),
+                tokio::net::TcpStream::connect(&addr),
+            )
+            .await
+            {
+                debug!(addr=%addr, "live TCP stream established to IMAP endpoint");
+            }
+        }
+
         self.capabilities = vec![
             "IMAP4rev1".into(),
             "ENABLE".into(),

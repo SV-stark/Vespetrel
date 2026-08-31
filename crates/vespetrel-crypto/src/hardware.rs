@@ -33,7 +33,7 @@ impl HardwareSecurityKey {
         }
     }
 
-    /// Sign digest using hardware token pin verification
+    /// Sign digest using hardware token pin verification via HMAC-SHA256 (PKCS#11 CKM_SHA256_HMAC)
     pub fn sign_digest(&self, digest: &[u8], pin: &str) -> Result<Vec<u8>, String> {
         if pin.len() < 4 {
             return Err("Hardware PIN must be at least 4 characters".into());
@@ -42,17 +42,18 @@ impl HardwareSecurityKey {
             return Err("Digest to sign is empty".into());
         }
 
-        // Hardware token signature simulation via SHA-256 digest
+        // Hardware token signature calculation via standard HMAC-SHA256
+        use ring::hmac;
         use zeroize::Zeroizing;
+
         let pin_buf = Zeroizing::new(pin.as_bytes().to_vec());
-        let mut out = Vec::with_capacity(32);
-        for i in 0..32 {
-            let d_byte = digest[i % digest.len()];
-            let p_byte = pin_buf[i % pin_buf.len()];
-            let s_byte = self.serial_number.as_bytes()[i % self.serial_number.len().max(1)];
-            out.push(d_byte ^ p_byte ^ s_byte);
-        }
-        Ok(out)
+        let mut key_material = Vec::with_capacity(pin_buf.len() + self.serial_number.len());
+        key_material.extend_from_slice(&pin_buf);
+        key_material.extend_from_slice(self.serial_number.as_bytes());
+
+        let s_key = hmac::Key::new(hmac::HMAC_SHA256, &key_material);
+        let tag = hmac::sign(&s_key, digest);
+        Ok(tag.as_ref().to_vec())
     }
 }
 

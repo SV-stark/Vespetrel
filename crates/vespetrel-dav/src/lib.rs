@@ -22,29 +22,14 @@ impl DavConfig {
     }
     pub fn calendar_home(&self) -> String {
         let base = self.base_url.trim_end_matches('/');
-        let user = urlencoding_simple(&self.username);
+        let user = urlencoding::encode(&self.username);
         format!("{base}/calendars/{user}")
     }
     pub fn addressbook_home(&self) -> String {
         let base = self.base_url.trim_end_matches('/');
-        let user = urlencoding_simple(&self.username);
+        let user = urlencoding::encode(&self.username);
         format!("{base}/addressbooks/{user}")
     }
-}
-
-fn urlencoding_simple(s: &str) -> String {
-    let mut encoded = String::new();
-    for b in s.bytes() {
-        match b {
-            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
-                encoded.push(b as char);
-            }
-            _ => {
-                encoded.push_str(&format!("%{:02X}", b));
-            }
-        }
-    }
-    encoded
 }
 
 pub struct DavClient {
@@ -66,7 +51,49 @@ impl DavClient {
     }
 
     pub async fn list_calendars(&self) -> anyhow::Result<Vec<RemoteCalendar>> {
-        debug!(url=%self.config.calendar_home(), "PROPFIND calendars");
+        let url = self.config.calendar_home();
+        debug!(url=%url, "PROPFIND calendars");
+
+        if self.config.base_url.starts_with("http")
+            && !self.config.password_or_token.is_empty()
+            && let propfind_method =
+                reqwest::Method::from_bytes(b"PROPFIND").unwrap_or(reqwest::Method::POST)
+            && let Ok(resp) = self
+                .http
+                .request(propfind_method, &url)
+                .basic_auth(&self.config.username, Some(&self.config.password_or_token))
+                .header("Depth", "1")
+                .header("Content-Type", "application/xml; charset=utf-8")
+                .body(Self::build_propfind_xml())
+                .send()
+                .await
+            && let Ok(xml) = resp.text().await
+        {
+            let mut calendars = Vec::new();
+            for block in xml.split("<D:response>") {
+                let name = block
+                    .split("<D:displayname>")
+                    .nth(1)
+                    .and_then(|s| s.split("</D:displayname>").next())
+                    .unwrap_or("");
+                let href = block
+                    .split("<D:href>")
+                    .nth(1)
+                    .and_then(|s| s.split("</D:href>").next())
+                    .unwrap_or("");
+                if !name.is_empty() {
+                    calendars.push(RemoteCalendar {
+                        id: href.trim_matches('/').to_string(),
+                        name: name.to_string(),
+                        color: Some("#3b82f6".into()),
+                    });
+                }
+            }
+            if !calendars.is_empty() {
+                return Ok(calendars);
+            }
+        }
+
         Ok(vec![RemoteCalendar {
             id: "personal".into(),
             name: "Personal".into(),
@@ -79,7 +106,55 @@ impl DavClient {
         calendar_id: &str,
         sync_token: Option<&str>,
     ) -> anyhow::Result<CalendarSyncResult> {
+        let url = format!("{}/{}", self.config.calendar_home(), calendar_id);
         debug!(calendar_id, token=?sync_token, "CalDAV sync-collection REPORT");
+
+        if self.config.base_url.starts_with("http")
+            && !self.config.password_or_token.is_empty()
+            && let report_method =
+                reqwest::Method::from_bytes(b"REPORT").unwrap_or(reqwest::Method::POST)
+            && let body = Self::build_sync_report_xml(sync_token)
+            && let Ok(resp) = self
+                .http
+                .request(report_method, &url)
+                .basic_auth(&self.config.username, Some(&self.config.password_or_token))
+                .header("Content-Type", "application/xml; charset=utf-8")
+                .body(body)
+                .send()
+                .await
+            && let Ok(xml) = resp.text().await
+        {
+            let mut events = Vec::new();
+            for block in xml.split("<D:response>") {
+                let ical = block
+                    .split("<C:calendar-data>")
+                    .nth(1)
+                    .and_then(|s| s.split("</C:calendar-data>").next())
+                    .unwrap_or("");
+                let href = block
+                    .split("<D:href>")
+                    .nth(1)
+                    .and_then(|s| s.split("</D:href>").next())
+                    .unwrap_or("");
+                if !ical.is_empty() {
+                    events.push(CalendarEventRaw {
+                        href: href.to_string(),
+                        etag: "1".into(),
+                        ical: ical.to_string(),
+                    });
+                }
+            }
+            let new_tok = xml
+                .split("<D:sync-token>")
+                .nth(1)
+                .and_then(|s| s.split("</D:sync-token>").next())
+                .map(|s| s.to_string());
+            return Ok(CalendarSyncResult {
+                events,
+                new_sync_token: new_tok.or_else(|| Some("sync-token-active".into())),
+            });
+        }
+
         Ok(CalendarSyncResult {
             events: vec![],
             new_sync_token: Some("sync-token-1".into()),
@@ -87,8 +162,60 @@ impl DavClient {
     }
 
     pub async fn list_contacts(&self) -> anyhow::Result<Vec<RemoteContact>> {
-        debug!(url=%self.config.addressbook_home(), "CardDAV addressbook-query");
+        let url = self.config.addressbook_home();
+        debug!(url=%url, "CardDAV addressbook-query");
+
+        if self.config.base_url.starts_with("http")
+            && !self.config.password_or_token.is_empty()
+            && let report_method =
+                reqwest::Method::from_bytes(b"REPORT").unwrap_or(reqwest::Method::POST)
+            && let body = Self::build_carddav_query_xml()
+            && let Ok(resp) = self
+                .http
+                .request(report_method, &url)
+                .basic_auth(&self.config.username, Some(&self.config.password_or_token))
+                .header("Depth", "1")
+                .header("Content-Type", "application/xml; charset=utf-8")
+                .body(body)
+                .send()
+                .await
+            && let Ok(xml) = resp.text().await
+        {
+            let mut contacts = Vec::new();
+            for block in xml.split("<D:response>") {
+                let vcard = block
+                    .split("<C:address-data>")
+                    .nth(1)
+                    .and_then(|s| s.split("</C:address-data>").next())
+                    .unwrap_or("");
+                let href = block
+                    .split("<D:href>")
+                    .nth(1)
+                    .and_then(|s| s.split("</D:href>").next())
+                    .unwrap_or("");
+                if !vcard.is_empty() {
+                    contacts.push(RemoteContact {
+                        href: href.trim_matches('/').to_string(),
+                        etag: "1".into(),
+                        vcard: vcard.to_string(),
+                    });
+                }
+            }
+            return Ok(contacts);
+        }
+
         Ok(vec![])
+    }
+
+    /// Build CardDAV addressbook-query XML
+    pub fn build_carddav_query_xml() -> &'static str {
+        r#"<?xml version="1.0" encoding="utf-8" ?>
+<C:addressbook-query xmlns:D="DAV:" xmlns:C="urn:ietf:params:xml:ns:carddav">
+  <D:prop>
+    <D:getetag />
+    <C:address-data />
+  </D:prop>
+</C:addressbook-query>"#
     }
 
     /// Build CalDAV PROPFIND XML request for calendar discovery

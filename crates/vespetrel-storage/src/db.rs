@@ -33,8 +33,20 @@ pub fn create_pool(db_path: &str) -> anyhow::Result<StoragePool> {
     Ok(pool)
 }
 
-/// Initialize a single connection with PRAGMAs and migrations
+/// Initialize a single connection with optional encryption key, PRAGMAs, and migrations
 pub fn init_connection(conn: &Connection) -> anyhow::Result<()> {
+    init_connection_with_key(conn, None)
+}
+
+/// Initialize connection with optional SQLCipher encryption key
+pub fn init_connection_with_key(
+    conn: &Connection,
+    encryption_key: Option<&str>,
+) -> anyhow::Result<()> {
+    if let Some(key) = encryption_key {
+        let escaped_key = key.replace('\'', "''");
+        conn.execute_batch(&format!("PRAGMA key = '{escaped_key}'"))?;
+    }
     for pragma in PRAGMAS {
         conn.execute_batch(pragma)?;
     }

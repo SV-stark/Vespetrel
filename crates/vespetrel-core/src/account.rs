@@ -78,7 +78,7 @@ impl Default for AuthConfig {
 }
 
 /// Per-account sync cursor state stored as JSON in `sync_state`
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SyncState {
     #[serde(default)]
     pub last_sync_at: Option<DateTime<Utc>>,
@@ -91,7 +91,7 @@ pub struct SyncState {
     pub folder_states: std::collections::HashMap<String, FolderSyncState>,
 }
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FolderSyncState {
     pub uid_validity: Option<u32>,
     pub highest_mod_seq: Option<u64>,

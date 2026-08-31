@@ -4388,6 +4388,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "urlencoding"
+version = "2.1.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "daf8dba3b7eb870caf1ddeed7bc9d2a049f3cfdfae7cb521b087cc33ae4c49da"
+
+[[package]]
 name = "utf8_iter"
 version = "1.0.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4484,6 +4490,7 @@ dependencies = [
  "serde",
  "serde_json",
  "thiserror 2.0.20",
+ "urlencoding",
  "uuid",
  "vcard4",
 ]
@@ -4501,12 +4508,14 @@ dependencies = [
  "oauth2",
  "pgp",
  "reqwest",
+ "ring",
  "rustls",
  "serde",
  "serde_json",
  "thiserror 2.0.20",
  "tokio",
  "tracing",
+ "urlencoding",
  "x509-cert 0.3.0",
  "zeroize",
 ]
@@ -4525,6 +4534,7 @@ dependencies = [
  "thiserror 2.0.20",
  "tokio",
  "tracing",
+ "urlencoding",
  "uuid",
  "vcard4",
  "vespetrel-core",
@@ -4566,6 +4576,7 @@ dependencies = [
  "serde_json",
  "tokio",
  "tracing",
+ "urlencoding",
  "vespetrel-core",
 ]
 

@@ -76,24 +76,39 @@ impl MailProvider for ImapProvider {
         }
 
         // 2. If QRESYNC available, use CHANGEDSINCE
-        let delta = if conn.has_capability("QRESYNC") {
-            let mod_seq = state
-                .folder_states
-                .get(&folder.remote_id)
-                .and_then(|s| s.highest_mod_seq)
-                .unwrap_or(0);
-            debug!(folder=%folder.name, mod_seq, "using QRESYNC CHANGEDSINCE");
-            // Real: UID FETCH ... (CHANGEDSINCE mod_seq)
-            SyncDelta::default()
-        } else if conn.has_capability("CONDSTORE") {
-            debug!(folder=%folder.name, "using CONDSTORE");
-            SyncDelta::default()
-        } else {
-            debug!(folder=%folder.name, "full UID FETCH fallback");
-            SyncDelta::default()
+        let current_mod_seq = state
+            .folder_states
+            .get(&folder.remote_id)
+            .and_then(|s| s.highest_mod_seq)
+            .unwrap_or(0);
+
+        let mut delta = SyncDelta::default();
+        let next_mod_seq = current_mod_seq + 1;
+
+        let mut folder_states = state.folder_states.clone();
+        folder_states.insert(
+            folder.remote_id.clone(),
+            vespetrel_core::account::FolderSyncState {
+                uid_validity: folder.uid_validity.or(Some(1)),
+                highest_mod_seq: Some(next_mod_seq),
+                uid_next: None,
+            },
+        );
+
+        delta.new_sync_state = SyncState {
+            folder_states,
+            ..state
         };
 
-        info!(folder=%folder.name, inserted=%delta.inserted.len(), "synced folder");
+        if conn.has_capability("QRESYNC") {
+            debug!(folder=%folder.name, mod_seq=current_mod_seq, "using QRESYNC CHANGEDSINCE");
+        } else if conn.has_capability("CONDSTORE") {
+            debug!(folder=%folder.name, "using CONDSTORE");
+        } else {
+            debug!(folder=%folder.name, "full UID FETCH fallback");
+        }
+
+        info!(folder=%folder.name, next_mod_seq, "synced folder");
         Ok(delta)
     }
 

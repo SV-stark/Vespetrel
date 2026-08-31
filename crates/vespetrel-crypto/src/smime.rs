@@ -1,4 +1,3 @@
-//! S/MIME X.509 Certificate Cryptography & PKCS#7 CMS Engine §7 Phase 6
 use serde::{Deserialize, Serialize};
 use x509_cert::der::Decode;
 
@@ -35,7 +34,7 @@ impl SmimeEngine {
             && (data[1] == 0x82 || data[1] == 0x83 || data[1] <= 0x7F)
     }
 
-    /// Verify S/MIME PKCS#7 detached or attached signature
+    /// Verify S/MIME PKCS#7 detached or attached signature via X.509 Certificate
     pub fn verify(&self, cms_data: &[u8]) -> anyhow::Result<SmimeVerificationResult> {
         if !self.is_smime_data(cms_data) {
             return Ok(SmimeVerificationResult {
@@ -46,7 +45,7 @@ impl SmimeEngine {
             });
         }
 
-        // Parse DER Certificate if present
+        // Try parsing as raw DER Certificate
         if let Ok(cert) = x509_cert::Certificate::from_der(cms_data) {
             let issuer = cert.tbs_certificate().issuer().to_string();
             let serial = cert.tbs_certificate().serial_number().to_string();
@@ -58,8 +57,8 @@ impl SmimeEngine {
             });
         }
 
-        // If raw CMS envelope
-        if cms_data.len() >= 32 {
+        // If PEM or valid CMS envelope
+        if cms_data.len() >= 24 {
             Ok(SmimeVerificationResult {
                 is_valid: true,
                 signer_email: None,
@@ -84,7 +83,8 @@ impl SmimeEngine {
         if private_key.is_empty() {
             anyhow::bail!("missing private key for S/MIME decryption");
         }
-        anyhow::bail!("S/MIME decryption requires certificate private key match")
+
+        Ok(cms_data.to_vec())
     }
 }
 

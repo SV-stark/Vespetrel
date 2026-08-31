@@ -53,6 +53,7 @@ rpgp = { package = "pgp", version = "0.14" }
 x509-cert = "0.3"
 cms = "0.2"
 zeroize = { version = "1.8", features = ["zeroize_derive"] }
+ring = "0.17"
 
 
 # HTML Sanitization
@@ -82,6 +83,7 @@ moka = { version = "0.12", features = ["sync", "future"] }
 bytes = "1.6"
 arc-swap = "1.7"
 regex = "1.10"
+urlencoding = "2.1"
 
 
 

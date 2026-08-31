@@ -278,50 +278,16 @@ pub fn parse_code_from_http_request(req: &str) -> Option<String> {
     parse_param_from_http_request(req, "code")
 }
 
-pub fn urldecode(s: &str) -> String {
-    let mut result = String::with_capacity(s.len());
-    let mut bytes = s.bytes();
-    while let Some(b) = bytes.next() {
-        if b == b'%' {
-            let h1 = bytes.next();
-            let h2 = bytes.next();
-            if let (Some(c1), Some(c2)) = (h1, h2) {
-                let hex = [c1, c2];
-                let decoded = std::str::from_utf8(&hex)
-                    .ok()
-                    .and_then(|s| u8::from_str_radix(s, 16).ok());
-                if let Some(decoded_byte) = decoded {
-                    result.push(decoded_byte as char);
-                    continue;
-                }
-                result.push('%');
-                result.push(c1 as char);
-                result.push(c2 as char);
-            } else {
-                result.push('%');
-            }
-        } else if b == b'+' {
-            result.push(' ');
-        } else {
-            result.push(b as char);
-        }
-    }
-    result
+fn urlencoding(s: &str) -> String {
+    urlencoding::encode(s).into_owned()
 }
 
-fn urlencoding(s: &str) -> String {
-    let mut encoded = String::new();
-    for b in s.bytes() {
-        match b {
-            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
-                encoded.push(b as char);
-            }
-            _ => {
-                encoded.push_str(&format!("%{:02X}", b));
-            }
-        }
+pub fn urldecode(input: &str) -> String {
+    let replaced = input.replace('+', " ");
+    match urlencoding::decode(&replaced) {
+        Ok(cow) => cow.into_owned(),
+        Err(_) => replaced,
     }
-    encoded
 }
 
 #[derive(

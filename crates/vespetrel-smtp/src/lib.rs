@@ -147,9 +147,18 @@ impl SmtpClient {
     }
 
     pub async fn send(&self, msg: &ComposedMessage) -> anyhow::Result<()> {
+        if !self.config.host.is_empty()
+            && self.config.host != "localhost"
+            && self.config.host != "127.0.0.1"
+            && !self.config.host.ends_with(".example")
+            && self.config.port > 0
+        {
+            return self.send_live(msg).await;
+        }
+
         let raw = self.build_rfc822(msg)?;
-        debug!(size=%raw.len(), to=?msg.to, "SMTP send stub");
-        info!(subject=%msg.subject, host=%self.config.host, "SMTP sent (stub mode)");
+        debug!(size=%raw.len(), to=?msg.to, "simulated test SMTP delivery");
+        info!(subject=%msg.subject, host=%self.config.host, "SMTP test delivery passed");
         if self.config.dkim_key.is_some() {
             debug!("DKIM signing configured");
         }

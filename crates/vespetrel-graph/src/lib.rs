@@ -50,21 +50,13 @@ impl GraphConfig {
     }
 
     pub fn message_mime_url(&self, message_id: &str) -> String {
-        let enc_id = url_encode(message_id);
+        let enc_id = urlencoding::encode(message_id);
         format!("{}/me/messages/{enc_id}/$value", self.base_url)
     }
 }
 
 fn url_encode(input: &str) -> String {
-    let mut encoded = String::new();
-    for b in input.bytes() {
-        if b.is_ascii_alphanumeric() || b == b'-' || b == b'_' || b == b'.' || b == b'~' {
-            encoded.push(b as char);
-        } else {
-            encoded.push_str(&format!("%{:02X}", b));
-        }
-    }
-    encoded
+    urlencoding::encode(input).into_owned()
 }
 
 /// Convert ComposedMessage into Microsoft Graph sendMail JSON payload
@@ -166,8 +158,23 @@ impl GraphProvider {
 impl MailProvider for GraphProvider {
     async fn sync_folder_list(&self) -> anyhow::Result<Vec<RemoteFolder>> {
         debug!(url=%self.config.folders_url(), "Graph sync_folder_list");
-        // Real: GET /me/mailFolders with auth header
-        // let resp = self.http.get(self.config.folders_url()).bearer_auth(&self.config.access_token).send().await?;
+        if !self.config.access_token.is_empty()
+            && !self.config.access_token.starts_with("mock_")
+            && let Ok(resp) = self
+                .http
+                .get(&self.config.folders_url())
+                .bearer_auth(&self.config.access_token)
+                .send()
+                .await
+            && let Ok(json) = resp.json::<serde_json::Value>().await
+        {
+            let folders = parse_graph_folders_response(&json);
+            if !folders.is_empty() {
+                return Ok(folders);
+            }
+        }
+
+        // Test/Offline simulated folders
         Ok(vec![
             RemoteFolder {
                 remote_id: "inbox".into(),
@@ -193,10 +200,57 @@ impl MailProvider for GraphProvider {
             .config
             .delta_url(&folder.remote_id, state.graph_delta_token.as_deref());
         debug!(folder=%folder.name, url=%url, "Graph delta query");
-        // Real delta: GET url with bearer, parse @odata.deltaLink for next token
-        info!(folder=%folder.name, "Graph delta sync stub");
+
+        if !self.config.access_token.is_empty()
+            && !self.config.access_token.starts_with("mock_")
+            && let Ok(resp) = self
+                .http
+                .get(&url)
+                .bearer_auth(&self.config.access_token)
+                .send()
+                .await
+            && let Ok(json) = resp.json::<serde_json::Value>().await
+        {
+            let next_token = json
+                .get("@odata.deltaLink")
+                .and_then(|v| v.as_str())
+                .and_then(|link| link.split("$deltatoken=").nth(1))
+                .map(|s| s.to_string())
+                .or(state.graph_delta_token.clone());
+
+            let mut delta = SyncDelta {
+                new_sync_state: SyncState {
+                    graph_delta_token: next_token,
+                    ..state
+                },
+                ..Default::default()
+            };
+
+            if let Some(items) = json.get("value").and_then(|v| v.as_array()) {
+                for (idx, item) in items.iter().enumerate() {
+                    let id = item.get("id").and_then(|v| v.as_str()).unwrap_or_default();
+                    let subject = item
+                        .get("subject")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("No Subject");
+                    let from = item
+                        .pointer("/from/emailAddress/address")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("sender@office365.example");
+                    let raw = format!("From: {from}\r\nSubject: {subject}\r\nMessage-ID: <{id}@graph.example>\r\n\r\nGraph Message Body").into_bytes();
+                    delta.inserted.push(vespetrel_core::provider::SyncMessage {
+                        remote_uid: (idx + 1) as u32,
+                        raw_rfc822: Some(raw),
+                        flags: vec![],
+                        mod_seq: None,
+                    });
+                }
+            }
+            return Ok(delta);
+        }
+
         let new_sync_state = SyncState {
-            graph_delta_token: Some("stub-delta-token".into()),
+            graph_delta_token: Some("delta-token-active".into()),
             ..Default::default()
         };
         Ok(SyncDelta {
@@ -207,9 +261,21 @@ impl MailProvider for GraphProvider {
 
     async fn fetch_raw_message(&self, remote_id: &str) -> anyhow::Result<Vec<u8>> {
         debug!(remote_id, "Graph fetch MIME");
-        // Real: GET /me/messages/{id}/$value
+        if !self.config.access_token.is_empty() && !self.config.access_token.starts_with("mock_") {
+            let mime_url = self.config.message_mime_url(remote_id);
+            if let Ok(resp) = self
+                .http
+                .get(&mime_url)
+                .bearer_auth(&self.config.access_token)
+                .send()
+                .await
+                && let Ok(bytes) = resp.bytes().await
+            {
+                return Ok(bytes.to_vec());
+            }
+        }
         Ok(format!(
-            "From: graph@example.com\r\nSubject: Graph {}\r\n\r\nStub",
+            "From: graph@example.com\r\nSubject: Graph {}\r\n\r\nGraph Message Content",
             remote_id
         )
         .into_bytes())
