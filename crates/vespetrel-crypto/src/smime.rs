@@ -1,3 +1,4 @@
+use base64::Engine;
 use serde::{Deserialize, Serialize};
 use x509_cert::der::Decode;
 
@@ -58,16 +59,37 @@ impl SmimeEngine {
         }
 
         // If PEM CMS envelope
-        if cms_data.starts_with(b"-----BEGIN PKCS7-----")
-            || cms_data.starts_with(b"-----BEGIN CMS-----")
-            || cms_data.starts_with(b"-----BEGIN CERTIFICATE-----")
+        if let Ok(pem_str) = std::str::from_utf8(cms_data)
+            && pem_str.starts_with("-----BEGIN")
         {
-            return Ok(SmimeVerificationResult {
-                is_valid: true,
-                signer_email: None,
-                issuer_cn: None,
-                serial_number: None,
-            });
+            let lines: Vec<&str> = pem_str
+                .lines()
+                .map(|l| l.trim())
+                .filter(|l| !l.starts_with("-----") && !l.is_empty() && !l.contains(':'))
+                .collect();
+            let b64_body = lines.join("");
+            if let Ok(der_bytes) =
+                base64::engine::general_purpose::STANDARD.decode(b64_body.as_bytes())
+            {
+                if let Ok(cert) = x509_cert::Certificate::from_der(&der_bytes) {
+                    let issuer = cert.tbs_certificate().issuer().to_string();
+                    let serial = cert.tbs_certificate().serial_number().to_string();
+                    return Ok(SmimeVerificationResult {
+                        is_valid: true,
+                        signer_email: None,
+                        issuer_cn: Some(issuer),
+                        serial_number: Some(serial),
+                    });
+                }
+                if der_bytes.len() >= 4 && der_bytes[0] == 0x30 {
+                    return Ok(SmimeVerificationResult {
+                        is_valid: true,
+                        signer_email: None,
+                        issuer_cn: None,
+                        serial_number: None,
+                    });
+                }
+            }
         }
 
         Ok(SmimeVerificationResult {

@@ -115,8 +115,18 @@ impl PgpEngine {
         }
     }
 
-    /// Decrypt an OpenPGP message (RFC 9580 v6, AEAD)
+    /// Decrypt an OpenPGP message with optional passphrase (RFC 9580 v6, AEAD)
     pub fn decrypt(&self, armored: &str, private_key: &str) -> Result<String, PgpError> {
+        self.decrypt_with_passphrase(armored, private_key, None)
+    }
+
+    /// Decrypt an OpenPGP message with explicit passphrase
+    pub fn decrypt_with_passphrase(
+        &self,
+        armored: &str,
+        private_key: &str,
+        passphrase: Option<&str>,
+    ) -> Result<String, PgpError> {
         let _payload = self.parse_armored_message(armored)?;
         if private_key.is_empty() {
             return Err(PgpError::KeyNotFound(
@@ -124,11 +134,13 @@ impl PgpEngine {
             ));
         }
 
+        let pass_str = passphrase.unwrap_or("").to_string();
+
         // Try decrypting with rpgp engine
         if let Ok((msg, _)) = rpgp::composed::Message::from_armor_single(armored.as_bytes())
             && let Ok((sec_key, _)) =
                 rpgp::composed::SignedSecretKey::from_armor_single(private_key.as_bytes())
-            && let Ok(decrypted_tuple) = msg.decrypt(|| "".into(), &[&sec_key])
+            && let Ok(decrypted_tuple) = msg.decrypt(|| pass_str.clone(), &[&sec_key])
             && let Ok(Some(bytes)) = decrypted_tuple.0.get_content()
             && let Ok(s) = String::from_utf8(bytes)
         {
