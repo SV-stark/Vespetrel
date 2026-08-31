@@ -115,22 +115,27 @@ Vespetrel natively abstracts differences between modern and legacy email protoco
 
 ---
 
-## ✨ Core Feature Highlights
+### 🎨 7-Pillar Customization & Betterbird Parity
+* **Diacritic-Insensitive Quick Filter**: Sub-millisecond search across active folder lists with automatic accent folding (`é, à, ö, ü, ñ, ç, ß` → ASCII) and full `/regex/` pattern evaluation.
+* **Multi-Template HTML Signatures**: Visual designer generating email-safe responsive HTML signatures across 4 templates (*Modern*, *Minimal*, *Corporate*, *Creative*) with avatars, social badges, and per-account assignment.
+* **Per-Account & Folder Accent Colors**: Customizable color indicators persisted in SQLite for instant visual recognition across complex multi-account setups.
+* **Multi-Density Message Rows**: User-selectable row density modes (`Compact` 32px, `Comfortable` 64px, `Roomy` 96px) matching user workspace preferences.
+* **7-Pillar Settings Engine**: Comprehensive GUI preferences modal controlling Layout, Themes (Dark/Light/OLED Black), Typography, Triaging, Composer, Keyboard Shortcuts, and Privacy/Security.
 
 ### 📬 Complete Mail Engine
-* **Protocol Diversity**: Full support for standard **IMAP4rev2** (`IDLE`, `CONDSTORE`, `QRESYNC`, `SPECIAL-USE`), modern **JMAP** (RFC 8620/8621 via Stalwart client), and **Microsoft Graph REST** (for corporate Microsoft 365 environments where IMAP is disabled).
-* **MIME Parsing**: Powered by `stalwartlabs/mail-parser` for zero-copy string slicing (`Cow<str>`), streaming attachments, and robust decoding of 41 legacy character sets.
-* **OAuth2 with PKCE**: Built-in graphical authorization with loopback callbacks (`127.0.0.1:8989`), automated token rotation, and credential storage in the OS credential manager (`keyring-rs`).
-* **SMTP & Delivery**: High-throughput transmission via `lettre` and `stalwartlabs/mail-send` with automated DKIM signing and Autocrypt 1.1 header injection.
+* **Protocol Diversity**: Full support for standard **IMAP4rev2** (`IDLE`, `CONDSTORE`, `QRESYNC`, `SPECIAL-USE`), modern **JMAP** (RFC 8620/8621), and **Microsoft Graph REST** (for corporate Microsoft 365 environments where IMAP is disabled).
+* **MIME Parsing**: Powered by `mail-parser` for zero-copy string slicing (`Cow<str>`), streaming attachments, and robust decoding of 41 legacy character sets.
+* **OAuth2 with PKCE**: Built-in graphical authorization with loopback TCP callbacks (`127.0.0.1:0`), packet-split hardening, automated token rotation, and credential storage in the OS credential manager (`keyring-rs`).
+* **SMTP & Delivery**: High-throughput transmission via `lettre` with automated DKIM signing and Autocrypt 1.1 header injection.
 
 ### 🛡️ Security & Privacy First
-* **Tracker Shield**: Real-time streaming HTML rewriter (`lol_html`) strips remote tracking pixels (1x1 transparent GIFs), tracking URL queries, and un-sanitized script tags.
-* **Remote Content Blocker**: Remote images and styles are blocked by default until explicitly trusted per sender.
-* **End-to-End Encryption**: Pure Rust **`rPGP`** implementation supporting OpenPGP RFC 9580 (v6 keys & AEAD) and Autocrypt 1.1 key exchange, alongside `RustCrypto` S/MIME X.509 validation.
+* **Tracker Shield**: Real-time streaming HTML rewriter (`lol_html`) strips remote tracking pixels (1x1 transparent GIFs), tracking URL queries, and un-sanitized script/form tags.
+* **Remote Content Blocker**: Remote images, styles, `srcset`, and `poster` attributes are blocked by default until explicitly trusted per sender.
+* **End-to-End Encryption**: Pure Rust **`rPGP`** implementation supporting OpenPGP RFC 9580 (v6 keys & AEAD) and Autocrypt 1.1 key exchange, alongside `RustCrypto` S/MIME X.509 DER validation.
 
 ### 📅 Integrated PIM (Calendar, Contacts & Tasks)
-* **CalDAV**: Direct two-way sync with Google Calendar, Nextcloud, Fastmail, and Apple iCloud via `libdav` and `icalendar`.
-* **CardDAV**: Address book synchronization with auto-complete chips in the compose editor (`vcard4`).
+* **CalDAV**: Direct two-way sync with Google Calendar, Nextcloud, Fastmail, and Apple iCloud via `libdav` and `icalendar` (RFC 5545).
+* **CardDAV**: Address book synchronization with auto-complete chips in the compose editor (`vcard4` RFC 6350).
 * **Tasks Engine**: Full RFC 5545 `VTODO` task tracking with due dates, priority, status filters, and CalDAV synchronization.
 
 ---
@@ -146,18 +151,19 @@ vespetrel/
 ├── packaging/                  # Multi-OS packaging descriptors (.iss, .manifest, .desktop, Info.plist)
 ├── .github/workflows/          # Cross-platform CI matrix & automated release build workflow
 ├── crates/
-│   ├── vespetrel-app/          # GPUI application entrypoint, dock layout, virtual lists, tasks & UI
-│   ├── vespetrel-core/         # Pure domain models (Account, Folder, Message, Thread, Contact, TaskItem)
-│   ├── vespetrel-storage/      # Rusqlite WAL storage, FTS5 BM25 search, Moka cache & LZ4 blob store
+│   ├── vespetrel-app/          # GPUI application entrypoint, dock layout, virtual lists, settings & UI
+│   ├── vespetrel-core/         # Domain models (Account, Message, Settings, HTML Signatures, Thread, Contact)
+│   ├── vespetrel-storage/      # Rusqlite WAL storage, FTS5 BM25 search, Moka cache & LZ4/Zstd blob store
 │   ├── vespetrel-engine/       # Tokio sync coordinator, account worker actors & Flume event bridge
 │   ├── vespetrel-imap/         # IMAP client actor with IDLE, CONDSTORE, QRESYNC & XOAUTH2
-│   ├── vespetrel-jmap/         # Stalwart JMAP client adapter (RFC 8620/8621)
+│   ├── vespetrel-jmap/         # JMAP client adapter (RFC 8620/8621)
 │   ├── vespetrel-graph/        # Microsoft Graph REST client for Exchange Online
-│   ├── vespetrel-smtp/         # Lettre + mail-send submission engine with DKIM & Autocrypt
-│   ├── vespetrel-dav/          # CalDAV / CardDAV sync engine via libdav & RFC 5545 VTODO parser
+│   ├── vespetrel-smtp/         # Lettre submission engine with DKIM & Autocrypt
+│   ├── vespetrel-dav/          # CalDAV / CardDAV sync engine via libdav, icalendar & vcard4
 │   ├── vespetrel-crypto/       # rPGP OpenPGP (RFC 9580), S/MIME, Autocrypt 1.1 & OS keyring
-│   └── vespetrel-render/       # SIMD UTF-8 HTML sanitization (ammonia, lol_html) & tracker stripping
+│   └── vespetrel-render/       # SIMD UTF-8 HTML sanitization (ammonia, lol_html) & anti-phishing
 ```
+
 
 ---
 
@@ -198,10 +204,13 @@ cargo update
 # Verify workspace compilation
 cargo check
 
-# Run tests across storage, crypto, render, and protocol crates
+# Run tests across storage, crypto, render, and protocol crates (100+ tests)
 cargo test --workspace
 
-# Launch Vespetrel desktop client in headless mode
+# Build optimized release binaries
+cargo build --release --workspace
+
+# Launch Vespetrel desktop client in headless validation mode
 cargo run --package vespetrel-app -- --memory
 ```
 
@@ -213,7 +222,7 @@ cargo run --package vespetrel-app -- --memory
   - [x] Full workspace migration to **Rust 2024 Edition** across all member crates
   - [x] Rusqlite relational schema with foreign keys, WAL mode, and `_schema_migrations` version tracking (17 tables)
   - [x] SQLite FTS5 full-text search with BM25 ranking (sub-15ms queries)
-  - [x] Domain entities (`Account`, `Folder`, `Message`, `Thread`, `Contact`, `TaskItem`) & unified `MailProvider` trait
+  - [x] Domain entities (`Account`, `Folder`, `Message`, `Thread`, `Contact`, `TaskItem`, `UserSettings`) & unified `MailProvider` trait
   - [x] Zero-copy MIME parser (`mail-parser`) & compressed raw message store (`lz4_flex` + `zstd`)
   - [x] Real-time HTML sanitizer (`ammonia`), tracking pixel stripper (`lol_html`), and sandboxed CSP document generator
 
@@ -226,13 +235,13 @@ cargo run --package vespetrel-app -- --memory
   - [x] Plaintext / Markdown viewer + security badge indicator model
 
 - [x] **P2: Multi-Account Providers & Live Authentication (COMPLETE)**
-  - [x] Google & Microsoft OAuth2 PKCE engine + Loopback TCP listener (`127.0.0.1:8989`)
+  - [x] Google & Microsoft OAuth2 PKCE engine + Loopback TCP listener (`127.0.0.1:0`)
   - [x] Google OAuth2 access token auto-refresh routine (`refresh_access_token`)
   - [x] OS Keyring secure token storage (`keyring-rs` v4)
   - [x] Tokio Account Worker actors & Sync Coordinator with SQLite pool persistence (`vespetrel-engine`)
   - [x] IMAP IDLE state machine, QRESYNC/CONDSTORE & XOAUTH2 command builders (`vespetrel-imap`)
   - [x] Live SMTP submit transport with Lettre & DKIM (`vespetrel-smtp::send_live`)
-  - [x] Stalwart JMAP push provider adapter (`vespetrel-jmap`)
+  - [x] JMAP provider adapter (`vespetrel-jmap`)
   - [x] Microsoft Graph REST provider adapter (`vespetrel-graph`)
   - [x] Multi-provider graphical login wizard state machine & compose editor state
 
@@ -253,7 +262,6 @@ cargo run --package vespetrel-app -- --memory
   - [x] Bounded in-memory TinyLFU cache (`moka`) & zero-copy byte slicing (`bytes`)
   - [x] Lock-free `ArcSwap` shared UI state for 120 FPS GPUI rendering
   - [x] Native OS packaging scripts (NSIS `.nsi`, Windows manifest, Linux `.desktop`, macOS `Info.plist`)
-
   - [x] GitHub Actions multi-platform CI matrix workflow (`.github/workflows/ci.yml`)
 
 - [x] **P5: Power-User Capabilities, Interoperability & Migration (COMPLETE)**
@@ -267,21 +275,27 @@ cargo run --package vespetrel-app -- --memory
 
 - [x] **P6: Extensibility, Statistical Intelligence & Enterprise Security (COMPLETE)**
   - [x] **WASM / WebExtension Plugin Sandbox**: Secure plugin runtime model for custom toolbar buttons, notifications, message tags, and AI assistant sidecars
-  - [x] **Bayesian Spam Filter & Statistical Classifier**: Local on-device Naive Bayes spam engine learning from user `Spam` / `Ham` actions with token probability frequency tables
+  - [x] **Bayesian Spam Filter & Statistical Classifier**: Local on-device Naive Bayes spam engine learning from user `Spam` / `Ham` actions with $O(n)$ token probability selection
   - [x] **Hardware Token & Smartcard Cryptography**: FIDO2 / YubiKey PKCS#11 hardware PGP & S/MIME token signing and decryption
   - [x] **Configurable Keybinding Engine**: Gmail, Vim, and Thunderbird default keyboard shortcut maps with custom JSON keymap configurations
   - [x] **POP3 Legacy Client Engine**: Full RFC 1939 POP3 provider support with SSL/TLS and UIDL tracking for legacy mail servers
   - [x] **Decentralized Matrix & Chat Bridge**: Native Matrix protocol client integration for real-time team communication alongside email threads
 
-- [x] **P7: Modern Workflow Ergonomics & Superhuman Productivity (COMPLETE)**
-  - [x] **Native TipTap-Style Rich Text & Markdown WYSIWYG Editor (Approach 1)**: Native span & block attributed text engine with floating bubble menu, markdown input rules (`**bold**`, `# heading`, `- list`), and clean MIME HTML serialization.
+- [x] **P7: Modern Workflow Ergonomics, Customization & Betterbird Parity (COMPLETE)**
+  - [x] **7-Pillar Customization & Settings Engine**: Tabbed modal view model (`SettingsViewState`) controlling Layout, Themes, Typography, Triaging, Composer, Shortcuts, and Privacy/Security.
+  - [x] **Betterbird Parity — Diacritic Folding & Regex Quick Filter**: Accent-agnostic search (`é, à, ö, ü, ñ, ç, ß` → ASCII) and live `/regex/` pattern matching across folder items.
+  - [x] **Multi-Template HTML Signature Designer**: 4 responsive HTML signature templates (*Modern*, *Minimal*, *Corporate*, *Creative*) with live preview and per-account assignment.
+  - [x] **Per-Account & Folder Accent Colors**: Custom color indicators saved in SQLite and rendered dynamically across folder tree and account switchers.
+  - [x] **Multi-Density Message Row Modes**: `Compact` (32px), `Comfortable` (64px), and `Roomy` (96px) row layouts.
+  - [x] **Native TipTap-Style Rich Text & Markdown WYSIWYG Editor**: Native span & block attributed text engine with floating bubble menu, markdown input rules (`**bold**`, `# heading`, `- list`), and clean MIME HTML serialization.
   - [x] **Undo Send (Configurable Grace Period Buffer)**: 5–30s cancellation delay buffer allowing immediate recall of accidental sends.
   - [x] **Scheduled Send (Delayed Outbox Queue)**: Timezone-aware delayed outbox queue for automated future email transmission.
   - [x] **Thread Snoozing & Reminder Queue**: Temporarily snooze conversations with automatic resurfacing in Inbox at trigger timestamp.
-  - [x] **Split Inbox Categories**: Categorized inbox tabs (Primary, Updates, Promotions, Newsletters, Social) with heuristic and header classification.
+  - [x] **Split Inbox Categories**: Categorized inbox tabs (Primary, Updates, Promotions, Newsletters, Social) with heuristic and SIMD header classification.
   - [x] **1-Click `List-Unsubscribe` & Newsletter Bundling**: RFC 2369 / RFC 8058 automated one-click unsubscribe and collapsible newsletter bundles.
   - [x] **Command Palette (`Ctrl+K` / `Cmd+K` Superhuman Action Switcher)**: Instant fuzzy-finder action switcher for commands, folders, and compose actions.
   - [x] **Reusable Email Snippets & Templates with Variables**: Pre-saved response templates with `{{name}}`, `{{company}}`, `{{email}}` placeholder interpolation.
+
 
 
 
