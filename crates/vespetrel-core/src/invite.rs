@@ -1,5 +1,5 @@
 //! iCalendar Meeting Invitations & iTIP RSVP Engine (RFC 5545 / RFC 5546) §7 Phase 5
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, NaiveDate, NaiveDateTime, Utc};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -64,13 +64,25 @@ impl MeetingInvitation {
                     sequence = seq;
                 }
             } else if let Some(val) = line.strip_prefix("DTSTART:") {
-                if let Ok(dt) = DateTime::parse_from_rfc3339(val).map(|d| d.with_timezone(&Utc)) {
+                if let Some(dt) = parse_ical_datetime(val) {
                     start_at = dt;
                 }
+            } else if let Some(dt) = line
+                .strip_prefix("DTSTART;")
+                .and_then(|r| r.split_once(':'))
+                .and_then(|(_, v)| parse_ical_datetime(v))
+            {
+                start_at = dt;
             } else if let Some(val) = line.strip_prefix("DTEND:") {
-                if let Ok(dt) = DateTime::parse_from_rfc3339(val).map(|d| d.with_timezone(&Utc)) {
+                if let Some(dt) = parse_ical_datetime(val) {
                     end_at = dt;
                 }
+            } else if let Some(dt) = line
+                .strip_prefix("DTEND;")
+                .and_then(|r| r.split_once(':'))
+                .and_then(|(_, v)| parse_ical_datetime(v))
+            {
+                end_at = dt;
             } else if line.starts_with("ORGANIZER") {
                 if let Some((params, mail)) = line.split_once(':') {
                     organizer_email = mail
@@ -83,17 +95,22 @@ impl MeetingInvitation {
                             .map(|s| s.trim_matches('"').to_string());
                     }
                 }
-            } else if line.starts_with("ATTENDEE")
-                && line
-                    .to_lowercase()
-                    .contains(&current_user_email.to_lowercase())
+            } else if let Some((_, mail_part)) = line
+                .strip_prefix("ATTENDEE")
+                .and_then(|r| r.split_once(':'))
             {
-                if line.contains("PARTSTAT=ACCEPTED") {
-                    status = RsvpStatus::Accepted;
-                } else if line.contains("PARTSTAT=DECLINED") {
-                    status = RsvpStatus::Declined;
-                } else if line.contains("PARTSTAT=TENTATIVE") {
-                    status = RsvpStatus::Tentative;
+                let mail = mail_part
+                    .trim_start_matches("mailto:")
+                    .trim_start_matches("MAILTO:")
+                    .trim();
+                if mail.eq_ignore_ascii_case(current_user_email.trim()) {
+                    if line.contains("PARTSTAT=ACCEPTED") {
+                        status = RsvpStatus::Accepted;
+                    } else if line.contains("PARTSTAT=DECLINED") {
+                        status = RsvpStatus::Declined;
+                    } else if line.contains("PARTSTAT=TENTATIVE") {
+                        status = RsvpStatus::Tentative;
+                    }
                 }
             }
         }
@@ -159,6 +176,29 @@ impl MeetingInvitation {
     }
 }
 
+fn parse_ical_datetime(val: &str) -> Option<DateTime<Utc>> {
+    let clean = val.trim();
+    // 1. Try RFC 5545 format: 20260815T100000Z
+    if let Ok(dt) = NaiveDateTime::parse_from_str(clean, "%Y%m%dT%H%M%SZ") {
+        return Some(DateTime::from_naive_utc_and_offset(dt, Utc));
+    }
+    // 2. Try RFC 5545 format without Z: 20260815T100000
+    if let Ok(dt) = NaiveDateTime::parse_from_str(clean, "%Y%m%dT%H%M%S") {
+        return Some(DateTime::from_naive_utc_and_offset(dt, Utc));
+    }
+    // 3. Try RFC 3339 / ISO 8601: 2026-08-15T10:00:00Z
+    if let Ok(dt) = DateTime::parse_from_rfc3339(clean) {
+        return Some(dt.with_timezone(&Utc));
+    }
+    // 4. Try DATE only: 20260815
+    if let Ok(date) = NaiveDate::parse_from_str(clean, "%Y%m%d") {
+        return date
+            .and_hms_opt(0, 0, 0)
+            .map(|naive_dt| DateTime::from_naive_utc_and_offset(naive_dt, Utc));
+    }
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -193,5 +233,19 @@ END:VCALENDAR"#;
         assert!(reply_ics.contains("PARTSTAT=ACCEPTED"));
         assert!(reply_ics.contains("UID:event-999-abc"));
         assert!(reply_ics.contains("CN=\"Bob Smith\""));
+    }
+
+    #[test]
+    fn test_parse_ical_datetime_formats() {
+        let ics = "BEGIN:VCALENDAR\r\n\
+BEGIN:VEVENT\r\n\
+UID:time-test\r\n\
+DTSTART:20260815T100000Z\r\n\
+DTEND:20260815T110000Z\r\n\
+END:VEVENT\r\n\
+END:VCALENDAR";
+        let invite = MeetingInvitation::parse_ics(ics, "test@example.com").unwrap();
+        assert_eq!(invite.start_at.timestamp(), 1786788000);
+        assert_eq!(invite.end_at.timestamp(), 1786791600);
     }
 }

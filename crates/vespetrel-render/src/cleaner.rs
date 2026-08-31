@@ -22,6 +22,12 @@ const TRACKING_PARAMS: &[&str] = &[
     "trk",
     "ref_src",
     "si",
+    "gbraid",
+    "wbraid",
+    "twclid",
+    "ttclid",
+    "sc_lid",
+    "gclsrc",
 ];
 
 /// Result of anti-phishing inspection on an HTML anchor or link
@@ -67,7 +73,8 @@ pub fn clean_tracking_url(raw_url: &str) -> String {
                 return false;
             }
             let key = pair.split('=').next().unwrap_or("");
-            !track_set.contains(key)
+            let key_lower = key.to_ascii_lowercase();
+            !track_set.contains(key_lower.as_str())
         })
         .collect();
 
@@ -111,9 +118,7 @@ pub fn analyze_phishing_risk(href: &str, display_text: &str) -> PhishingRisk {
         // 3. Check for deceptive display domain
         let looks_like_url = text_lower.starts_with("http://")
             || text_lower.starts_with("https://")
-            || text_lower.contains(".com")
-            || text_lower.contains(".org")
-            || text_lower.contains(".net");
+            || text_lower.contains('.') && !text_lower.contains(' ');
 
         let mismatched_host = if looks_like_url {
             extract_host(&text_lower).filter(|dh| !domains_match(dh, host))

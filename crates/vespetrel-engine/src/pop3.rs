@@ -29,11 +29,13 @@ pub struct Pop3Command;
 
 impl Pop3Command {
     pub fn user(username: &str) -> String {
-        format!("USER {username}\r\n")
+        let clean = username.replace(['\r', '\n'], "");
+        format!("USER {clean}\r\n")
     }
 
     pub fn pass(password: &str) -> String {
-        format!("PASS {password}\r\n")
+        let clean = password.replace(['\r', '\n'], "");
+        format!("PASS {clean}\r\n")
     }
 
     pub fn stat() -> &'static str {

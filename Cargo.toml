@@ -24,10 +24,6 @@ license = "MIT OR Apache-2.0"
 tokio = { version = "1.38", features = ["full"] }
 async-trait = "0.1"
 futures = "0.3"
-
-# UI & Rendering - wry is optional, pulled only when gpui feature enabled
-# wry kept in workspace but not mandatory for `cargo check` without features
-wry = "0.41"
 anyhow = "1.0"
 
 # Database & Storage
@@ -55,11 +51,11 @@ vcard4 = "0.4"
 rustls = { version = "0.23", default-features = false, features = ["aws_lc_rs"] }
 oauth2 = "4.4"
 keyring = { version = "4.1", features = ["apple-native-keyring-store", "windows-native-keyring-store", "linux-keyutils-keyring-store"] }
-pgp = "0.20"
 rpgp = { package = "pgp", version = "0.14" }
 x509-cert = "0.2"
 cms = "0.2"
 zeroize = { version = "1.8", features = ["zeroize_derive"] }
+
 
 # HTML Sanitization
 ammonia = "4.0"

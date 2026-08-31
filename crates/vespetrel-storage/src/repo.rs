@@ -121,12 +121,39 @@ pub fn get_folder(
 }
 
 pub fn insert_message(conn: &Connection, msg: &Message) -> anyhow::Result<()> {
+    let reply_to_json = msg
+        .reply_to
+        .as_ref()
+        .map(serde_json::to_string)
+        .transpose()?;
+    let to_addresses_json = serde_json::to_string(&msg.to_addresses)?;
+    let cc_addresses_json = serde_json::to_string(&msg.cc_addresses)?;
+    let bcc_addresses_json = serde_json::to_string(&msg.bcc_addresses)?;
+
     conn.execute(
-        r#"INSERT INTO messages (id, account_id, folder_id, thread_id, remote_uid, message_id_header, in_reply_to, subject, from_address, from_name, to_addresses, cc_addresses, bcc_addresses, reply_to, sent_at, received_at, is_read, is_flagged, is_draft, has_attachments, body_snippet, body_text_preview, blob_path, size_bytes)
-           VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22,?23,?24)
+        r#"INSERT INTO messages (id, account_id, folder_id, thread_id, remote_uid, message_id_header, in_reply_to, references_header, subject, from_address, from_name, to_addresses, cc_addresses, bcc_addresses, reply_to, sent_at, received_at, is_read, is_flagged, is_draft, has_attachments, body_snippet, body_text_preview, blob_path, size_bytes)
+           VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22,?23,?24,?25)
            ON CONFLICT(folder_id, remote_uid) DO UPDATE SET
-             thread_id=excluded.thread_id, subject=excluded.subject, is_read=excluded.is_read,
-             is_flagged=excluded.is_flagged, body_snippet=excluded.body_snippet"#,
+             thread_id=excluded.thread_id,
+             in_reply_to=excluded.in_reply_to,
+             references_header=excluded.references_header,
+             subject=excluded.subject,
+             from_address=excluded.from_address,
+             from_name=excluded.from_name,
+             to_addresses=excluded.to_addresses,
+             cc_addresses=excluded.cc_addresses,
+             bcc_addresses=excluded.bcc_addresses,
+             reply_to=excluded.reply_to,
+             sent_at=excluded.sent_at,
+             received_at=excluded.received_at,
+             is_read=excluded.is_read,
+             is_flagged=excluded.is_flagged,
+             is_draft=excluded.is_draft,
+             has_attachments=excluded.has_attachments,
+             body_snippet=excluded.body_snippet,
+             body_text_preview=excluded.body_text_preview,
+             blob_path=excluded.blob_path,
+             size_bytes=excluded.size_bytes"#,
         params![
             msg.id,
             msg.account_id,
@@ -135,13 +162,14 @@ pub fn insert_message(conn: &Connection, msg: &Message) -> anyhow::Result<()> {
             msg.remote_uid as i64,
             msg.message_id_header,
             msg.in_reply_to,
+            msg.references,
             msg.subject,
             msg.from_address,
             msg.from_name,
-            serde_json::to_string(&msg.to_addresses)?,
-            serde_json::to_string(&msg.cc_addresses)?,
-            serde_json::to_string(&msg.bcc_addresses)?,
-            msg.reply_to.as_ref().map(|v| serde_json::to_string(v).unwrap()).unwrap_or("null".to_string()),
+            to_addresses_json,
+            cc_addresses_json,
+            bcc_addresses_json,
+            reply_to_json,
             msg.sent_at.timestamp(),
             msg.received_at.timestamp(),
             if msg.is_read { 1 } else { 0 },
@@ -164,7 +192,7 @@ pub fn list_messages_in_folder(
     offset: usize,
 ) -> anyhow::Result<Vec<Message>> {
     let mut stmt = conn.prepare(
-        "SELECT id, account_id, folder_id, thread_id, remote_uid, message_id_header, in_reply_to, subject, from_address, from_name, to_addresses, cc_addresses, bcc_addresses, reply_to, sent_at, received_at, is_read, is_flagged, is_draft, has_attachments, body_snippet, body_text_preview, blob_path, size_bytes FROM messages WHERE folder_id = ?1 ORDER BY sent_at DESC LIMIT ?2 OFFSET ?3"
+        "SELECT id, account_id, folder_id, thread_id, remote_uid, message_id_header, in_reply_to, references_header, subject, from_address, from_name, to_addresses, cc_addresses, bcc_addresses, reply_to, sent_at, received_at, is_read, is_flagged, is_draft, has_attachments, body_snippet, body_text_preview, blob_path, size_bytes FROM messages WHERE folder_id = ?1 ORDER BY sent_at DESC LIMIT ?2 OFFSET ?3"
     )?;
     let rows = stmt.query_map(params![folder_id, limit as i64, offset as i64], |row| {
         Ok(Message {
@@ -175,28 +203,27 @@ pub fn list_messages_in_folder(
             remote_uid: row.get::<_, i64>(4)? as u32,
             message_id_header: row.get(5)?,
             in_reply_to: row.get(6)?,
-            references: None,
-            subject: row.get(7)?,
-
-            from_address: row.get(8)?,
-            from_name: row.get(9)?,
-            to_addresses: serde_json::from_str(&row.get::<_, String>(10)?).unwrap_or_default(),
-            cc_addresses: serde_json::from_str(&row.get::<_, String>(11)?).unwrap_or_default(),
-            bcc_addresses: serde_json::from_str(&row.get::<_, String>(12)?).unwrap_or_default(),
+            references: row.get(7)?,
+            subject: row.get(8)?,
+            from_address: row.get(9)?,
+            from_name: row.get(10)?,
+            to_addresses: serde_json::from_str(&row.get::<_, String>(11)?).unwrap_or_default(),
+            cc_addresses: serde_json::from_str(&row.get::<_, String>(12)?).unwrap_or_default(),
+            bcc_addresses: serde_json::from_str(&row.get::<_, String>(13)?).unwrap_or_default(),
             reply_to: row
-                .get::<_, Option<String>>(13)?
+                .get::<_, Option<String>>(14)?
                 .and_then(|s| serde_json::from_str(&s).ok()),
-            sent_at: DateTime::from_timestamp(row.get::<_, i64>(14)?, 0).unwrap_or_else(Utc::now),
-            received_at: DateTime::from_timestamp(row.get::<_, i64>(15)?, 0)
+            sent_at: DateTime::from_timestamp(row.get::<_, i64>(15)?, 0).unwrap_or_else(Utc::now),
+            received_at: DateTime::from_timestamp(row.get::<_, i64>(16)?, 0)
                 .unwrap_or_else(Utc::now),
-            is_read: row.get::<_, i64>(16)? != 0,
-            is_flagged: row.get::<_, i64>(17)? != 0,
-            is_draft: row.get::<_, i64>(18)? != 0,
-            has_attachments: row.get::<_, i64>(19)? != 0,
-            body_snippet: row.get(20)?,
-            body_text_preview: row.get(21)?,
-            blob_path: row.get(22)?,
-            size_bytes: row.get(23)?,
+            is_read: row.get::<_, i64>(17)? != 0,
+            is_flagged: row.get::<_, i64>(18)? != 0,
+            is_draft: row.get::<_, i64>(19)? != 0,
+            has_attachments: row.get::<_, i64>(20)? != 0,
+            body_snippet: row.get(21)?,
+            body_text_preview: row.get(22)?,
+            blob_path: row.get(23)?,
+            size_bytes: row.get(24)?,
         })
     })?;
     rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)

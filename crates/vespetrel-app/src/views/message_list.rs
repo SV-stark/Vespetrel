@@ -185,13 +185,11 @@ pub fn contains_ignore_case_ascii(haystack: &[u8], needle: &[u8]) -> bool {
     let first_lower = needle[0].to_ascii_lowercase();
     let first_upper = needle[0].to_ascii_uppercase();
 
-    // Use memchr to fast-skip to first matching character
+    // Use memchr2 to SIMD fast-skip to first matching character
     let mut offset = 0;
     while offset + needle.len() <= haystack.len() {
         let remaining = &haystack[offset..];
-        let found = remaining
-            .iter()
-            .position(|&b| b == first_lower || b == first_upper);
+        let found = memchr::memchr2(first_lower, first_upper, remaining);
         match found {
             Some(idx) => {
                 let check_start = offset + idx;

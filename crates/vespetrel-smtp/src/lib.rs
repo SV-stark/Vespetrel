@@ -99,8 +99,9 @@ impl SmtpClient {
         }
 
         if let Some(autocrypt) = &self.config.autocrypt_header {
+            let sanitized_autocrypt = autocrypt.replace(['\r', '\n'], " ");
             let name = lettre::message::header::HeaderName::new_from_ascii_str("Autocrypt");
-            let val = lettre::message::header::HeaderValue::new(name, autocrypt.clone());
+            let val = lettre::message::header::HeaderValue::new(name, sanitized_autocrypt);
             builder = builder.raw_header(val);
         }
 

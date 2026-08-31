@@ -50,8 +50,13 @@ impl SieveValidator {
                 }
             }
 
-            for c in line.chars() {
+            let mut chars = line.chars().peekable();
+            while let Some(c) = chars.next() {
                 match c {
+                    '\\' if in_string => {
+                        // Skip next character if escaped within string literal
+                        chars.next();
+                    }
                     '"' => in_string = !in_string,
                     '{' if !in_string => brace_depth += 1,
                     '}' if !in_string => {
@@ -152,5 +157,17 @@ if header :contains "subject" "spam" {
             "SETACTIVE \"default\"\r\n"
         );
         assert_eq!(ManageSieveCommand::list_scripts(), "LISTSCRIPTS\r\n");
+    }
+
+    #[test]
+    fn test_sieve_validator_escaped_quotes() {
+        let script = r#"
+require ["fileinto"];
+if header :contains "subject" "hello \"world\" test" {
+    fileinto "Inbox";
+    stop;
+}
+"#;
+        assert!(SieveValidator::validate(script).is_ok());
     }
 }

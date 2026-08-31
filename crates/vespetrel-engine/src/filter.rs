@@ -32,37 +32,34 @@ pub struct FilterCondition {
 impl FilterCondition {
     pub fn matches(&self, msg: &MessageSummary) -> bool {
         match (&self.field, &self.predicate) {
-            (FilterField::FromAddress, FilterPredicate::Contains(val)) => msg
-                .from_address
-                .to_lowercase()
-                .contains(&val.to_lowercase()),
+            (FilterField::FromAddress, FilterPredicate::Contains(val)) => {
+                contains_case_insensitive(&msg.from_address, val)
+            }
             (FilterField::FromAddress, FilterPredicate::Equals(val)) => {
                 msg.from_address.eq_ignore_ascii_case(val)
             }
-            (FilterField::FromAddress, FilterPredicate::StartsWith(val)) => msg
-                .from_address
-                .to_lowercase()
-                .starts_with(&val.to_lowercase()),
-            (FilterField::FromAddress, FilterPredicate::EndsWith(val)) => msg
-                .from_address
-                .to_lowercase()
-                .ends_with(&val.to_lowercase()),
+            (FilterField::FromAddress, FilterPredicate::StartsWith(val)) => {
+                starts_with_case_insensitive(&msg.from_address, val)
+            }
+            (FilterField::FromAddress, FilterPredicate::EndsWith(val)) => {
+                ends_with_case_insensitive(&msg.from_address, val)
+            }
 
             (FilterField::FromName, FilterPredicate::Contains(val)) => msg
                 .from_name
                 .as_deref()
-                .map(|n| n.to_lowercase().contains(&val.to_lowercase()))
+                .map(|n| contains_case_insensitive(n, val))
                 .unwrap_or(false),
 
             (FilterField::Subject, FilterPredicate::Contains(val)) => msg
                 .subject
                 .as_deref()
-                .map(|s| s.to_lowercase().contains(&val.to_lowercase()))
+                .map(|s| contains_case_insensitive(s, val))
                 .unwrap_or(false),
             (FilterField::Subject, FilterPredicate::StartsWith(val)) => msg
                 .subject
                 .as_deref()
-                .map(|s| s.to_lowercase().starts_with(&val.to_lowercase()))
+                .map(|s| starts_with_case_insensitive(s, val))
                 .unwrap_or(false),
             (FilterField::Subject, FilterPredicate::Equals(val)) => msg
                 .subject
@@ -73,7 +70,7 @@ impl FilterCondition {
             (FilterField::Snippet, FilterPredicate::Contains(val)) => msg
                 .snippet
                 .as_deref()
-                .map(|s| s.to_lowercase().contains(&val.to_lowercase()))
+                .map(|s| contains_case_insensitive(s, val))
                 .unwrap_or(false),
 
             (FilterField::HasAttachments, FilterPredicate::IsTrue) => msg.has_attachments,
@@ -88,6 +85,34 @@ impl FilterCondition {
             _ => false,
         }
     }
+}
+
+#[inline]
+fn contains_case_insensitive(haystack: &str, needle: &str) -> bool {
+    if needle.is_empty() {
+        return true;
+    }
+    if haystack.len() < needle.len() {
+        return false;
+    }
+    haystack.to_lowercase().contains(&needle.to_lowercase())
+}
+
+#[inline]
+fn starts_with_case_insensitive(haystack: &str, needle: &str) -> bool {
+    if haystack.len() < needle.len() {
+        return false;
+    }
+    haystack[..needle.len()].eq_ignore_ascii_case(needle)
+}
+
+#[inline]
+fn ends_with_case_insensitive(haystack: &str, needle: &str) -> bool {
+    if haystack.len() < needle.len() {
+        return false;
+    }
+    let start = haystack.len() - needle.len();
+    haystack[start..].eq_ignore_ascii_case(needle)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

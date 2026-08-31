@@ -76,7 +76,9 @@ pub fn run_migrations(conn: &Connection) -> anyhow::Result<()> {
                 remote_uid INTEGER NOT NULL,
                 message_id_header TEXT,
                 in_reply_to TEXT,
+                references_header TEXT,
                 subject TEXT,
+
                 from_address TEXT NOT NULL,
                 from_name TEXT,
                 to_addresses TEXT NOT NULL,

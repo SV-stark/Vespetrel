@@ -50,8 +50,8 @@ impl BlobStore {
         }
         let compressed = lz4_flex::compress_prepend_size(data);
 
-        // Atomic write via temporary file
-        let tmp_path = path.with_extension("tmp");
+        // Atomic write via unique temporary file
+        let tmp_path = path.with_extension(format!("{}.tmp", uuid::Uuid::new_v4()));
         std::fs::write(&tmp_path, compressed)?;
         std::fs::rename(&tmp_path, &path)?;
 

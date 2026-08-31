@@ -92,7 +92,11 @@ impl ImapConnection {
     }
 
     pub fn cmd_select(&self, mailbox: &str) -> String {
-        format!("SELECT \"{}\"", mailbox.replace('"', "\\\""))
+        let clean = mailbox
+            .replace(['\r', '\n'], "")
+            .replace('\\', "\\\\")
+            .replace('"', "\\\"");
+        format!("SELECT \"{clean}\"")
     }
 
     pub fn cmd_authenticate_xoauth2(&self) -> String {

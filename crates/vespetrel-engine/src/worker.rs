@@ -96,57 +96,62 @@ impl AccountWorker {
             None => None,
         };
 
-        // Persist folders to storage if connection available
-        if let Some(conn) = &storage_conn {
-            for rf in &folders {
-                let folder_record = vespetrel_core::Folder::new(
-                    &self.account_id,
-                    &rf.remote_id,
-                    &rf.name,
-                    &rf.path,
-                );
-                let _ = conn
-                    .interact(move |c| vespetrel_storage::repo::upsert_folder(c, &folder_record))
+        let mut folder_records: ahash::AHashMap<String, vespetrel_core::Folder> =
+            ahash::AHashMap::with_capacity(folders.len());
+
+        for rf in &folders {
+            let folder_record =
+                vespetrel_core::Folder::new(&self.account_id, &rf.remote_id, &rf.name, &rf.path);
+            folder_records.insert(rf.remote_id.clone(), folder_record.clone());
+
+            // Persist folder metadata to storage
+            if let Some(conn) = &storage_conn {
+                let rec = folder_record.clone();
+                let res = conn
+                    .interact(move |c| vespetrel_storage::repo::upsert_folder(c, &rec))
                     .await;
+                if let Err(e) = res {
+                    warn!(folder=%rf.name, error=%e, "failed to upsert folder in storage");
+                }
             }
         }
 
         for rf in &folders {
-            let folder_meta =
-                vespetrel_core::Folder::new(&self.account_id, &rf.remote_id, &rf.name, &rf.path);
+            let folder_record = folder_records
+                .get(&rf.remote_id)
+                .cloned()
+                .unwrap_or_else(|| {
+                    vespetrel_core::Folder::new(&self.account_id, &rf.remote_id, &rf.name, &rf.path)
+                });
+            let folder_db_id = folder_record.id.clone();
             let state = vespetrel_core::account::SyncState::default();
-            match self.provider.sync_messages(&folder_meta, state).await {
+
+            match self.provider.sync_messages(&folder_record, state).await {
                 Ok(delta) => {
                     let mut summaries = Vec::new();
 
-                    // Persist synced messages to storage
-                    if let Some(conn) = &storage_conn {
-                        for sync_msg in &delta.inserted {
-                            let msg = vespetrel_core::Message::new(
-                                &self.account_id,
-                                &rf.remote_id,
-                                sync_msg.remote_uid,
-                                format!("Message {}", sync_msg.remote_uid),
-                                "sender@example.com",
-                                vec![self.account_id.clone()],
-                            );
-                            summaries.push(msg.summary());
-                            let _ = conn
-                                .interact(move |c| vespetrel_storage::repo::insert_message(c, &msg))
+                    for sync_msg in &delta.inserted {
+                        let msg = vespetrel_core::Message::new(
+                            &self.account_id,
+                            &folder_db_id,
+                            sync_msg.remote_uid,
+                            format!("Message {}", sync_msg.remote_uid),
+                            "sender@example.com",
+                            vec![self.account_id.clone()],
+                        );
+                        summaries.push(msg.summary());
+
+                        // Persist synced message to storage
+                        if let Some(conn) = &storage_conn {
+                            let msg_to_store = msg.clone();
+                            let res = conn
+                                .interact(move |c| {
+                                    vespetrel_storage::repo::insert_message(c, &msg_to_store)
+                                })
                                 .await;
-                        }
-                    } else {
-                        // In memory summaries for mock/test runs
-                        for sync_msg in &delta.inserted {
-                            let msg = vespetrel_core::Message::new(
-                                &self.account_id,
-                                &rf.remote_id,
-                                sync_msg.remote_uid,
-                                format!("Message {}", sync_msg.remote_uid),
-                                "sender@example.com",
-                                vec![self.account_id.clone()],
-                            );
-                            summaries.push(msg.summary());
+                            if let Err(e) = res {
+                                error!(msg_id=%msg.id, error=%e, "failed to store message in DB");
+                            }
                         }
                     }
 

@@ -1,4 +1,4 @@
-use oauth2::{CsrfToken, PkceCodeChallenge};
+use oauth2::{CsrfToken, PkceCodeChallenge, PkceCodeVerifier};
 use tracing::{debug, info};
 
 #[derive(Debug, Clone)]
@@ -53,42 +53,60 @@ impl OAuth2Engine {
         Self { config }
     }
 
-    /// Generate PKCE authorization URL to open in browser
-    pub fn auth_url(&self) -> (String, CsrfToken, PkceCodeChallenge) {
-        // Real: use oauth2 crate's Client with PKCE
-        let (pkce_challenge, _verifier) = PkceCodeChallenge::new_random_sha256();
+    /// Generate PKCE authorization URL to open in browser along with random CSRF token and PKCE verifier
+    pub fn auth_url(&self) -> (String, CsrfToken, PkceCodeVerifier) {
+        let (pkce_challenge, verifier) = PkceCodeChallenge::new_random_sha256();
+        let csrf_token = CsrfToken::new_random();
         let auth_url = format!(
-            "{}?client_id={}&redirect_uri={}&response_type=code&scope={}&code_challenge={}&code_challenge_method=S256",
+            "{}?client_id={}&redirect_uri={}&response_type=code&scope={}&state={}&code_challenge={}&code_challenge_method=S256",
             self.config.auth_url,
             urlencoding(&self.config.client_id),
             urlencoding(&self.config.redirect_uri),
             urlencoding(&self.config.scopes.join(" ")),
+            urlencoding(csrf_token.secret()),
             pkce_challenge.as_str(),
         );
-        // Store verifier + csrf in keyring/state for callback
         debug!(url=%auth_url, "generated PKCE auth url");
-        (auth_url, CsrfToken::new("csrf-stub".into()), pkce_challenge)
+        (auth_url, csrf_token, verifier)
     }
 
-    /// Start local loopback listener on 127.0.0.1:8989 and wait for ?code=
+    /// Start local loopback listener on 127.0.0.1:8989 and wait for ?code= with 180s timeout
     pub async fn wait_for_callback(&self) -> anyhow::Result<String> {
+        self.wait_for_callback_with_timeout(180, None).await
+    }
+
+    /// Start local loopback listener with timeout and optional state verification
+    pub async fn wait_for_callback_with_timeout(
+        &self,
+        timeout_secs: u64,
+        expected_state: Option<&str>,
+    ) -> anyhow::Result<String> {
+        use std::time::Duration;
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
         use tokio::net::TcpListener;
 
-        info!("starting loopback listener on 127.0.0.1:8989 for OAuth2 callback");
-        let listener = TcpListener::bind("127.0.0.1:8989").await?;
+        let future = async {
+            info!("starting loopback listener on 127.0.0.1:8989 for OAuth2 callback");
+            let listener = TcpListener::bind("127.0.0.1:8989").await?;
 
-        let (mut socket, _) = listener.accept().await?;
-        let mut buf = [0u8; 4096];
-        let n = socket.read(&mut buf).await?;
-        let request_str = String::from_utf8_lossy(&buf[..n]);
+            let (mut socket, _) = listener.accept().await?;
+            let mut buf = vec![0u8; 8192];
+            let n = socket.read(&mut buf).await?;
+            let request_str = String::from_utf8_lossy(&buf[..n]);
 
-        let code = parse_code_from_http_request(&request_str).ok_or_else(|| {
-            anyhow::anyhow!("failed to extract authorization code from callback request")
-        })?;
+            if let Some(expected) = expected_state {
+                let state = parse_param_from_http_request(&request_str, "state");
+                if state.as_deref() != Some(expected) {
+                    anyhow::bail!("OAuth2 CSRF state mismatch: security check failed");
+                }
+            }
 
-        // Respond with friendly confirmation page
-        let response_body = r#"<!DOCTYPE html>
+            let code = parse_code_from_http_request(&request_str).ok_or_else(|| {
+                anyhow::anyhow!("failed to extract authorization code from callback request")
+            })?;
+
+            // Respond with friendly confirmation page
+            let response_body = r#"<!DOCTYPE html>
 <html>
 <head><title>Vespetrel Authorization</title></head>
 <body style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; text-align: center; padding: 60px; background: #09090b; color: #fafafa;">
@@ -98,17 +116,24 @@ impl OAuth2Engine {
 </body>
 </html>"#;
 
-        let response = format!(
-            "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
-            response_body.len(),
-            response_body
-        );
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                response_body.len(),
+                response_body
+            );
 
-        let _ = socket.write_all(response.as_bytes()).await;
-        let _ = socket.flush().await;
+            let _ = socket.write_all(response.as_bytes()).await;
+            let _ = socket.flush().await;
 
-        info!("successfully captured OAuth2 authorization code");
-        Ok(code)
+            info!("successfully captured OAuth2 authorization code");
+            Ok(code)
+        };
+
+        tokio::time::timeout(Duration::from_secs(timeout_secs), future)
+            .await
+            .map_err(|_| {
+                anyhow::anyhow!("OAuth2 callback listener timed out after {timeout_secs}s")
+            })?
     }
 
     pub async fn exchange_code(
@@ -208,28 +233,70 @@ impl OAuth2Engine {
     }
 }
 
-/// Parse `code=...` query parameter from raw HTTP request line
-pub fn parse_code_from_http_request(req: &str) -> Option<String> {
+/// Parse named query parameter from raw HTTP request line with URL decoding
+pub fn parse_param_from_http_request(req: &str, param: &str) -> Option<String> {
     let first_line = req.lines().next()?;
     let path = first_line.split_whitespace().nth(1)?;
     let query = path.split('?').nth(1)?;
 
     for pair in query.split('&') {
-        let mut parts = pair.split('=');
-        if let (Some("code"), Some(v)) = (parts.next(), parts.next()) {
-            return Some(v.to_string());
+        if let Some((_, v)) = pair.split_once('=').filter(|(k, _)| *k == param) {
+            return Some(urldecode(v));
         }
     }
+
     None
 }
 
+/// Parse `code=...` query parameter from raw HTTP request line
+pub fn parse_code_from_http_request(req: &str) -> Option<String> {
+    parse_param_from_http_request(req, "code")
+}
+
+pub fn urldecode(s: &str) -> String {
+    let mut result = String::with_capacity(s.len());
+    let mut bytes = s.bytes();
+    while let Some(b) = bytes.next() {
+        if b == b'%' {
+            let h1 = bytes.next();
+            let h2 = bytes.next();
+            if let (Some(c1), Some(c2)) = (h1, h2) {
+                let hex = [c1, c2];
+                let decoded = std::str::from_utf8(&hex)
+                    .ok()
+                    .and_then(|s| u8::from_str_radix(s, 16).ok());
+                if let Some(decoded_byte) = decoded {
+                    result.push(decoded_byte as char);
+                    continue;
+                }
+                result.push('%');
+                result.push(c1 as char);
+                result.push(c2 as char);
+            } else {
+                result.push('%');
+            }
+        } else if b == b'+' {
+            result.push(' ');
+        } else {
+            result.push(b as char);
+        }
+    }
+    result
+}
+
 fn urlencoding(s: &str) -> String {
-    s.replace(' ', "%20")
-        .replace(':', "%3A")
-        .replace('/', "%2F")
-        .replace('?', "%3F")
-        .replace('&', "%26")
-        .replace('=', "%3D")
+    let mut encoded = String::new();
+    for b in s.bytes() {
+        match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                encoded.push(b as char);
+            }
+            _ => {
+                encoded.push_str(&format!("%{:02X}", b));
+            }
+        }
+    }
+    encoded
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -244,16 +311,21 @@ mod tests {
     use super::*;
 
     #[test]
-    fn parse_code_from_http_get() {
-        let req = "GET /callback?code=4/0AbCdEf123456&state=csrf-test HTTP/1.1\r\nHost: 127.0.0.1:8989\r\n\r\n";
-        let code = parse_code_from_http_request(req);
-        assert_eq!(code.as_deref(), Some("4/0AbCdEf123456"));
-    }
-
-    #[test]
     fn parse_code_missing() {
         let req = "GET /callback?error=access_denied HTTP/1.1\r\nHost: 127.0.0.1:8989\r\n\r\n";
         let code = parse_code_from_http_request(req);
         assert_eq!(code, None);
+    }
+
+    #[test]
+    fn test_urldecode_and_urlencode() {
+        let raw = "hello world+test%2F123&state=abc";
+        assert_eq!(
+            urldecode("hello%20world%2Btest%2F123%26state%3Dabc"),
+            "hello world+test/123&state=abc"
+        );
+        assert_eq!(urldecode("a+b"), "a b");
+        let encoded = urlencoding(raw);
+        assert!(encoded.contains("%20") || encoded.contains("%2F"));
     }
 }

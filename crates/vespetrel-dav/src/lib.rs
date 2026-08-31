@@ -21,11 +21,30 @@ impl DavConfig {
         }
     }
     pub fn calendar_home(&self) -> String {
-        format!("{}/calendars/{}", self.base_url, self.username)
+        let base = self.base_url.trim_end_matches('/');
+        let user = urlencoding_simple(&self.username);
+        format!("{base}/calendars/{user}")
     }
     pub fn addressbook_home(&self) -> String {
-        format!("{}/addressbooks/{}", self.base_url, self.username)
+        let base = self.base_url.trim_end_matches('/');
+        let user = urlencoding_simple(&self.username);
+        format!("{base}/addressbooks/{user}")
     }
+}
+
+fn urlencoding_simple(s: &str) -> String {
+    let mut encoded = String::new();
+    for b in s.bytes() {
+        match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                encoded.push(b as char);
+            }
+            _ => {
+                encoded.push_str(&format!("%{:02X}", b));
+            }
+        }
+    }
+    encoded
 }
 
 pub struct DavClient {
