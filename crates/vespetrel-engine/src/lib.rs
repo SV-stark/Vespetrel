@@ -2,15 +2,34 @@
 
 pub mod coordinator;
 pub mod event_bus;
+pub mod feeds;
 pub mod filter;
+pub mod matrix;
+pub mod migrator;
+pub mod plugin;
+pub mod pop3;
+pub mod sieve;
+pub mod spam;
 pub mod worker;
 
 pub use coordinator::SyncCoordinator;
 pub use event_bus::{EventBus, EventReceiver, EventSender};
+pub use feeds::{FeedItem, FeedSubscription, parse_feed_xml};
 pub use filter::{
     ConditionCombinator, FilterAction, FilterCondition, FilterEngine, FilterField, FilterPredicate,
     FilterRule,
 };
+pub use matrix::{MatrixBridge, MatrixEvent, MatrixRoom};
+pub use migrator::{
+    MigratedAccount, ThunderbirdProfile, discover_thunderbird_profiles, parse_mbox_data,
+    parse_thunderbird_prefs,
+};
+pub use plugin::{PluginAction, PluginEvent, PluginHost, PluginManifest, PluginPermission};
+pub use pop3::{
+    Pop3Command, Pop3MessageInfo, Pop3UidlCache, parse_pop3_status, parse_pop3_uidl_response,
+};
+pub use sieve::{ManageSieveCommand, SieveResponse, SieveScript, SieveValidator};
+pub use spam::{BayesClassifier, SpamScore};
 pub use worker::{AccountWorker, WorkerCommand};
 
 #[cfg(test)]

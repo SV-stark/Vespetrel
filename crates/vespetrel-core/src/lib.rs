@@ -9,6 +9,7 @@ pub mod invite;
 pub mod message;
 pub mod provider;
 pub mod thread;
+pub mod virtual_folder;
 
 pub use account::{Account, AuthConfig, ProviderType, SyncState};
 pub use attachment::Attachment;
@@ -19,3 +20,4 @@ pub use invite::{MeetingInvitation, RsvpStatus};
 pub use message::{Address, ComposedAttachment, ComposedMessage, Flag, Message, MessageSummary};
 pub use provider::{MailProvider, RemoteFolder, SyncDelta, SyncEvent};
 pub use thread::{Thread, ThreadNode, ThreadTree, normalize_subject};
+pub use virtual_folder::{VirtualFolder, VirtualFolderType};

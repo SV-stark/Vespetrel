@@ -256,22 +256,23 @@ cargo run --package vespetrel-app -- --memory
 
   - [x] GitHub Actions multi-platform CI matrix workflow (`.github/workflows/ci.yml`)
 
-- [ ] **P5: Power-User Capabilities, Interoperability & Migration**
-  - [ ] **1-Click Thunderbird & Apple Mail Migrator**: Direct import from `~/.thunderbird/` profile directories (`profiles.ini`, `prefs.js`, `ImapMail/`, `Mail/Local Folders/`, `abook.sqlite`, `mbox`, and `maildir` files)
-  - [ ] **Message Filter & Automation Rule Engine**: Client-side filtering pipeline (triggers on arrival/send, criteria matching with regex/SIMD text search, actions: move to folder, add tags/flags, mark read, forward, auto-reply)
-  - [ ] **ManageSieve RFC 5804 Client**: Sieve script management, syntax validation, and remote synchronization with Dovecot, Fastmail, and Stalwart mail servers
-  - [ ] **Smart Virtual Folders & Unified Inboxes**: Cross-account unified views (All Inboxes, All Flagged, Unread, Today) and saved persistent search queries (Smart Folders)
-  - [ ] **iCalendar Meeting Invitations State Machine**: Parsing incoming `.ics` attachments, showing rich meeting invitation banners with 1-click RSVP (Accept / Decline / Tentative) and auto-updating CalDAV calendars
-  - [ ] **News & RSS/Atom Feed Reader**: Full RSS 2.0 / Atom feed parser & subscription manager integrated into the folder tree with offline article caching
-  - [ ] **URL Tracker Cleaner & Anti-Phishing Analyzer**: Strips query tracking parameters (`utm_*`, `fbclid`, `gclid`, `mc_eid`) and analyzes links for homograph attacks and suspicious punycode domains
+- [x] **P5: Power-User Capabilities, Interoperability & Migration (COMPLETE)**
+  - [x] **1-Click Thunderbird & Apple Mail Migrator**: Direct import from `~/.thunderbird/` profile directories (`profiles.ini`, `prefs.js`, `ImapMail/`, `Mail/Local Folders/`, `abook.sqlite`, `mbox`, and `maildir` files)
+  - [x] **Message Filter & Automation Rule Engine**: Client-side filtering pipeline (triggers on arrival/send, criteria matching with regex/SIMD text search, actions: move to folder, add tags/flags, mark read, forward, auto-reply)
+  - [x] **ManageSieve RFC 5804 Client**: Sieve script management, syntax validation, and remote synchronization with Dovecot, Fastmail, and Stalwart mail servers
+  - [x] **Smart Virtual Folders & Unified Inboxes**: Cross-account unified views (All Inboxes, All Flagged, Unread, Today) and saved persistent search queries (Smart Folders)
+  - [x] **iCalendar Meeting Invitations State Machine**: Parsing incoming `.ics` attachments, showing rich meeting invitation banners with 1-click RSVP (Accept / Decline / Tentative) and auto-updating CalDAV calendars
+  - [x] **News & RSS/Atom Feed Reader**: Full RSS 2.0 / Atom feed parser & subscription manager integrated into the folder tree with offline article caching
+  - [x] **URL Tracker Cleaner & Anti-Phishing Analyzer**: Strips query tracking parameters (`utm_*`, `fbclid`, `gclid`, `mc_eid`) and analyzes links for homograph attacks and suspicious punycode domains
 
-- [ ] **P6: Extensibility, Statistical Intelligence & Enterprise Security**
-  - [ ] **WASM / WebExtension Plugin Sandbox**: Secure Wasmtime-based plugin runtime for custom toolbar buttons, themes, custom mail actions, and AI assistant sidecars
-  - [ ] **Bayesian Spam Filter & Statistical Classifier**: Local on-device Naive Bayes spam engine learning from user `Spam` / `Ham` actions with SQLite token probability frequency tables
-  - [ ] **Hardware Token & Smartcard Cryptography**: FIDO2 / YubiKey PKCS#11 hardware PGP & S/MIME token signing and decryption
-  - [ ] **Configurable Keybinding Engine**: Gmail, Vim, and Thunderbird default keyboard shortcut maps with custom JSON keymap configurations
-  - [ ] **POP3 Legacy Client Engine**: Full RFC 1939 POP3 provider support with SSL/TLS and UIDL tracking for legacy mail servers
-  - [ ] **Decentralized Matrix & Chat Bridge**: Native Matrix protocol client integration for real-time team communication alongside email threads
+- [x] **P6: Extensibility, Statistical Intelligence & Enterprise Security (COMPLETE)**
+  - [x] **WASM / WebExtension Plugin Sandbox**: Secure plugin runtime model for custom toolbar buttons, notifications, message tags, and AI assistant sidecars
+  - [x] **Bayesian Spam Filter & Statistical Classifier**: Local on-device Naive Bayes spam engine learning from user `Spam` / `Ham` actions with token probability frequency tables
+  - [x] **Hardware Token & Smartcard Cryptography**: FIDO2 / YubiKey PKCS#11 hardware PGP & S/MIME token signing and decryption
+  - [x] **Configurable Keybinding Engine**: Gmail, Vim, and Thunderbird default keyboard shortcut maps with custom JSON keymap configurations
+  - [x] **POP3 Legacy Client Engine**: Full RFC 1939 POP3 provider support with SSL/TLS and UIDL tracking for legacy mail servers
+  - [x] **Decentralized Matrix & Chat Bridge**: Native Matrix protocol client integration for real-time team communication alongside email threads
+
 
 
 ---

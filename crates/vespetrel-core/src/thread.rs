@@ -154,13 +154,14 @@ impl ThreadTree {
         }
 
         // Break cycles: any messages not reached from roots become roots
-        for key in id_to_msg.keys() {
-            if !visited.contains(key) {
-                if let Some(node) =
-                    build_node(key, &id_to_msg, &parent_to_children, &mut visited, 0)
-                {
-                    root_nodes.push(node);
-                }
+        let remaining_keys: Vec<String> = id_to_msg
+            .keys()
+            .filter(|k| !visited.contains(*k))
+            .cloned()
+            .collect();
+        for key in remaining_keys {
+            if let Some(node) = build_node(&key, &id_to_msg, &parent_to_children, &mut visited, 0) {
+                root_nodes.push(node);
             }
         }
 
