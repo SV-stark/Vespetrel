@@ -4634,8 +4634,10 @@ name = "vespetrel-smtp"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "base64 0.22.1",
  "lettre",
  "serde",
+ "sha2 0.10.9",
  "thiserror 2.0.20",
  "tokio",
  "tracing",

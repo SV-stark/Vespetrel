@@ -74,8 +74,11 @@ impl SyncCoordinator {
     pub fn spawn_worker(&mut self, account_id: impl Into<String>, provider: Arc<dyn MailProvider>) {
         let account_id = account_id.into();
         let (cmd_tx, cmd_rx) = mpsc::unbounded_channel();
-        let mut worker =
-            AccountWorker::new(account_id.clone(), provider, self.event_tx.clone(), cmd_rx);
+        let mut worker = if let Some(flume_tx) = &self.flume_tx {
+            AccountWorker::new_with_flume(account_id.clone(), provider, flume_tx.clone(), cmd_rx)
+        } else {
+            AccountWorker::new(account_id.clone(), provider, self.event_tx.clone(), cmd_rx)
+        };
         if let Some(pool) = &self.storage_pool {
             worker = worker.with_storage_pool(pool.clone());
         }

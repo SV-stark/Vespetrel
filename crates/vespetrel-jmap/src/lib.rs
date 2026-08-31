@@ -274,7 +274,50 @@ impl MailProvider for JmapProvider {
 
     async fn send_message(&self, msg: &ComposedMessage) -> anyhow::Result<()> {
         info!(subject=%msg.subject, "JMAP EmailSubmission");
-        // Real: Email/set create + EmailSubmission/create
+        if self.config.base_url.starts_with("http") && !self.config.access_token.is_empty() {
+            let req = serde_json::json!({
+                "using": ["urn:ietf:params:jmap:core", "urn:ietf:params:jmap:mail", "urn:ietf:params:jmap:submission"],
+                "methodCalls": [
+                    [
+                        "Email/set",
+                        {
+                            "accountId": self.config.username,
+                            "create": {
+                                "k1": {
+                                    "mailboxIds": { "drafts": true },
+                                    "subject": msg.subject,
+                                    "bodyValues": {
+                                        "body": {
+                                            "value": msg.body_text
+                                        }
+                                    }
+                                }
+                            }
+                        },
+                        "c1"
+                    ],
+                    [
+                        "EmailSubmission/set",
+                        {
+                            "accountId": self.config.username,
+                            "create": {
+                                "sub1": {
+                                    "emailId": "#k1"
+                                }
+                            }
+                        },
+                        "c2"
+                    ]
+                ]
+            });
+            let _ = self
+                .http
+                .post(&self.config.base_url)
+                .bearer_auth(&self.config.access_token)
+                .json(&req)
+                .send()
+                .await;
+        }
         Ok(())
     }
 
@@ -285,6 +328,52 @@ impl MailProvider for JmapProvider {
         remove: &[Flag],
     ) -> anyhow::Result<()> {
         debug!(uids=?remote_ids, add=?add, remove=?remove, "JMAP Email/set keywords");
+        if self.config.base_url.starts_with("http") && !self.config.access_token.is_empty() {
+            let mut patch_map = serde_json::Map::new();
+            if add.contains(&Flag::Seen) {
+                patch_map.insert("keywords/$seen".into(), serde_json::Value::Bool(true));
+            }
+            if remove.contains(&Flag::Seen) {
+                patch_map.insert("keywords/$seen".into(), serde_json::Value::Null);
+            }
+            if add.contains(&Flag::Flagged) {
+                patch_map.insert("keywords/$flagged".into(), serde_json::Value::Bool(true));
+            }
+            if remove.contains(&Flag::Flagged) {
+                patch_map.insert("keywords/$flagged".into(), serde_json::Value::Null);
+            }
+
+            if !patch_map.is_empty() {
+                let mut update_obj = serde_json::Map::new();
+                for uid in remote_ids {
+                    update_obj.insert(
+                        uid.to_string(),
+                        serde_json::Value::Object(patch_map.clone()),
+                    );
+                }
+
+                let req = serde_json::json!({
+                    "using": ["urn:ietf:params:jmap:core", "urn:ietf:params:jmap:mail"],
+                    "methodCalls": [
+                        [
+                            "Email/set",
+                            {
+                                "accountId": self.config.username,
+                                "update": update_obj
+                            },
+                            "u1"
+                        ]
+                    ]
+                });
+                let _ = self
+                    .http
+                    .post(&self.config.base_url)
+                    .bearer_auth(&self.config.access_token)
+                    .json(&req)
+                    .send()
+                    .await;
+            }
+        }
         Ok(())
     }
 }

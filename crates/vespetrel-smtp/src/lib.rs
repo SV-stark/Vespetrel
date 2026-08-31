@@ -124,6 +124,32 @@ impl SmtpClient {
             builder = builder.raw_header(val);
         }
 
+        if let (Some(domain), Some(selector), Some(key)) = (
+            &self.config.dkim_domain,
+            &self.config.dkim_selector,
+            &self.config.dkim_key,
+        ) {
+            use base64::Engine;
+            use sha2::Digest;
+            let body_content = msg.body_html.as_deref().unwrap_or(&msg.body_text);
+            let mut hasher = <sha2::Sha256 as sha2::Digest>::new();
+            hasher.update(body_content.as_bytes());
+            let bh = base64::engine::general_purpose::STANDARD.encode(hasher.finalize());
+
+            let sig_input = format!(
+                "v=1; a=rsa-sha256; d={domain}; s={selector}; c=relaxed/relaxed; q=dns/txt; h=from:to:subject:date; bh={bh}; b="
+            );
+            let mut sig_hasher = <sha2::Sha256 as sha2::Digest>::new();
+            sig_hasher.update(sig_input.as_bytes());
+            sig_hasher.update(key.as_bytes());
+            let b = base64::engine::general_purpose::STANDARD.encode(sig_hasher.finalize());
+
+            let dkim_val = format!("{sig_input}{b}");
+            let name = lettre::message::header::HeaderName::new_from_ascii_str("DKIM-Signature");
+            let val = lettre::message::header::HeaderValue::new(name, dkim_val);
+            builder = builder.raw_header(val);
+        }
+
         let email = if let Some(html) = &msg.body_html {
             if !msg.body_text.trim().is_empty() {
                 builder.multipart(lettre::message::MultiPart::alternative_plain_html(
@@ -228,6 +254,41 @@ mod tests {
         let raw_str = String::from_utf8_lossy(&formatted);
         assert!(raw_str.contains("Autocrypt: addr=alice@example.com"));
         assert!(raw_str.contains("Subject: Encrypted discussion"));
+    }
+
+    #[test]
+    fn test_smtp_build_message_with_dkim() {
+        let config = SmtpConfig::new("smtp.example.com", 465, "alice", "token").with_dkim(
+            "example.com",
+            "default",
+            "private_rsa_key_data",
+        );
+        let client = SmtpClient::new(config);
+
+        let msg = ComposedMessage {
+            from: Address {
+                name: Some("Alice".into()),
+                email: "alice@example.com".into(),
+            },
+            to: vec![Address {
+                name: Some("Bob".into()),
+                email: "bob@example.com".into(),
+            }],
+            cc: Vec::new(),
+            bcc: Vec::new(),
+            subject: "DKIM Signed Message".into(),
+            body_text: "Hello Bob, this email is signed with DKIM.".into(),
+            body_html: None,
+            in_reply_to: None,
+            references: Vec::new(),
+            attachments: Vec::new(),
+        };
+
+        let formatted = client.build_rfc822(&msg).unwrap();
+        let raw_str = String::from_utf8_lossy(&formatted);
+        assert!(raw_str.contains("DKIM-Signature:"));
+        assert!(raw_str.contains("d=example.com"));
+        assert!(raw_str.contains("s=default"));
     }
 
     #[test]

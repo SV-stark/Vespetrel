@@ -84,6 +84,8 @@ bytes = "1.6"
 arc-swap = "1.7"
 regex = "1.10"
 urlencoding = "2.1"
+sha2 = "0.10"
+base64 = "0.22"
 
 
 

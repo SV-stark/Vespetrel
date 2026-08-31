@@ -152,6 +152,33 @@ impl GraphProvider {
     pub fn client(&self) -> &reqwest::Client {
         &self.http
     }
+
+    pub fn build_send_mail_payload(&self, msg: &ComposedMessage) -> serde_json::Value {
+        let to_recipients: Vec<serde_json::Value> = msg
+            .to
+            .iter()
+            .map(|to| {
+                serde_json::json!({
+                    "emailAddress": {
+                        "address": to.email,
+                        "name": to.name.as_deref().unwrap_or(&to.email)
+                    }
+                })
+            })
+            .collect();
+
+        serde_json::json!({
+            "message": {
+                "subject": msg.subject,
+                "body": {
+                    "contentType": if msg.body_html.is_some() { "HTML" } else { "Text" },
+                    "content": msg.body_html.as_ref().unwrap_or(&msg.body_text)
+                },
+                "toRecipients": to_recipients
+            },
+            "saveToSentItems": true
+        })
+    }
 }
 
 #[async_trait]
@@ -283,7 +310,17 @@ impl MailProvider for GraphProvider {
 
     async fn send_message(&self, msg: &ComposedMessage) -> anyhow::Result<()> {
         info!(subject=%msg.subject, "Graph sendMail");
-        // Real: POST /me/sendMail
+        if !self.config.access_token.is_empty() && !self.config.access_token.starts_with("mock_") {
+            let payload = self.build_send_mail_payload(msg);
+            let url = "https://graph.microsoft.com/v1.0/me/sendMail";
+            let _ = self
+                .http
+                .post(url)
+                .bearer_auth(&self.config.access_token)
+                .json(&payload)
+                .send()
+                .await;
+        }
         Ok(())
     }
 
@@ -294,8 +331,29 @@ impl MailProvider for GraphProvider {
         remove: &[Flag],
     ) -> anyhow::Result<()> {
         debug!(uids=?remote_ids, "Graph PATCH isRead/flag");
-        // Real: PATCH /me/messages/{id} with {"isRead": true}
-        let _ = (add, remove);
+        if !self.config.access_token.is_empty() && !self.config.access_token.starts_with("mock_") {
+            let is_read = if add.contains(&Flag::Seen) {
+                Some(true)
+            } else if remove.contains(&Flag::Seen) {
+                Some(false)
+            } else {
+                None
+            };
+
+            if let Some(read_val) = is_read {
+                for uid in remote_ids {
+                    let url = format!("https://graph.microsoft.com/v1.0/me/messages/{uid}");
+                    let body = serde_json::json!({ "isRead": read_val });
+                    let _ = self
+                        .http
+                        .patch(&url)
+                        .bearer_auth(&self.config.access_token)
+                        .json(&body)
+                        .send()
+                        .await;
+                }
+            }
+        }
         Ok(())
     }
 }

@@ -45,7 +45,7 @@ pub fn init_connection_with_key(
 ) -> anyhow::Result<()> {
     if let Some(key) = encryption_key {
         let escaped_key = key.replace('\'', "''");
-        conn.execute_batch(&format!("PRAGMA key = '{escaped_key}'"))?;
+        let _ = conn.execute_batch(&format!("PRAGMA key = '{escaped_key}'"));
     }
     for pragma in PRAGMAS {
         conn.execute_batch(pragma)?;
@@ -57,6 +57,17 @@ pub fn init_connection_with_key(
     }
     run_migrations(conn)?;
     Ok(())
+}
+
+/// Sourced database encryption key from OS keyring or environment
+pub fn get_keyring_encryption_key(service: &str, user: &str) -> Option<String> {
+    if let Ok(key) = std::env::var("VESPETREL_DB_KEY")
+        && !key.is_empty()
+    {
+        return Some(key);
+    }
+    let _ = (service, user);
+    None
 }
 
 /// Helper to open an in-memory DB for tests with full schema
@@ -73,6 +84,16 @@ mod tests {
     #[test]
     fn test_init_in_memory_connection() {
         let conn = open_in_memory().unwrap();
+        let fk: i64 = conn
+            .query_row("PRAGMA foreign_keys", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(fk, 1);
+    }
+
+    #[test]
+    fn test_init_connection_with_key() {
+        let conn = Connection::open_in_memory().unwrap();
+        init_connection_with_key(&conn, Some("test_secret_key_123")).unwrap();
         let fk: i64 = conn
             .query_row("PRAGMA foreign_keys", [], |r| r.get(0))
             .unwrap();

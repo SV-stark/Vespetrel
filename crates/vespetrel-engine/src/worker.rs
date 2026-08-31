@@ -19,11 +19,30 @@ pub enum WorkerCommand {
     },
 }
 
+#[derive(Clone)]
+pub enum WorkerEventSender {
+    Mpsc(mpsc::UnboundedSender<SyncEvent>),
+    Flume(flume::Sender<SyncEvent>),
+}
+
+impl WorkerEventSender {
+    pub fn send(&self, ev: SyncEvent) {
+        match self {
+            Self::Mpsc(tx) => {
+                let _ = tx.send(ev);
+            }
+            Self::Flume(tx) => {
+                let _ = tx.send(ev);
+            }
+        }
+    }
+}
+
 /// One Actor per account - §3.2 Sync Engine
 pub struct AccountWorker {
     pub account_id: String,
     pub provider: Arc<dyn MailProvider>,
-    pub event_tx: mpsc::UnboundedSender<SyncEvent>,
+    pub event_tx: WorkerEventSender,
     pub cmd_rx: mpsc::UnboundedReceiver<WorkerCommand>,
     pub poll_interval: Duration,
     pub storage_pool: Option<deadpool_sqlite::Pool>,
@@ -39,7 +58,23 @@ impl AccountWorker {
         Self {
             account_id: account_id.into(),
             provider,
-            event_tx,
+            event_tx: WorkerEventSender::Mpsc(event_tx),
+            cmd_rx,
+            poll_interval: Duration::from_secs(60),
+            storage_pool: None,
+        }
+    }
+
+    pub fn new_with_flume(
+        account_id: impl Into<String>,
+        provider: Arc<dyn MailProvider>,
+        event_tx: flume::Sender<SyncEvent>,
+        cmd_rx: mpsc::UnboundedReceiver<WorkerCommand>,
+    ) -> Self {
+        Self {
+            account_id: account_id.into(),
+            provider,
+            event_tx: WorkerEventSender::Flume(event_tx),
             cmd_rx,
             poll_interval: Duration::from_secs(60),
             storage_pool: None,
@@ -302,6 +337,6 @@ impl AccountWorker {
     }
 
     fn emit(&self, ev: SyncEvent) {
-        let _ = self.event_tx.send(ev);
+        self.event_tx.send(ev);
     }
 }

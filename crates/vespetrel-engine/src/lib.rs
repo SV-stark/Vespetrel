@@ -126,4 +126,37 @@ mod tests {
         assert!(got_messages);
         coord.stop_all();
     }
+
+    #[tokio::test]
+    async fn coordinator_bounded_flume_spawns_and_dispatches_events() {
+        let (mut coord, rx) = SyncCoordinator::create_bounded(256);
+        let provider = Arc::new(MockProvider);
+
+        coord.spawn_worker("user-bounded@domain.com", provider);
+
+        let mut got_folders = false;
+        let mut got_messages = false;
+
+        while let Ok(ev) = rx.recv_async().await {
+            match ev {
+                vespetrel_core::provider::SyncEvent::FolderListUpdated(f) => {
+                    assert_eq!(f.len(), 1);
+                    got_folders = true;
+                }
+                vespetrel_core::provider::SyncEvent::MessagesInserted(m) => {
+                    assert_eq!(m.len(), 1);
+                    assert_eq!(m[0].subject.as_deref(), Some("Message 101"));
+                    got_messages = true;
+                }
+                vespetrel_core::provider::SyncEvent::SyncFinished { .. } => {
+                    break;
+                }
+                _ => {}
+            }
+        }
+
+        assert!(got_folders);
+        assert!(got_messages);
+        coord.stop_all();
+    }
 }
