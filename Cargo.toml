@@ -52,7 +52,7 @@ rustls = { version = "0.23", default-features = false, features = ["aws_lc_rs"] 
 oauth2 = "4.4"
 keyring = { version = "4.1", features = ["apple-native-keyring-store", "windows-native-keyring-store", "linux-keyutils-keyring-store"] }
 rpgp = { package = "pgp", version = "0.14" }
-x509-cert = "0.2"
+x509-cert = "0.3"
 cms = "0.2"
 zeroize = { version = "1.8", features = ["zeroize_derive"] }
 
