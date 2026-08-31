@@ -55,7 +55,7 @@ pub fn init_connection_with_key(
 ) -> anyhow::Result<()> {
     if let Some(key) = encryption_key {
         let escaped_key = key.replace('\'', "''");
-        let _ = conn.execute_batch(&format!("PRAGMA key = '{escaped_key}'"));
+        conn.execute_batch(&format!("PRAGMA key = '{escaped_key}'"))?;
     }
     for pragma in PRAGMAS {
         conn.execute_batch(pragma)?;

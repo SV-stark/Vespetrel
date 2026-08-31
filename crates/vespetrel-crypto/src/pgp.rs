@@ -165,6 +165,31 @@ impl PgpEngine {
                 "no recipient public keys provided".into(),
             ));
         }
+
+        // Try parsing recipient keys with rpgp
+        let mut parsed_keys = Vec::new();
+        for key_str in recipient_keys {
+            if let Ok((pub_key, _)) =
+                rpgp::composed::SignedPublicKey::from_armor_single(key_str.as_bytes())
+            {
+                parsed_keys.push(pub_key);
+            }
+        }
+
+        if !parsed_keys.is_empty() {
+            let lit_msg = rpgp::composed::Message::new_literal("", plaintext);
+            let mut rng = rand::thread_rng();
+            let key_refs: Vec<&rpgp::composed::SignedPublicKey> = parsed_keys.iter().collect();
+            if let Ok(encrypted_msg) = lit_msg.encrypt_to_keys_seipdv1(
+                &mut rng,
+                rpgp::crypto::sym::SymmetricKeyAlgorithm::AES256,
+                &key_refs,
+            ) && let Ok(armored) = encrypted_msg.to_armored_string(None.into())
+            {
+                return Ok(armored);
+            }
+        }
+
         use base64::Engine;
         let b64 = base64::engine::general_purpose::STANDARD.encode(plaintext);
         Ok(format!(

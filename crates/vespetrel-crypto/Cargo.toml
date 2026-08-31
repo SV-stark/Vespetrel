@@ -25,4 +25,5 @@ anyhow = { workspace = true }
 base64 = "0.22"
 urlencoding = { workspace = true }
 ring = { workspace = true }
+rand = { workspace = true }
 

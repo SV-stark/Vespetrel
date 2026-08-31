@@ -162,21 +162,22 @@ pub fn parse_jmap_mailbox_response(resp: &serde_json::Value) -> Vec<RemoteFolder
 impl MailProvider for JmapProvider {
     async fn sync_folder_list(&self) -> anyhow::Result<Vec<RemoteFolder>> {
         debug!(url=%self.config.base_url, "JMAP sync_folder_list");
-        if self.config.base_url.starts_with("http") && !self.config.access_token.is_empty() {
+        if self.config.base_url.starts_with("http")
+            && !self.config.access_token.is_empty()
+            && !self.config.access_token.starts_with("mock_")
+        {
             let req = self.build_get_mailboxes_request();
-            if let Ok(resp) = self
+            let resp = self
                 .http
                 .post(&self.config.base_url)
                 .bearer_auth(&self.config.access_token)
                 .json(&req)
                 .send()
-                .await
-                && let Ok(json) = resp.json::<serde_json::Value>().await
-            {
-                let folders = parse_jmap_mailbox_response(&json);
-                if !folders.is_empty() {
-                    return Ok(folders);
-                }
+                .await?;
+            let json = resp.error_for_status()?.json::<serde_json::Value>().await?;
+            let folders = parse_jmap_mailbox_response(&json);
+            if !folders.is_empty() {
+                return Ok(folders);
             }
         }
 
@@ -203,43 +204,44 @@ impl MailProvider for JmapProvider {
 
     async fn sync_messages(&self, folder: &Folder, state: SyncState) -> anyhow::Result<SyncDelta> {
         debug!(folder=%folder.name, state=?state.jmap_state, "JMAP sync_messages");
-        if self.config.base_url.starts_with("http") && !self.config.access_token.is_empty() {
+        if self.config.base_url.starts_with("http")
+            && !self.config.access_token.is_empty()
+            && !self.config.access_token.starts_with("mock_")
+        {
             let req = self.build_email_query_request(&folder.remote_id, 50);
-            if let Ok(resp) = self
+            let resp = self
                 .http
                 .post(&self.config.base_url)
                 .bearer_auth(&self.config.access_token)
                 .json(&req)
                 .send()
-                .await
-                && let Ok(json) = resp.json::<serde_json::Value>().await
+                .await?;
+            let json = resp.error_for_status()?.json::<serde_json::Value>().await?;
+            let mut delta = SyncDelta::default();
+            if let Some(list) = json
+                .pointer("/methodResponses/1/1/list")
+                .and_then(|v| v.as_array())
             {
-                let mut delta = SyncDelta::default();
-                if let Some(list) = json
-                    .pointer("/methodResponses/1/1/list")
-                    .and_then(|v| v.as_array())
-                {
-                    for (idx, item) in list.iter().enumerate() {
-                        let id = item.get("id").and_then(|v| v.as_str()).unwrap_or_default();
-                        let subject = item
-                            .get("subject")
-                            .and_then(|v| v.as_str())
-                            .unwrap_or("No Subject");
-                        let from = item
-                            .pointer("/from/0/email")
-                            .and_then(|v| v.as_str())
-                            .unwrap_or("sender@jmap.example");
-                        let raw = format!("From: {from}\r\nSubject: {subject}\r\nMessage-ID: <{id}@jmap.example>\r\n\r\nJMAP Message Content").into_bytes();
-                        delta.inserted.push(vespetrel_core::provider::SyncMessage {
-                            remote_uid: (idx + 1) as u32,
-                            raw_rfc822: Some(raw),
-                            flags: vec![],
-                            mod_seq: None,
-                        });
-                    }
+                for (idx, item) in list.iter().enumerate() {
+                    let id = item.get("id").and_then(|v| v.as_str()).unwrap_or_default();
+                    let subject = item
+                        .get("subject")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("No Subject");
+                    let from = item
+                        .pointer("/from/0/email")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("sender@jmap.example");
+                    let raw = format!("From: {from}\r\nSubject: {subject}\r\nMessage-ID: <{id}@jmap.example>\r\n\r\nJMAP Message Content").into_bytes();
+                    delta.inserted.push(vespetrel_core::provider::SyncMessage {
+                        remote_uid: (idx + 1) as u32,
+                        raw_rfc822: Some(raw),
+                        flags: vec![],
+                        mod_seq: None,
+                    });
                 }
-                return Ok(delta);
             }
+            return Ok(delta);
         }
         info!(folder=%folder.name, "JMAP delta sync completed");
         Ok(SyncDelta::default())
@@ -247,23 +249,24 @@ impl MailProvider for JmapProvider {
 
     async fn fetch_raw_message(&self, remote_id: &str) -> anyhow::Result<Vec<u8>> {
         debug!(remote_id, "JMAP fetch_raw_message");
-        if self.config.base_url.starts_with("http") && !self.config.access_token.is_empty() {
+        if self.config.base_url.starts_with("http")
+            && !self.config.access_token.is_empty()
+            && !self.config.access_token.starts_with("mock_")
+        {
             let download_url = format!(
                 "{}/download/{}/{}",
                 self.config.base_url.trim_end_matches('/'),
                 self.config.username,
                 remote_id
             );
-            if let Ok(resp) = self
+            let resp = self
                 .http
                 .get(&download_url)
                 .bearer_auth(&self.config.access_token)
                 .send()
-                .await
-                && let Ok(bytes) = resp.bytes().await
-            {
-                return Ok(bytes.to_vec());
-            }
+                .await?;
+            let bytes = resp.error_for_status()?.bytes().await?;
+            return Ok(bytes.to_vec());
         }
         Ok(format!(
             "From: jmap@example.com\r\nSubject: JMAP {}\r\n\r\nJMAP Message Body",

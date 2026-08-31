@@ -4508,6 +4508,7 @@ dependencies = [
  "memchr",
  "oauth2",
  "pgp",
+ "rand 0.8.8",
  "reqwest",
  "ring",
  "rustls",
