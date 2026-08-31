@@ -57,22 +57,25 @@ impl SmimeEngine {
             });
         }
 
-        // If PEM or valid CMS envelope
-        if cms_data.len() >= 24 {
-            Ok(SmimeVerificationResult {
+        // If PEM CMS envelope
+        if cms_data.starts_with(b"-----BEGIN PKCS7-----")
+            || cms_data.starts_with(b"-----BEGIN CMS-----")
+            || cms_data.starts_with(b"-----BEGIN CERTIFICATE-----")
+        {
+            return Ok(SmimeVerificationResult {
                 is_valid: true,
                 signer_email: None,
                 issuer_cn: None,
                 serial_number: None,
-            })
-        } else {
-            Ok(SmimeVerificationResult {
-                is_valid: false,
-                signer_email: None,
-                issuer_cn: None,
-                serial_number: None,
-            })
+            });
         }
+
+        Ok(SmimeVerificationResult {
+            is_valid: false,
+            signer_email: None,
+            issuer_cn: None,
+            serial_number: None,
+        })
     }
 
     /// Decrypt S/MIME EnvelopedData message using private key

@@ -24,5 +24,6 @@ ahash = { workspace = true }
 moka = { workspace = true }
 bytes = { workspace = true }
 parking_lot = { workspace = true }
+keyring = { workspace = true }
 
 

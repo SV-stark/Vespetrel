@@ -115,7 +115,7 @@ impl PgpEngine {
 
     /// Decrypt an OpenPGP message (RFC 9580 v6, AEAD)
     pub fn decrypt(&self, armored: &str, private_key: &str) -> Result<String, PgpError> {
-        let payload = self.parse_armored_message(armored)?;
+        let _payload = self.parse_armored_message(armored)?;
         if private_key.is_empty() {
             return Err(PgpError::KeyNotFound(
                 "empty private key supplied for decryption".into(),
@@ -153,7 +153,9 @@ impl PgpEngine {
                 return Ok(message.join("\n"));
             }
         }
-        Ok(format!("Decrypted: {payload}"))
+        Err(PgpError::Decrypt(
+            "failed to decrypt OpenPGP packet: invalid ciphertext or missing secret key".into(),
+        ))
     }
 
     /// Encrypt to recipient keys

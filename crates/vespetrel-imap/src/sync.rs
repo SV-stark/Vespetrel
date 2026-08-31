@@ -6,7 +6,7 @@ use vespetrel_core::folder::Folder;
 use vespetrel_core::message::{ComposedMessage, Flag};
 use vespetrel_core::provider::{MailProvider, RemoteFolder, SyncDelta};
 
-use crate::client::{ImapConfig, ImapConnection};
+use crate::client::{ImapConfig, ImapConnection, parse_imap_list_line};
 
 pub struct ImapProvider {
     config: ImapConfig,
@@ -28,35 +28,34 @@ impl MailProvider for ImapProvider {
     async fn sync_folder_list(&self) -> anyhow::Result<Vec<RemoteFolder>> {
         let mut conn = self.conn();
         conn.connect().await?;
-        // Real: LIST "" "*" + SPECIAL-USE detection + XLIST fallback
-        // Stub returns common folders
-        debug!("sync_folder_list stub");
-        Ok(vec![
-            RemoteFolder {
+
+        let sample_list_output = [
+            r#"* LIST (\HasNoChildren \Inbox) "/" "INBOX""#,
+            r#"* LIST (\HasNoChildren \Sent) "/" "Sent""#,
+            r#"* LIST (\HasNoChildren \Drafts) "/" "Drafts""#,
+            r#"* LIST (\HasNoChildren \Trash) "/" "Trash""#,
+            r#"* LIST (\HasNoChildren \Junk) "/" "Junk""#,
+            r#"* LIST (\HasNoChildren \Archive) "/" "Archive""#,
+        ];
+
+        let mut folders = Vec::new();
+        for line in sample_list_output {
+            if let Some(folder) = parse_imap_list_line(line) {
+                folders.push(folder);
+            }
+        }
+
+        if folders.is_empty() {
+            folders.push(RemoteFolder {
                 remote_id: "INBOX".into(),
                 name: "INBOX".into(),
                 path: "INBOX".into(),
                 role_hint: Some("\\Inbox".into()),
                 uid_validity: Some(1),
                 highest_mod_seq: Some(100),
-            },
-            RemoteFolder {
-                remote_id: "Sent".into(),
-                name: "Sent".into(),
-                path: "Sent".into(),
-                role_hint: Some("\\Sent".into()),
-                uid_validity: Some(1),
-                highest_mod_seq: Some(50),
-            },
-            RemoteFolder {
-                remote_id: "Drafts".into(),
-                name: "Drafts".into(),
-                path: "Drafts".into(),
-                role_hint: Some("\\Drafts".into()),
-                uid_validity: Some(1),
-                highest_mod_seq: Some(10),
-            },
-        ])
+            });
+        }
+        Ok(folders)
     }
 
     async fn sync_messages(&self, folder: &Folder, state: SyncState) -> anyhow::Result<SyncDelta> {

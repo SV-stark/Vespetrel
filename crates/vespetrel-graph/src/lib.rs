@@ -313,13 +313,14 @@ impl MailProvider for GraphProvider {
         if !self.config.access_token.is_empty() && !self.config.access_token.starts_with("mock_") {
             let payload = self.build_send_mail_payload(msg);
             let url = "https://graph.microsoft.com/v1.0/me/sendMail";
-            let _ = self
+            let resp = self
                 .http
                 .post(url)
                 .bearer_auth(&self.config.access_token)
                 .json(&payload)
                 .send()
-                .await;
+                .await?;
+            let _ = resp.error_for_status()?;
         }
         Ok(())
     }
@@ -344,13 +345,14 @@ impl MailProvider for GraphProvider {
                 for uid in remote_ids {
                     let url = format!("https://graph.microsoft.com/v1.0/me/messages/{uid}");
                     let body = serde_json::json!({ "isRead": read_val });
-                    let _ = self
+                    let resp = self
                         .http
                         .patch(&url)
                         .bearer_auth(&self.config.access_token)
                         .json(&body)
                         .send()
-                        .await;
+                        .await?;
+                    let _ = resp.error_for_status()?;
                 }
             }
         }

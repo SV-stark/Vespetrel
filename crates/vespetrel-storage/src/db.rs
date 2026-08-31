@@ -17,13 +17,23 @@ pub const PRAGMAS: &[&str] = &[
 pub type StoragePool = Pool;
 
 pub fn create_pool(db_path: &str) -> anyhow::Result<StoragePool> {
+    let key = get_keyring_encryption_key("vespetrel", "db_key");
+    create_pool_with_key(db_path, key.as_deref())
+}
+
+pub fn create_pool_with_key(
+    db_path: &str,
+    encryption_key: Option<&str>,
+) -> anyhow::Result<StoragePool> {
+    let key_owned = encryption_key.map(|s| s.to_string());
     let mut cfg = PoolConfig::new(db_path);
     cfg.pool = Some(deadpool_sqlite::PoolConfig::new(8));
     let pool = cfg
         .builder(Runtime::Tokio1)?
-        .post_create(Hook::async_fn(|conn, _metrics| {
+        .post_create(Hook::async_fn(move |conn, _metrics| {
+            let key = key_owned.clone();
             Box::pin(async move {
-                conn.interact(|c| init_connection(c))
+                conn.interact(move |c| init_connection_with_key(c, key.as_deref()))
                     .await
                     .map_err(|e| HookError::message(e.to_string()))?
                     .map_err(|e| HookError::message(e.to_string()))
@@ -66,7 +76,12 @@ pub fn get_keyring_encryption_key(service: &str, user: &str) -> Option<String> {
     {
         return Some(key);
     }
-    let _ = (service, user);
+    if let Ok(entry) = keyring::Entry::new(service, user)
+        && let Ok(secret) = entry.get_password()
+        && !secret.is_empty()
+    {
+        return Some(secret);
+    }
     None
 }
 

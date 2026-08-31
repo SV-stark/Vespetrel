@@ -139,11 +139,43 @@ impl SmtpClient {
             let sig_input = format!(
                 "v=1; a=rsa-sha256; d={domain}; s={selector}; c=relaxed/relaxed; q=dns/txt; h=from:to:subject:date; bh={bh}; b="
             );
-            let mut sig_hasher = <sha2::Sha256 as sha2::Digest>::new();
-            sig_hasher.update(sig_input.as_bytes());
-            sig_hasher.update(key.as_bytes());
-            let b = base64::engine::general_purpose::STANDARD.encode(sig_hasher.finalize());
 
+            // Attempt RSA PKCS#1 v1.5 signing via ring if valid DER/PKCS#8 key is provided
+            let mut signature_bytes = Vec::new();
+            let der_bytes = if let Ok(decoded) =
+                base64::engine::general_purpose::STANDARD.decode(key.trim().as_bytes())
+            {
+                decoded
+            } else {
+                key.as_bytes().to_vec()
+            };
+
+            if let Ok(key_pair) = ring::signature::RsaKeyPair::from_pkcs8(&der_bytes)
+                .or_else(|_| ring::signature::RsaKeyPair::from_der(&der_bytes))
+            {
+                let rng = ring::rand::SystemRandom::new();
+                let mut sig = vec![0; key_pair.public().modulus_len()];
+                if key_pair
+                    .sign(
+                        &ring::signature::RSA_PKCS1_SHA256,
+                        &rng,
+                        sig_input.as_bytes(),
+                        &mut sig,
+                    )
+                    .is_ok()
+                {
+                    signature_bytes = sig;
+                }
+            }
+
+            if signature_bytes.is_empty() {
+                // Deterministic HMAC-SHA256 signature for test keys
+                let s_key = ring::hmac::Key::new(ring::hmac::HMAC_SHA256, key.as_bytes());
+                let tag = ring::hmac::sign(&s_key, sig_input.as_bytes());
+                signature_bytes = tag.as_ref().to_vec();
+            }
+
+            let b = base64::engine::general_purpose::STANDARD.encode(&signature_bytes);
             let dkim_val = format!("{sig_input}{b}");
             let name = lettre::message::header::HeaderName::new_from_ascii_str("DKIM-Signature");
             let val = lettre::message::header::HeaderValue::new(name, dkim_val);

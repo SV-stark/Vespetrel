@@ -310,13 +310,14 @@ impl MailProvider for JmapProvider {
                     ]
                 ]
             });
-            let _ = self
+            let resp = self
                 .http
                 .post(&self.config.base_url)
                 .bearer_auth(&self.config.access_token)
                 .json(&req)
                 .send()
-                .await;
+                .await?;
+            let _ = resp.error_for_status()?;
         }
         Ok(())
     }
@@ -365,13 +366,14 @@ impl MailProvider for JmapProvider {
                         ]
                     ]
                 });
-                let _ = self
+                let resp = self
                     .http
                     .post(&self.config.base_url)
                     .bearer_auth(&self.config.access_token)
                     .json(&req)
                     .send()
-                    .await;
+                    .await?;
+                let _ = resp.error_for_status()?;
             }
         }
         Ok(())
