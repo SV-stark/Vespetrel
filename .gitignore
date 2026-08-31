@@ -1,7 +1,82 @@
-/target
-/Cargo.lock
+# ==============================================================================
+# Vespetrel — .gitignore
+# ==============================================================================
+
+# Rust / Cargo Build Artifacts
+/target/
+**/target/
+**/*.rs.bk
+*.bk
+
+# SQLite databases & Write-Ahead Logs
 *.db
 *.db-wal
 *.db-shm
+*.db-journal
+*.sqlite
+*.sqlite3
+*.sqlite-wal
+*.sqlite-shm
+*.sqlite-journal
+
+# Vespetrel Storage Blobs & Caches
 /blobs/
+**/blobs/
+*.blob
+*.lz4
+*.zst
+*.tmp
+vespetrel-test-*
+
+# Environment, Secrets & Credentials
 .env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+*.pfx
+*.keystore
+credentials.json
+token.json
+client_secret*.json
+
+# Logs, Profiling & Crash Reports
+*.log
+logs/
+perf.data*
+flamegraph.svg
+crash.dump
+core.*
+
+# Operating System Files
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+._*
+# Windows
+Thumbs.db
+Thumbs.db:encryptable
+ehthumbs.db
+ehthumbs_vista.db
+desktop.ini
+$RECYCLE.BIN/
+# Linux
+*~
+.fuse_hidden*
+.directory
+
+# IDE & Editor Configurations
+.idea/
+.vscode/*
+!.vscode/settings.json
+!.vscode/tasks.json
+!.vscode/launch.json
+!.vscode/extensions.json
+*.swp
+*.swo
+*.sublime-project
+*.sublime-workspace
+.helix/
+
