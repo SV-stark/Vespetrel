@@ -45,7 +45,7 @@ regex = { workspace = true }
 
 [target.'cfg(windows)'.dependencies]
 winreg = "0.52"
-windows-sys = { version = "0.52", features = ["Win32_UI_HiDpi"] }
+windows-sys = { version = "0.61", features = ["Win32_UI_HiDpi"] }
 
 # wry / gpui are intentionally NOT listed here to keep `cargo check` offline-friendly.
 # To enable: add `wry = { workspace = true, optional = true }` and gpui git deps, then set `gpui = ["dep:wry"]`
