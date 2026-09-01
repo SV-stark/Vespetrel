@@ -73,22 +73,38 @@ impl RichTextDocument {
         if snapped.is_empty() {
             return;
         }
+        let clean_url = sanitize_link_url(&url.into());
         self.spans.push(TextSpan {
             range: snapped,
             style: InlineStyle::Underline,
-            link_url: Some(url.into()),
+            link_url: Some(clean_url),
         });
     }
 
     /// TipTap-style markdown inline input rule parser
-    /// Converts `**bold**`, `*italic*`, `# heading`, `- list` into spans and blocks
+    /// Converts `**bold**`, `*italic*`, `_italic_`, `# heading`, `- list`, `1. list`, ` ``` ` into spans and blocks
     pub fn parse_markdown(markdown: &str) -> Self {
         let mut doc = Self::default();
         let mut current_offset = 0;
+        let mut in_code_block = false;
+        let mut code_lang = None;
 
         for line in markdown.lines() {
-            let line_trimmed = line.trim_start();
-            let (block_kind, text_content) = if let Some(h3) = line_trimmed.strip_prefix("### ") {
+            let line_trimmed = line.trim();
+            if line_trimmed.starts_with("```") {
+                if in_code_block {
+                    in_code_block = false;
+                    code_lang = None;
+                } else {
+                    in_code_block = true;
+                    code_lang = line_trimmed.strip_prefix("```").map(|s| s.trim().to_string()).filter(|s| !s.is_empty());
+                }
+                continue;
+            }
+
+            let (block_kind, text_content) = if in_code_block {
+                (BlockKind::CodeBlock(code_lang.clone()), line)
+            } else if let Some(h3) = line_trimmed.strip_prefix("### ") {
                 (BlockKind::Heading(3), h3)
             } else if let Some(h2) = line_trimmed.strip_prefix("## ") {
                 (BlockKind::Heading(2), h2)
@@ -99,6 +115,11 @@ impl RichTextDocument {
                 .or_else(|| line_trimmed.strip_prefix("* "))
             {
                 (BlockKind::BulletList, bullet)
+            } else if let Some(dot_idx) = line_trimmed.find(". ")
+                && line_trimmed[..dot_idx].chars().all(|c| c.is_ascii_digit())
+                && let Ok(num) = line_trimmed[..dot_idx].parse::<usize>()
+            {
+                (BlockKind::NumberedList(num), &line_trimmed[dot_idx + 2..])
             } else if let Some(quote) = line_trimmed.strip_prefix("> ") {
                 (BlockKind::Blockquote, quote)
             } else {
@@ -293,6 +314,30 @@ fn parse_inline_markdown(line: &str, base_offset: usize) -> (String, Vec<TextSpa
                 plain.push_str("**");
                 plain.push_str(&bold_content);
             }
+        } else if c == '*' || c == '_' {
+            let delimiter = c;
+            let mut italic_content = String::new();
+            let mut closed = false;
+            while let Some(ic) = chars.next() {
+                if ic == delimiter {
+                    closed = true;
+                    break;
+                }
+                italic_content.push(ic);
+            }
+            if closed && !italic_content.is_empty() {
+                let start = base_offset + plain.len();
+                let end = start + italic_content.len();
+                plain.push_str(&italic_content);
+                spans.push(TextSpan {
+                    range: start..end,
+                    style: InlineStyle::Italic,
+                    link_url: None,
+                });
+            } else {
+                plain.push(delimiter);
+                plain.push_str(&italic_content);
+            }
         } else if c == '`' {
             let mut code_content = String::new();
             let mut closed = false;
@@ -449,11 +494,18 @@ fn render_inline_spans(full_text: &str, block_range: Range<usize>, spans: &[Text
 }
 
 fn html_escape(s: &str) -> String {
-    s.replace('&', "&amp;")
-        .replace('<', "&lt;")
-        .replace('>', "&gt;")
-        .replace('"', "&quot;")
-        .replace('\'', "&#39;")
+    let mut out = String::with_capacity(s.len() + s.len() / 8);
+    for c in s.chars() {
+        match c {
+            '&' => out.push_str("&amp;"),
+            '<' => out.push_str("&lt;"),
+            '>' => out.push_str("&gt;"),
+            '"' => out.push_str("&quot;"),
+            '\'' => out.push_str("&#39;"),
+            other => out.push(other),
+        }
+    }
+    out
 }
 
 #[cfg(test)]

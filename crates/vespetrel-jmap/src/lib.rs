@@ -160,7 +160,7 @@ pub fn parse_jmap_mailbox_response(resp: &serde_json::Value) -> Vec<RemoteFolder
 
 #[async_trait]
 impl MailProvider for JmapProvider {
-    async fn sync_folder_list(&self) -> anyhow::Result<Vec<RemoteFolder>> {
+    async fn sync_folder_list(&self) -> Result<Vec<RemoteFolder>, vespetrel_core::provider::ProviderError> {
         debug!(url=%self.config.base_url, "JMAP sync_folder_list");
         if self.config.base_url.starts_with("http")
             && !self.config.access_token.is_empty()
@@ -173,8 +173,14 @@ impl MailProvider for JmapProvider {
                 .bearer_auth(&self.config.access_token)
                 .json(&req)
                 .send()
-                .await?;
-            let json = resp.error_for_status()?.json::<serde_json::Value>().await?;
+                .await
+                .map_err(|e| vespetrel_core::provider::ProviderError::Protocol(e.to_string()))?;
+            let json = resp
+                .error_for_status()
+                .map_err(|e| vespetrel_core::provider::ProviderError::Protocol(e.to_string()))?
+                .json::<serde_json::Value>()
+                .await
+                .map_err(|e| vespetrel_core::provider::ProviderError::Protocol(e.to_string()))?;
             let folders = parse_jmap_mailbox_response(&json);
             if !folders.is_empty() {
                 return Ok(folders);
@@ -202,7 +208,7 @@ impl MailProvider for JmapProvider {
         ])
     }
 
-    async fn sync_messages(&self, folder: &Folder, state: SyncState) -> anyhow::Result<SyncDelta> {
+    async fn sync_messages(&self, folder: &Folder, state: SyncState) -> Result<SyncDelta, vespetrel_core::provider::ProviderError> {
         debug!(folder=%folder.name, state=?state.jmap_state, "JMAP sync_messages");
         if self.config.base_url.starts_with("http")
             && !self.config.access_token.is_empty()
@@ -215,8 +221,14 @@ impl MailProvider for JmapProvider {
                 .bearer_auth(&self.config.access_token)
                 .json(&req)
                 .send()
-                .await?;
-            let json = resp.error_for_status()?.json::<serde_json::Value>().await?;
+                .await
+                .map_err(|e| vespetrel_core::provider::ProviderError::Protocol(e.to_string()))?;
+            let json = resp
+                .error_for_status()
+                .map_err(|e| vespetrel_core::provider::ProviderError::Protocol(e.to_string()))?
+                .json::<serde_json::Value>()
+                .await
+                .map_err(|e| vespetrel_core::provider::ProviderError::Protocol(e.to_string()))?;
             let mut delta = SyncDelta::default();
             if let Some(list) = json
                 .pointer("/methodResponses/1/1/list")
@@ -247,7 +259,7 @@ impl MailProvider for JmapProvider {
         Ok(SyncDelta::default())
     }
 
-    async fn fetch_raw_message(&self, remote_id: &str) -> anyhow::Result<Vec<u8>> {
+    async fn fetch_raw_message(&self, remote_id: &str) -> Result<Vec<u8>, vespetrel_core::provider::ProviderError> {
         debug!(remote_id, "JMAP fetch_raw_message");
         if self.config.base_url.starts_with("http")
             && !self.config.access_token.is_empty()
@@ -264,8 +276,14 @@ impl MailProvider for JmapProvider {
                 .get(&download_url)
                 .bearer_auth(&self.config.access_token)
                 .send()
-                .await?;
-            let bytes = resp.error_for_status()?.bytes().await?;
+                .await
+                .map_err(|e| vespetrel_core::provider::ProviderError::Protocol(e.to_string()))?;
+            let bytes = resp
+                .error_for_status()
+                .map_err(|e| vespetrel_core::provider::ProviderError::Protocol(e.to_string()))?
+                .bytes()
+                .await
+                .map_err(|e| vespetrel_core::provider::ProviderError::Protocol(e.to_string()))?;
             return Ok(bytes.to_vec());
         }
         Ok(format!(
@@ -275,7 +293,7 @@ impl MailProvider for JmapProvider {
         .into_bytes())
     }
 
-    async fn send_message(&self, msg: &ComposedMessage) -> anyhow::Result<()> {
+    async fn send_message(&self, msg: &ComposedMessage) -> Result<(), vespetrel_core::provider::ProviderError> {
         info!(subject=%msg.subject, "JMAP EmailSubmission");
         if self.config.base_url.starts_with("http")
             && !self.config.access_token.is_empty()
@@ -322,8 +340,11 @@ impl MailProvider for JmapProvider {
                 .bearer_auth(&self.config.access_token)
                 .json(&req)
                 .send()
-                .await?;
-            let _ = resp.error_for_status()?;
+                .await
+                .map_err(|e| vespetrel_core::provider::ProviderError::Protocol(e.to_string()))?;
+            let _ = resp
+                .error_for_status()
+                .map_err(|e| vespetrel_core::provider::ProviderError::Protocol(e.to_string()))?;
         }
         Ok(())
     }
@@ -333,7 +354,7 @@ impl MailProvider for JmapProvider {
         remote_ids: &[u32],
         add: &[Flag],
         remove: &[Flag],
-    ) -> anyhow::Result<()> {
+    ) -> Result<(), vespetrel_core::provider::ProviderError> {
         debug!(uids=?remote_ids, add=?add, remove=?remove, "JMAP Email/set keywords");
         if self.config.base_url.starts_with("http")
             && !self.config.access_token.is_empty()
@@ -381,8 +402,11 @@ impl MailProvider for JmapProvider {
                     .bearer_auth(&self.config.access_token)
                     .json(&req)
                     .send()
-                    .await?;
-                let _ = resp.error_for_status()?;
+                    .await
+                    .map_err(|e| vespetrel_core::provider::ProviderError::Protocol(e.to_string()))?;
+                let _ = resp
+                    .error_for_status()
+                    .map_err(|e| vespetrel_core::provider::ProviderError::Protocol(e.to_string()))?;
             }
         }
         Ok(())

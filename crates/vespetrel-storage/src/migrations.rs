@@ -13,18 +13,20 @@ pub fn run_migrations(conn: &Connection) -> anyhow::Result<()> {
         "#,
     )?;
 
+    let user_ver: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0)).unwrap_or(0);
+
     // Check if migration version 1 has been applied
-    let is_v1_applied: bool = conn
+    let is_v1_applied: bool = user_ver >= 1 || conn
         .query_row(
             "SELECT count(*) FROM _schema_migrations WHERE version = 1",
             [],
             |r| r.get::<_, i64>(0),
         )
-        .map(|count| count > 0)?;
+        .map(|count| count > 0)
+        .unwrap_or(false);
 
     if !is_v1_applied {
-        let tx = conn.unchecked_transaction()?;
-        tx.execute_batch(
+        conn.execute_batch(
             r#"
             -- Accounts
 
@@ -233,26 +235,26 @@ pub fn run_migrations(conn: &Connection) -> anyhow::Result<()> {
 
         // Record migration version 1
         let now = chrono::Utc::now().timestamp();
-        tx.execute(
+        conn.execute(
             "INSERT OR IGNORE INTO _schema_migrations (version, name, applied_at) VALUES (1, 'initial_schema_fts5', ?1)",
             [now],
         )?;
-        tx.commit()?;
+        conn.execute_batch("PRAGMA user_version = 1")?;
     }
 
     // Check if migration version 2 has been applied (FTS5 unicode61 remove_diacritics 2 + rebuild)
-    let is_v2_applied: bool = conn
+    let is_v2_applied: bool = user_ver >= 2 || conn
         .query_row(
             "SELECT count(*) FROM _schema_migrations WHERE version = 2",
             [],
             |r| r.get::<_, i64>(0),
         )
-        .map(|count| count > 0)?;
+        .map(|count| count > 0)
+        .unwrap_or(false);
 
     if !is_v2_applied {
-        let tx = conn.unchecked_transaction()?;
         // Recreate FTS5 table with accent-folding unicode61 tokenizer
-        tx.execute_batch(
+        conn.execute_batch(
             r#"
             DROP TABLE IF EXISTS messages_fts;
 
@@ -295,11 +297,11 @@ pub fn run_migrations(conn: &Connection) -> anyhow::Result<()> {
         )?;
 
         let now = chrono::Utc::now().timestamp();
-        tx.execute(
+        conn.execute(
             "INSERT OR IGNORE INTO _schema_migrations (version, name, applied_at) VALUES (2, 'fts5_unicode61_diacritics_rebuild', ?1)",
             [now],
         )?;
-        tx.commit()?;
+        conn.execute_batch("PRAGMA user_version = 2")?;
     }
 
     Ok(())

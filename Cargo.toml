@@ -89,6 +89,8 @@ sha2 = "0.10"
 base64 = "0.22"
 rand = "0.8"
 tempfile = "3.10"
+winreg = "0.56"
+windows-sys = { version = "0.61", features = ["Win32_UI_WindowsAndMessaging", "Win32_UI_HiDpi", "Win32_Foundation"] }
 
 
 

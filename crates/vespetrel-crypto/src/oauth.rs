@@ -82,23 +82,29 @@ impl OAuth2Engine {
         8989
     }
 
-    /// Wait for loopback OAuth2 redirect with customizable timeout, Host check and CSRF state check
-    pub async fn wait_for_callback(
+    /// Set dynamic port and update redirect_uri
+    pub fn set_redirect_port(&mut self, port: u16) {
+        self.config.redirect_uri = format!("http://127.0.0.1:{port}/callback");
+    }
+
+    /// Bind a loopback listener to 127.0.0.1 (using port 0 for OS-assigned ephemeral port)
+    pub async fn bind_loopback() -> std::io::Result<(tokio::net::TcpListener, u16)> {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+        let port = listener.local_addr()?.port();
+        Ok((listener, port))
+    }
+
+    /// Wait for loopback OAuth2 redirect on an already bound TcpListener
+    pub async fn wait_for_callback_on_listener(
         &self,
+        listener: tokio::net::TcpListener,
         timeout_secs: u64,
         expected_state: Option<&str>,
     ) -> anyhow::Result<String> {
         use std::time::Duration;
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
-        use tokio::net::TcpListener;
-
-        let port = self.redirect_port();
-        let addr = format!("127.0.0.1:{port}");
 
         let future = async {
-            info!(addr=%addr, "starting loopback listener for OAuth2 callback");
-            let listener = TcpListener::bind(&addr).await?;
-
             let (mut socket, _) = listener.accept().await?;
             let mut request_bytes = Vec::new();
             let mut chunk = [0u8; 1024];
@@ -170,6 +176,18 @@ impl OAuth2Engine {
             .map_err(|_| {
                 anyhow::anyhow!("OAuth2 callback listener timed out after {timeout_secs}s")
             })?
+    }
+
+    /// Wait for loopback OAuth2 redirect with customizable timeout, Host check and CSRF state check
+    pub async fn wait_for_callback(
+        &self,
+        timeout_secs: u64,
+        expected_state: Option<&str>,
+    ) -> anyhow::Result<String> {
+        let port = self.redirect_port();
+        let addr = format!("127.0.0.1:{port}");
+        let listener = tokio::net::TcpListener::bind(&addr).await?;
+        self.wait_for_callback_on_listener(listener, timeout_secs, expected_state).await
     }
 
     pub async fn exchange_code(

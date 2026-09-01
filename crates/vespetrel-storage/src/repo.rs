@@ -80,6 +80,58 @@ pub fn list_accounts(conn: &Connection) -> anyhow::Result<Vec<Account>> {
     rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
 }
 
+pub fn get_account(conn: &Connection, id: &str) -> anyhow::Result<Option<Account>> {
+    let mut stmt = conn.prepare("SELECT id, name, email, provider_type, auth_config, sync_state, is_active, color, created_at FROM accounts WHERE id = ?1")?;
+    stmt.query_row(params![id], |row| {
+        let id: String = row.get(0)?;
+        let pt_str: String = row.get(3)?;
+        let pt = match pt_str.parse() {
+            Ok(p) => p,
+            Err(e) => {
+                warn!(account_id=%id, error=%e, raw=%pt_str, "corrupted provider_type in DB, defaulting to Imap");
+                vespetrel_core::ProviderType::Imap
+            }
+        };
+        let auth_json: String = row.get(4)?;
+        let sync_json: String = row.get(5)?;
+        let auth_config = match serde_json::from_str(&auth_json) {
+            Ok(a) => a,
+            Err(e) => {
+                warn!(account_id=%id, error=%e, "corrupted auth_config JSON in DB");
+                Default::default()
+            }
+        };
+        let sync_state = match serde_json::from_str(&sync_json) {
+            Ok(s) => s,
+            Err(e) => {
+                warn!(account_id=%id, error=%e, "corrupted sync_state JSON in DB");
+                Default::default()
+            }
+        };
+        let created_ts: i64 = row.get(8)?;
+        let created_at = match DateTime::from_timestamp(created_ts, 0) {
+            Some(dt) => dt,
+            None => {
+                warn!(account_id=%id, timestamp=created_ts, "corrupted created_at timestamp in DB");
+                Utc::now()
+            }
+        };
+        Ok(Account {
+            id,
+            name: row.get(1)?,
+            email: row.get(2)?,
+            provider_type: pt,
+            auth_config,
+            sync_state,
+            is_active: row.get::<_, i64>(6)? != 0,
+            color: row.get(7)?,
+            created_at,
+        })
+    })
+    .optional()
+    .map_err(Into::into)
+}
+
 pub fn upsert_folder(conn: &Connection, folder: &Folder) -> anyhow::Result<()> {
     conn.execute(
         r#"INSERT INTO folders (id, account_id, remote_id, name, path, role, uid_validity, highest_mod_seq, total_count, unread_count, color)

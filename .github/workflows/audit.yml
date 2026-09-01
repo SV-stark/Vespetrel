@@ -22,9 +22,9 @@ jobs:
         with:
           tool: cargo-audit,cargo-deny,cargo-outdated
       - name: Security Audit (RustSec Advisory Database)
-        run: cargo audit --deny warnings || echo "::warning::cargo audit found advisories - check log"
+        run: cargo audit --deny warnings
       - name: License & Dependency Policy (cargo-deny)
-        run: cargo deny check || echo "::warning::cargo deny completed"
+        run: cargo deny check
       - name: Outdated Dependency Check
         run: cargo outdated --workspace || true
 

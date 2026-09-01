@@ -84,8 +84,7 @@ pub fn clean_tracking_url(raw_url: &str) -> String {
                 Some(eq_pos) => &pair[..eq_pos],
                 None => *pair,
             };
-            let key_lower = key.to_ascii_lowercase();
-            !TRACKING_SET.contains(key_lower.as_str())
+            !TRACKING_SET.iter().any(|&track| track.eq_ignore_ascii_case(key))
         })
         .collect();
 

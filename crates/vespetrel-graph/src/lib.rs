@@ -183,7 +183,7 @@ impl GraphProvider {
 
 #[async_trait]
 impl MailProvider for GraphProvider {
-    async fn sync_folder_list(&self) -> anyhow::Result<Vec<RemoteFolder>> {
+    async fn sync_folder_list(&self) -> Result<Vec<RemoteFolder>, vespetrel_core::provider::ProviderError> {
         debug!(url=%self.config.folders_url(), "Graph sync_folder_list");
         if !self.config.access_token.is_empty() && !self.config.access_token.starts_with("mock_") {
             let resp = self
@@ -191,8 +191,14 @@ impl MailProvider for GraphProvider {
                 .get(self.config.folders_url())
                 .bearer_auth(&self.config.access_token)
                 .send()
-                .await?;
-            let json = resp.error_for_status()?.json::<serde_json::Value>().await?;
+                .await
+                .map_err(|e| vespetrel_core::provider::ProviderError::Protocol(e.to_string()))?;
+            let json = resp
+                .error_for_status()
+                .map_err(|e| vespetrel_core::provider::ProviderError::Protocol(e.to_string()))?
+                .json::<serde_json::Value>()
+                .await
+                .map_err(|e| vespetrel_core::provider::ProviderError::Protocol(e.to_string()))?;
             let folders = parse_graph_folders_response(&json);
             if !folders.is_empty() {
                 return Ok(folders);
@@ -220,7 +226,7 @@ impl MailProvider for GraphProvider {
         ])
     }
 
-    async fn sync_messages(&self, folder: &Folder, state: SyncState) -> anyhow::Result<SyncDelta> {
+    async fn sync_messages(&self, folder: &Folder, state: SyncState) -> Result<SyncDelta, vespetrel_core::provider::ProviderError> {
         let url = self
             .config
             .delta_url(&folder.remote_id, state.graph_delta_token.as_deref());
@@ -232,8 +238,14 @@ impl MailProvider for GraphProvider {
                 .get(&url)
                 .bearer_auth(&self.config.access_token)
                 .send()
-                .await?;
-            let json = resp.error_for_status()?.json::<serde_json::Value>().await?;
+                .await
+                .map_err(|e| vespetrel_core::provider::ProviderError::Protocol(e.to_string()))?;
+            let json = resp
+                .error_for_status()
+                .map_err(|e| vespetrel_core::provider::ProviderError::Protocol(e.to_string()))?
+                .json::<serde_json::Value>()
+                .await
+                .map_err(|e| vespetrel_core::provider::ProviderError::Protocol(e.to_string()))?;
 
             let next_token = json
                 .get("@odata.deltaLink")
@@ -301,7 +313,7 @@ impl MailProvider for GraphProvider {
         })
     }
 
-    async fn fetch_raw_message(&self, remote_id: &str) -> anyhow::Result<Vec<u8>> {
+    async fn fetch_raw_message(&self, remote_id: &str) -> Result<Vec<u8>, vespetrel_core::provider::ProviderError> {
         debug!(remote_id, "Graph fetch MIME");
         if !self.config.access_token.is_empty() && !self.config.access_token.starts_with("mock_") {
             let mime_url = self.config.message_mime_url(remote_id);
@@ -310,8 +322,14 @@ impl MailProvider for GraphProvider {
                 .get(&mime_url)
                 .bearer_auth(&self.config.access_token)
                 .send()
-                .await?;
-            let bytes = resp.error_for_status()?.bytes().await?;
+                .await
+                .map_err(|e| vespetrel_core::provider::ProviderError::Protocol(e.to_string()))?;
+            let bytes = resp
+                .error_for_status()
+                .map_err(|e| vespetrel_core::provider::ProviderError::Protocol(e.to_string()))?
+                .bytes()
+                .await
+                .map_err(|e| vespetrel_core::provider::ProviderError::Protocol(e.to_string()))?;
             return Ok(bytes.to_vec());
         }
         Ok(format!(
@@ -321,7 +339,7 @@ impl MailProvider for GraphProvider {
         .into_bytes())
     }
 
-    async fn send_message(&self, msg: &ComposedMessage) -> anyhow::Result<()> {
+    async fn send_message(&self, msg: &ComposedMessage) -> Result<(), vespetrel_core::provider::ProviderError> {
         info!(subject=%msg.subject, "Graph sendMail");
         if !self.config.access_token.is_empty() && !self.config.access_token.starts_with("mock_") {
             let payload = self.build_send_mail_payload(msg);
@@ -332,8 +350,11 @@ impl MailProvider for GraphProvider {
                 .bearer_auth(&self.config.access_token)
                 .json(&payload)
                 .send()
-                .await?;
-            let _ = resp.error_for_status()?;
+                .await
+                .map_err(|e| vespetrel_core::provider::ProviderError::Protocol(e.to_string()))?;
+            let _ = resp
+                .error_for_status()
+                .map_err(|e| vespetrel_core::provider::ProviderError::Protocol(e.to_string()))?;
         }
         Ok(())
     }
@@ -343,7 +364,7 @@ impl MailProvider for GraphProvider {
         remote_ids: &[u32],
         add: &[Flag],
         remove: &[Flag],
-    ) -> anyhow::Result<()> {
+    ) -> Result<(), vespetrel_core::provider::ProviderError> {
         debug!(uids=?remote_ids, "Graph PATCH isRead/flag");
         if !self.config.access_token.is_empty() && !self.config.access_token.starts_with("mock_") {
             let is_read = if add.contains(&Flag::Seen) {
@@ -364,8 +385,11 @@ impl MailProvider for GraphProvider {
                         .bearer_auth(&self.config.access_token)
                         .json(&body)
                         .send()
-                        .await?;
-                    let _ = resp.error_for_status()?;
+                        .await
+                        .map_err(|e| vespetrel_core::provider::ProviderError::Protocol(e.to_string()))?;
+                    let _ = resp
+                        .error_for_status()
+                        .map_err(|e| vespetrel_core::provider::ProviderError::Protocol(e.to_string()))?;
                 }
             }
         }

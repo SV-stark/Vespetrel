@@ -21,6 +21,10 @@ RequestExecutionLevel user
 
 !insertmacro MUI_LANGUAGE "English"
 
+!ifndef VERSION
+  !define VERSION "0.1.0"
+!endif
+
 Section "Install"
     SetOutPath "$INSTDIR"
     File "staging\vespetrel\vespetrel.exe"
@@ -40,7 +44,7 @@ Section "Install"
     WriteRegStr HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\Vespetrel" "UninstallString" '"$INSTDIR\uninstall.exe"'
     WriteRegStr HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\Vespetrel" "DisplayIcon" "$INSTDIR\vespetrel.exe"
     WriteRegStr HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\Vespetrel" "Publisher" "Vespetrel Team"
-    WriteRegStr HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\Vespetrel" "DisplayVersion" "0.1.0"
+    WriteRegStr HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\Vespetrel" "DisplayVersion" "${VERSION}"
 SectionEnd
 
 Section "Uninstall"

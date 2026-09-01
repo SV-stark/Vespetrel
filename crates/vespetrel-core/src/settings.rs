@@ -220,7 +220,7 @@ impl UserSettings {
         Self::default()
     }
 
-    /// Clamp numeric fields to valid UI bounds
+    /// Clamp numeric fields to valid UI bounds and sanitize CSS/font/column strings
     pub fn sanitize(&mut self) {
         self.font_size_px = self.font_size_px.clamp(10.0, 24.0);
         self.ui_zoom_factor = self.ui_zoom_factor.clamp(0.75, 2.0);
@@ -229,6 +229,41 @@ impl UserSettings {
         self.snooze_tomorrow_hour = self.snooze_tomorrow_hour.min(23);
         self.snooze_weekend_hour = self.snooze_weekend_hour.min(23);
         self.snooze_next_week_hour = self.snooze_next_week_hour.min(23);
+
+        // Validate accent_color (must match 6-digit hex #RRGGBB)
+        let is_valid_hex = self.accent_color.len() == 7
+            && self.accent_color.starts_with('#')
+            && self.accent_color[1..].chars().all(|c| c.is_ascii_hexdigit());
+        if !is_valid_hex {
+            self.accent_color = "#3b82f6".into();
+        }
+
+        // Sanitize font family strings against CSS injection characters (<, >, ;, {, }, ", ')
+        fn sanitize_font(s: &mut String, default_font: &str) {
+            if s.chars().any(|c| matches!(c, '<' | '>' | ';' | '{' | '}' | '"' | '\''))
+                || s.len() > 100
+                || s.trim().is_empty()
+            {
+                *s = default_font.to_string();
+            }
+        }
+        sanitize_font(&mut self.font_family_ui, "Inter, -apple-system, BlinkMacSystemFont, Segoe UI");
+        sanitize_font(&mut self.font_family_mono, "JetBrains Mono, Fira Code, monospace");
+        sanitize_font(&mut self.default_composer_font, "sans-serif");
+
+        // Whitelist visible columns
+        const ALLOWED_COLUMNS: &[&str] = &["flag", "sender", "subject", "date", "attachment", "size", "tags", "account"];
+        self.visible_columns.retain(|col| ALLOWED_COLUMNS.contains(&col.as_str()));
+        if self.visible_columns.is_empty() {
+            self.visible_columns = vec!["flag".into(), "sender".into(), "subject".into(), "date".into()];
+        }
+
+        // Sanitize custom shortcuts (max 100 entries, keys & values <= 32 chars and alphanumeric/modifiers)
+        self.custom_shortcuts.retain(|k, v| {
+            k.len() <= 32 && v.len() <= 32
+                && !k.chars().any(|c| c.is_control() || c == '<' || c == '>')
+                && !v.chars().any(|c| c.is_control() || c == '<' || c == '>')
+        });
     }
 }
 

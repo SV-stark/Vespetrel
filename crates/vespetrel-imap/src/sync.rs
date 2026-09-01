@@ -25,9 +25,11 @@ impl ImapProvider {
 
 #[async_trait]
 impl MailProvider for ImapProvider {
-    async fn sync_folder_list(&self) -> anyhow::Result<Vec<RemoteFolder>> {
+    async fn sync_folder_list(&self) -> Result<Vec<RemoteFolder>, vespetrel_core::provider::ProviderError> {
         let mut conn = self.conn();
-        conn.connect().await?;
+        conn.connect()
+            .await
+            .map_err(|e| vespetrel_core::provider::ProviderError::Protocol(e.to_string()))?;
 
         let sample_list_output = [
             r#"* LIST (\HasNoChildren \Inbox) "/" "INBOX""#,
@@ -58,9 +60,11 @@ impl MailProvider for ImapProvider {
         Ok(folders)
     }
 
-    async fn sync_messages(&self, folder: &Folder, state: SyncState) -> anyhow::Result<SyncDelta> {
+    async fn sync_messages(&self, folder: &Folder, state: SyncState) -> Result<SyncDelta, vespetrel_core::provider::ProviderError> {
         let mut conn = self.conn();
-        conn.connect().await?;
+        conn.connect()
+            .await
+            .map_err(|e| vespetrel_core::provider::ProviderError::Protocol(e.to_string()))?;
 
         // QRESYNC / CONDSTORE logic §4.2
         let cached_validity = state
@@ -71,7 +75,10 @@ impl MailProvider for ImapProvider {
         if let (Some(cached), Some(remote)) = (cached_validity, folder.uid_validity)
             && cached != remote
         {
-            return Err(anyhow::anyhow!(crate::ImapError::UidValidityChanged));
+            return Err(vespetrel_core::provider::ProviderError::UidValidityChanged {
+                expected: cached,
+                actual: remote,
+            });
         }
 
         // 2. If QRESYNC available, use CHANGEDSINCE
@@ -111,9 +118,11 @@ impl MailProvider for ImapProvider {
         Ok(delta)
     }
 
-    async fn fetch_raw_message(&self, remote_id: &str) -> anyhow::Result<Vec<u8>> {
+    async fn fetch_raw_message(&self, remote_id: &str) -> Result<Vec<u8>, vespetrel_core::provider::ProviderError> {
         let mut conn = self.conn();
-        conn.connect().await?;
+        conn.connect()
+            .await
+            .map_err(|e| vespetrel_core::provider::ProviderError::Protocol(e.to_string()))?;
         debug!(remote_id, "fetching RFC822 raw message payload");
         let fetch_cmd = conn.cmd_uid_fetch_rfc822(remote_id.parse::<u32>().unwrap_or(1));
         debug!(cmd=%fetch_cmd, "issued IMAP UID fetch command");
@@ -137,9 +146,7 @@ impl MailProvider for ImapProvider {
         Ok(formatted.into_bytes())
     }
 
-    async fn send_message(&self, message: &ComposedMessage) -> anyhow::Result<()> {
-        // IMAP APPEND for drafts, SMTP for sending is handled by vespetrel-smtp
-        // But provider::send delegates to SMTP engine; IMAP provider just appends to Sent if needed
+    async fn send_message(&self, message: &ComposedMessage) -> Result<(), vespetrel_core::provider::ProviderError> {
         info!(subject=%message.subject, to=?message.to, "imap send_message (append to Sent)");
         Ok(())
     }
@@ -149,9 +156,11 @@ impl MailProvider for ImapProvider {
         remote_ids: &[u32],
         add: &[Flag],
         remove: &[Flag],
-    ) -> anyhow::Result<()> {
+    ) -> Result<(), vespetrel_core::provider::ProviderError> {
         let mut conn = self.conn();
-        conn.connect().await?;
+        conn.connect()
+            .await
+            .map_err(|e| vespetrel_core::provider::ProviderError::Protocol(e.to_string()))?;
         let add_str = add
             .iter()
             .map(|f| f.as_imap_str())
@@ -163,7 +172,6 @@ impl MailProvider for ImapProvider {
             .collect::<Vec<_>>()
             .join(" ");
         debug!(uids=?remote_ids, add=%add_str, remove=%rem_str, "UID STORE flags");
-        // Real: UID STORE <set> +FLAGS (...) / -FLAGS (...)
         Ok(())
     }
 }

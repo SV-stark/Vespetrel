@@ -95,6 +95,13 @@ fn contains_case_insensitive(haystack: &str, needle: &str) -> bool {
     if haystack.len() < needle.len() {
         return false;
     }
+    if haystack.is_ascii() && needle.is_ascii() {
+        let n_bytes = needle.as_bytes();
+        let h_bytes = haystack.as_bytes();
+        return h_bytes
+            .windows(n_bytes.len())
+            .any(|window| window.eq_ignore_ascii_case(n_bytes));
+    }
     haystack.to_lowercase().contains(&needle.to_lowercase())
 }
 

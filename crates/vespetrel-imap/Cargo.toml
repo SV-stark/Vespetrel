@@ -17,7 +17,7 @@ anyhow = { workspace = true }
 imap-codec = { workspace = true }
 imap-types = { workspace = true }
 mail-parser = { workspace = true }
-base64 = "0.22"
+base64 = { workspace = true }
 rustls = { workspace = true }
 memchr = { workspace = true }
 chrono = { workspace = true }

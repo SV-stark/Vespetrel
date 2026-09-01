@@ -179,10 +179,9 @@ impl AccountWorker {
         let mut account_sync_state = vespetrel_core::account::SyncState::default();
         if let Some(conn) = &storage_conn {
             let acct_id = self.account_id.clone();
-            if let Ok(Ok(accounts)) = conn
-                .interact(|c| vespetrel_storage::repo::list_accounts(c))
+            if let Ok(Ok(Some(acct))) = conn
+                .interact(move |c| vespetrel_storage::repo::get_account(c, &acct_id))
                 .await
-                && let Some(acct) = accounts.into_iter().find(|a| a.id == acct_id)
             {
                 account_sync_state = acct.sync_state;
             }
@@ -314,9 +313,8 @@ impl AccountWorker {
                         let sync_state_to_save = account_sync_state.clone();
                         let _ = conn
                             .interact(move |c| {
-                                if let Ok(accounts) = vespetrel_storage::repo::list_accounts(c)
-                                    && let Some(mut acct) =
-                                        accounts.into_iter().find(|a| a.id == acct_id)
+                                if let Ok(Some(mut acct)) =
+                                    vespetrel_storage::repo::get_account(c, &acct_id)
                                 {
                                     acct.sync_state = sync_state_to_save;
                                     let _ = vespetrel_storage::repo::upsert_account(c, &acct);

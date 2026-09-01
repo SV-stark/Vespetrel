@@ -115,49 +115,89 @@ impl ThreadTree {
             root_keys.push(key);
         }
 
-        fn build_node(
-            key: &str,
+        fn build_node_iterative(
+            root_key: &str,
             id_to_msg: &AHashMap<String, &crate::Message>,
             parent_to_children: &AHashMap<String, Vec<String>>,
             visited: &mut AHashSet<String>,
-            depth: usize,
         ) -> Option<ThreadNode> {
-            if !visited.insert(key.to_string()) {
-                return None; // Guard against cyclic references
+            if !visited.insert(root_key.to_string()) {
+                return None;
+            }
+            let root_msg = *id_to_msg.get(root_key)?;
+
+            struct BuildFrame<'a> {
+                msg: &'a crate::Message,
+                child_keys: Vec<String>,
+                child_idx: usize,
+                built_children: Vec<ThreadNode>,
             }
 
-            let msg = id_to_msg.get(key)?;
-            let mut children = Vec::new();
-            if depth <= 50
-                && let Some(child_keys) = parent_to_children.get(key)
-            {
-                for ck in child_keys {
-                    if let Some(child_node) =
-                        build_node(ck, id_to_msg, parent_to_children, visited, depth + 1)
+            let initial_children = parent_to_children
+                .get(root_key)
+                .cloned()
+                .unwrap_or_default();
+
+            let mut stack = vec![BuildFrame {
+                msg: root_msg,
+                child_keys: initial_children,
+                child_idx: 0,
+                built_children: Vec::new(),
+            }];
+
+            let mut result = None;
+
+            while let Some(top) = stack.last_mut() {
+                if top.child_idx < top.child_keys.len() {
+                    let next_key = top.child_keys[top.child_idx].clone();
+                    top.child_idx += 1;
+
+                    if stack.len() <= 50
+                        && visited.insert(next_key.clone())
+                        && let Some(&child_msg) = id_to_msg.get(&next_key)
                     {
-                        children.push(child_node);
+                        let next_children = parent_to_children
+                            .get(&next_key)
+                            .cloned()
+                            .unwrap_or_default();
+                        stack.push(BuildFrame {
+                            msg: child_msg,
+                            child_keys: next_children,
+                            child_idx: 0,
+                            built_children: Vec::new(),
+                        });
+                    }
+                } else {
+                    let frame = stack.pop().unwrap();
+                    let mut children = frame.built_children;
+                    children.sort_by_key(|c| c.sent_at);
+
+                    let node = ThreadNode {
+                        message_id: frame.msg.id.clone(),
+                        message_id_header: frame.msg.message_id_header.clone(),
+                        subject: frame.msg.subject.clone(),
+                        sent_at: frame.msg.sent_at,
+                        is_read: frame.msg.is_read,
+                        snippet: frame.msg.body_snippet.clone(),
+                        children,
+                    };
+
+                    if let Some(parent_frame) = stack.last_mut() {
+                        parent_frame.built_children.push(node);
+                    } else {
+                        result = Some(node);
+                        break;
                     }
                 }
             }
 
-            // Sort children by date ascending
-            children.sort_by_key(|c| c.sent_at);
-
-            Some(ThreadNode {
-                message_id: msg.id.clone(),
-                message_id_header: msg.message_id_header.clone(),
-                subject: msg.subject.clone(),
-                sent_at: msg.sent_at,
-                is_read: msg.is_read,
-                snippet: msg.body_snippet.clone(),
-                children,
-            })
+            result
         }
 
         let mut root_nodes = Vec::new();
         let mut visited = AHashSet::with_capacity(messages.len());
         for rk in root_keys {
-            if let Some(node) = build_node(&rk, &id_to_msg, &parent_to_children, &mut visited, 0) {
+            if let Some(node) = build_node_iterative(&rk, &id_to_msg, &parent_to_children, &mut visited) {
                 root_nodes.push(node);
             }
         }
@@ -169,7 +209,7 @@ impl ThreadTree {
             .cloned()
             .collect();
         for key in remaining_keys {
-            if let Some(node) = build_node(&key, &id_to_msg, &parent_to_children, &mut visited, 0) {
+            if let Some(node) = build_node_iterative(&key, &id_to_msg, &parent_to_children, &mut visited) {
                 root_nodes.push(node);
             }
         }
@@ -183,18 +223,23 @@ impl ThreadTree {
         Self { root_nodes }
     }
 
-    /// Calculate thread summary statistics: total messages, unread count, latest date
-    pub fn summarize_node(node: &ThreadNode) -> (usize, usize, DateTime<Utc>) {
-        let mut total = 1;
-        let mut unread = if node.is_read { 0 } else { 1 };
-        let mut latest = node.sent_at;
+    /// Calculate thread summary statistics: total messages, unread count, latest date (iterative)
+    pub fn summarize_node(root: &ThreadNode) -> (usize, usize, DateTime<Utc>) {
+        let mut total = 0;
+        let mut unread = 0;
+        let mut latest = root.sent_at;
+        let mut stack = vec![root];
 
-        for child in &node.children {
-            let (c_total, c_unread, c_latest) = Self::summarize_node(child);
-            total += c_total;
-            unread += c_unread;
-            if c_latest > latest {
-                latest = c_latest;
+        while let Some(node) = stack.pop() {
+            total += 1;
+            if !node.is_read {
+                unread += 1;
+            }
+            if node.sent_at > latest {
+                latest = node.sent_at;
+            }
+            for child in &node.children {
+                stack.push(child);
             }
         }
 

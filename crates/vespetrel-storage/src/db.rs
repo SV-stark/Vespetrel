@@ -26,9 +26,14 @@ pub fn create_pool_with_key(
     db_path: &str,
     encryption_key: Option<&str>,
 ) -> anyhow::Result<StoragePool> {
+    let pool_size = std::env::var("VESPETREL_POOL_SIZE")
+        .ok()
+        .and_then(|s| s.parse::<usize>().ok())
+        .unwrap_or(8)
+        .clamp(1, 64);
     let key_owned = encryption_key.map(|s| Zeroizing::new(s.to_string()));
     let mut cfg = PoolConfig::new(db_path);
-    cfg.pool = Some(deadpool_sqlite::PoolConfig::new(8));
+    cfg.pool = Some(deadpool_sqlite::PoolConfig::new(pool_size));
     let pool = cfg
         .builder(Runtime::Tokio1)?
         .post_create(Hook::async_fn(move |conn, _metrics| {

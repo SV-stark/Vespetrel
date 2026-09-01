@@ -5,6 +5,10 @@ use std::time::Duration;
 
 /// Centralized safe blob path constructor that guards against traversal and symlink escapes
 pub fn safe_blob_path(base: &Path, id: &str) -> std::io::Result<PathBuf> {
+    safe_blob_path_with_ext(base, id, "lz4")
+}
+
+pub fn safe_blob_path_with_ext(base: &Path, id: &str, default_ext: &str) -> std::io::Result<PathBuf> {
     if id.is_empty()
         || id.len() > 128
         || !id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
@@ -16,15 +20,31 @@ pub fn safe_blob_path(base: &Path, id: &str) -> std::io::Result<PathBuf> {
     }
     // Safe slicing since validated as ASCII
     let shard = &id[..2.min(id.len())];
-    let candidate = base.join(shard).join(format!("{id}.lz4"));
-    if candidate.exists() {
-        return Ok(candidate);
+    let lz4_cand = base.join(shard).join(format!("{id}.lz4"));
+    if lz4_cand.exists() {
+        if let (Ok(can_cand), Ok(can_base)) = (lz4_cand.canonicalize(), base.canonicalize()) {
+            if !can_cand.starts_with(can_base) {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::PermissionDenied,
+                    "Path traversal / symlink escape detected",
+                ));
+            }
+        }
+        return Ok(lz4_cand);
     }
-    let zst_candidate = base.join(shard).join(format!("{id}.zst"));
-    if zst_candidate.exists() {
-        return Ok(zst_candidate);
+    let zst_cand = base.join(shard).join(format!("{id}.zst"));
+    if zst_cand.exists() {
+        if let (Ok(can_cand), Ok(can_base)) = (zst_cand.canonicalize(), base.canonicalize()) {
+            if !can_cand.starts_with(can_base) {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::PermissionDenied,
+                    "Path traversal / symlink escape detected",
+                ));
+            }
+        }
+        return Ok(zst_cand);
     }
-    Ok(candidate)
+    Ok(base.join(shard).join(format!("{id}.{default_ext}")))
 }
 
 /// Compressed blob store for raw RFC822 and attachments - § local storage layer
@@ -141,17 +161,7 @@ impl BlobStore {
     /// Write with zstd (higher compression, slower) - for archival
     pub fn write_zstd(&self, id: &str, data: &[u8]) -> std::io::Result<PathBuf> {
         self.ensure_base()?;
-        if id.is_empty()
-            || id.len() > 128
-            || !id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
-        {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::InvalidInput,
-                "Invalid blob ID: must be ASCII alphanumeric or hyphen/underscore",
-            ));
-        }
-        let shard = &id[..2.min(id.len())];
-        let path = self.base.join(shard).join(format!("{id}.zst"));
+        let path = safe_blob_path_with_ext(&self.base, id, "zst")?;
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
         }

@@ -8,16 +8,16 @@ use crate::message::{ComposedMessage, Flag};
 /// Unified async provider trait - §4.1 of spec
 #[async_trait]
 pub trait MailProvider: Send + Sync {
-    async fn sync_folder_list(&self) -> anyhow::Result<Vec<RemoteFolder>>;
-    async fn sync_messages(&self, folder: &Folder, state: SyncState) -> anyhow::Result<SyncDelta>;
-    async fn fetch_raw_message(&self, remote_id: &str) -> anyhow::Result<Vec<u8>>;
-    async fn send_message(&self, message: &ComposedMessage) -> anyhow::Result<()>;
+    async fn sync_folder_list(&self) -> Result<Vec<RemoteFolder>, ProviderError>;
+    async fn sync_messages(&self, folder: &Folder, state: SyncState) -> Result<SyncDelta, ProviderError>;
+    async fn fetch_raw_message(&self, remote_id: &str) -> Result<Vec<u8>, ProviderError>;
+    async fn send_message(&self, message: &ComposedMessage) -> Result<(), ProviderError>;
     async fn update_flags(
         &self,
         remote_ids: &[u32],
         add: &[Flag],
         remove: &[Flag],
-    ) -> anyhow::Result<()>;
+    ) -> Result<(), ProviderError>;
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
