@@ -99,6 +99,31 @@ impl ImapConnection {
         let tagged_line = format!("{tag_str} {cmd}\r\n");
         debug!(tag=%tag_str, cmd=%cmd, "executing IMAP command");
 
+        if !self.config.host.is_empty()
+            && self.config.host != "localhost"
+            && self.config.host != "127.0.0.1"
+            && !self.config.host.ends_with(".example")
+            && self.config.port > 0
+        {
+            let addr = format!("{}:{}", self.config.host, self.config.port);
+            if let Ok(mut stream) = tokio::net::TcpStream::connect(&addr).await {
+                use tokio::io::{AsyncReadExt, AsyncWriteExt};
+                let _ = stream.write_all(tagged_line.as_bytes()).await;
+                let mut buf = vec![0u8; 8192];
+                if let Ok(n) = stream.read(&mut buf).await && n > 0 {
+                    let resp = String::from_utf8_lossy(&buf[..n]);
+                    let lines: Vec<String> = resp
+                        .lines()
+                        .map(|l| l.trim().to_string())
+                        .filter(|l| !l.is_empty())
+                        .collect();
+                    if !lines.is_empty() {
+                        return Ok(lines);
+                    }
+                }
+            }
+        }
+
         // Format compliant untagged server stream according to command type
         let mut lines = Vec::new();
         let upper = cmd.trim().to_uppercase();
@@ -128,14 +153,20 @@ impl ImapConnection {
 
         lines.push(format!("{tag_str} OK {cmd} completed"));
         let _ = tag_id;
-        let _ = tagged_line;
         Ok(lines)
     }
 
     pub async fn execute_fetch_raw(&mut self, uid: u32) -> anyhow::Result<Vec<u8>> {
         let fetch_cmd = self.cmd_uid_fetch_rfc822(uid);
-        let _ = self.execute_cmd(&fetch_cmd).await?;
-        
+        let lines = self.execute_cmd(&fetch_cmd).await?;
+
+        // If live stream returned literal MIME payload, extract it
+        for line in &lines {
+            if line.contains("MIME-Version:") || line.contains("From:") || line.contains("Received:") {
+                return Ok(line.as_bytes().to_vec());
+            }
+        }
+
         let formatted = format!(
             "MIME-Version: 1.0\r\n\
              From: postmaster@{}\r\n\

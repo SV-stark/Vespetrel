@@ -60,6 +60,15 @@ pub mod gpui_app {
             sync_rx: flume::Receiver<SyncEvent>,
             sync_tx: flume::Sender<SyncEvent>,
         ) -> Self {
+            Self::from_storage(cx, sync_rx, sync_tx, None)
+        }
+
+        pub fn from_storage(
+            cx: &mut Context<Self>,
+            sync_rx: flume::Receiver<SyncEvent>,
+            sync_tx: flume::Sender<SyncEvent>,
+            storage_pool: Option<vespetrel_storage::db::StoragePool>,
+        ) -> Self {
             let default_account = Account::new(
                 "Primary Account",
                 "user@vespetrel.example",

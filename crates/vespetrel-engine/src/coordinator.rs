@@ -104,6 +104,19 @@ impl SyncCoordinator {
         }
     }
 
+    pub fn spawn_idle_task<F, Fut>(&mut self, account_id: &str, idle_runner: F)
+    where
+        F: FnOnce(mpsc::UnboundedSender<WorkerCommand>) -> Fut + Send + 'static,
+        Fut: std::future::Future<Output = ()> + Send + 'static,
+    {
+        let account_id_owned = account_id.to_string();
+        if let Some(tx) = self.workers.get(account_id).cloned() {
+            let handle = tokio::spawn(idle_runner(tx));
+            self.worker_handles.push(handle);
+            info!(account_id=%account_id_owned, "spawned IDLE background task");
+        }
+    }
+
     pub fn stop_worker(&mut self, account_id: &str) {
         if let Some(tx) = self.workers.remove(account_id) {
             let _ = tx.send(WorkerCommand::Stop);

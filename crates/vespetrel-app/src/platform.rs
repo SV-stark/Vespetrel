@@ -23,57 +23,60 @@ pub fn enable_high_dpi() {
     }
 }
 
-/// Detect whether the operating system is currently using Dark or Light theme
+/// Detect whether the operating system is currently using Dark or Light theme (cached)
 pub fn detect_system_theme() -> OsTheme {
-    #[cfg(windows)]
-    {
-        use winreg::RegKey;
-        use winreg::enums::HKEY_CURRENT_USER;
-        let hkcu = RegKey::predef(HKEY_CURRENT_USER);
-        if let Ok(val) = hkcu
-            .open_subkey("Software\\Microsoft\\Windows\\CurrentVersion\\Themes\\Personalize")
-            .and_then(|subkey| subkey.get_value::<u32, _>("AppsUseLightTheme"))
+    static CACHED_THEME: std::sync::OnceLock<OsTheme> = std::sync::OnceLock::new();
+    *CACHED_THEME.get_or_init(|| {
+        #[cfg(windows)]
         {
-            return if val == 0 {
-                OsTheme::Dark
-            } else {
-                OsTheme::Light
-            };
-        }
-    }
-
-    #[cfg(target_os = "macos")]
-    {
-        if let Ok(output) = std::process::Command::new("defaults")
-            .args(["read", "-g", "AppleInterfaceStyle"])
-            .output()
-        {
-            let s = String::from_utf8_lossy(&output.stdout);
-            if s.trim().eq_ignore_ascii_case("Dark") {
-                return OsTheme::Dark;
-            } else {
-                return OsTheme::Light;
+            use winreg::RegKey;
+            use winreg::enums::HKEY_CURRENT_USER;
+            let hkcu = RegKey::predef(HKEY_CURRENT_USER);
+            if let Ok(val) = hkcu
+                .open_subkey("Software\\Microsoft\\Windows\\CurrentVersion\\Themes\\Personalize")
+                .and_then(|subkey| subkey.get_value::<u32, _>("AppsUseLightTheme"))
+            {
+                return if val == 0 {
+                    OsTheme::Dark
+                } else {
+                    OsTheme::Light
+                };
             }
         }
-    }
 
-    #[cfg(target_os = "linux")]
-    {
-        if let Ok(output) = std::process::Command::new("gsettings")
-            .args(["get", "org.gnome.desktop.interface", "color-scheme"])
-            .output()
+        #[cfg(target_os = "macos")]
         {
-            let s = String::from_utf8_lossy(&output.stdout);
-            if s.contains("prefer-dark") || s.contains("dark") {
-                return OsTheme::Dark;
-            } else if s.contains("prefer-light") || s.contains("default") {
-                return OsTheme::Light;
+            if let Ok(output) = std::process::Command::new("defaults")
+                .args(["read", "-g", "AppleInterfaceStyle"])
+                .output()
+            {
+                let s = String::from_utf8_lossy(&output.stdout);
+                if s.trim().eq_ignore_ascii_case("Dark") {
+                    return OsTheme::Dark;
+                } else {
+                    return OsTheme::Light;
+                }
             }
         }
-    }
 
-    // Default to dark theme for modern desktop mail client aesthetic
-    OsTheme::Dark
+        #[cfg(target_os = "linux")]
+        {
+            if let Ok(output) = std::process::Command::new("gsettings")
+                .args(["get", "org.gnome.desktop.interface", "color-scheme"])
+                .output()
+            {
+                let s = String::from_utf8_lossy(&output.stdout);
+                if s.contains("prefer-dark") || s.contains("dark") {
+                    return OsTheme::Dark;
+                } else if s.contains("prefer-light") || s.contains("default") {
+                    return OsTheme::Light;
+                }
+            }
+        }
+
+        // Default to dark theme for modern desktop mail client aesthetic
+        OsTheme::Dark
+    })
 }
 
 /// IME (Input Method Editor) state tracker for international typing (CJK, accents)
