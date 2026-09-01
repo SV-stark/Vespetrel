@@ -34,9 +34,9 @@ impl VespetrelApp {
             {
                 std::fs::create_dir_all(parent)?;
             }
-            let conn = rusqlite::Connection::open(&self.db_path)?;
+            let mut conn = rusqlite::Connection::open(&self.db_path)?;
 
-            vespetrel_storage::db::init_connection(&conn)?;
+            vespetrel_storage::db::init_connection(&mut conn)?;
             info!(
                 "storage initialized ({}) - {} tables ready",
                 self.db_path,
@@ -73,6 +73,7 @@ mod tests {
     async fn test_app_init_temp_file() {
         let temp_dir =
             std::env::temp_dir().join(format!("vespetrel_test_{}", uuid::Uuid::new_v4()));
+        let db_path = temp_dir.join("test.db");
         let db_str = db_path.to_string_lossy();
         let app = VespetrelApp::new(&db_str);
         assert!(app.init_storage().await.is_ok());

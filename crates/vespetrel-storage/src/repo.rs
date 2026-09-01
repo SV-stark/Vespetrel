@@ -3,7 +3,7 @@ use rusqlite::{Connection, OptionalExtension, params};
 use tracing::warn;
 
 use vespetrel_core::{Account, Folder, Message};
-use crate::{StorageError, StorageResult};
+use crate::StorageResult;
 
 // Simple synchronous repository helpers - callers use deadpool-sqlite threadpool or blocking
 
