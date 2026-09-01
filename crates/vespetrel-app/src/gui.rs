@@ -110,16 +110,40 @@ pub mod gpui_app {
                 let pool_clone = pool.clone();
                 cx.spawn(async move |this, cx| {
                     if let Ok(conn) = pool_clone.get().await {
-                        let _ = conn
+                        let res = conn
                             .interact(move |c| {
-                                let _ = vespetrel_storage::repo::list_accounts(c);
-                                let _ = vespetrel_storage::repo::get_user_settings(c);
+                                let accounts =
+                                    vespetrel_storage::repo::list_accounts(c).unwrap_or_default();
+                                let mut all_folders = Vec::new();
+                                for acc in &accounts {
+                                    if let Ok(f_list) =
+                                        vespetrel_storage::repo::list_folders(c, &acc.id)
+                                    {
+                                        all_folders.extend(f_list);
+                                    }
+                                }
+                                let settings = vespetrel_storage::repo::get_user_settings(c)
+                                    .unwrap_or_default();
+                                (accounts, all_folders, settings)
                             })
                             .await;
+
+                        if let Ok((accs, flds, stgs)) = res {
+                            let _ = this.update(cx, |view, cx| {
+                                if !accs.is_empty() {
+                                    view.accounts = accs;
+                                }
+                                if !flds.is_empty() {
+                                    view.folders = flds;
+                                    if let Some(first_fld) = view.folders.first() {
+                                        view.selected_folder_id = first_fld.id.clone();
+                                    }
+                                }
+                                view.settings = stgs;
+                                cx.notify();
+                            });
+                        }
                     }
-                    let _ = this.update(cx, |_view, cx| {
-                        cx.notify();
-                    });
                 })
                 .detach();
             }

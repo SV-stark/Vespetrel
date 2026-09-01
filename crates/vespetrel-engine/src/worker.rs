@@ -246,6 +246,8 @@ impl AccountWorker {
                                     .map(|t| t.chars().take(200).collect::<String>());
                                 m.body_text_preview = parsed.body_text(0).map(|t| t.to_string());
                                 m.size_bytes = raw_bytes.len() as i64;
+                                let shard = if m.id.len() >= 2 { &m.id[..2] } else { "00" };
+                                m.blob_path = format!("{shard}/{}.lz4", m.id);
                                 m
                             } else {
                                 vespetrel_core::Message::new(

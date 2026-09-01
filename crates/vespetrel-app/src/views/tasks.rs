@@ -87,8 +87,9 @@ impl TaskListView {
     ) -> &TaskItem {
         let task = TaskItem::new(calendar_id, title);
         self.tasks.push(task);
-        let idx = self.tasks.len() - 1;
-        &self.tasks[idx]
+        self.tasks
+            .last()
+            .unwrap_or_else(|| unreachable!("task list is guaranteed non-empty after push"))
     }
 
     pub fn toggle_completion(&mut self, id: &str) {
@@ -165,13 +166,7 @@ mod tests {
 
         view.set_search("");
         view.toggle_completion(&t1.id);
-        assert!(
-            view.tasks
-                .iter()
-                .find(|t| t.id == t1.id)
-                .unwrap()
-                .is_completed
-        );
+        assert!(view.tasks.iter().any(|t| t.id == t1.id && t.is_completed));
 
         view.delete_task(&t1.id);
         assert_eq!(view.tasks.len(), 2);
