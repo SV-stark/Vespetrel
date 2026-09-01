@@ -153,7 +153,9 @@ async fn main() -> anyhow::Result<()> {
             let _ = sender.send(SyncEvent::MessagesInserted(msgs));
         });
 
-        if let Ok(Some(ev)) = tokio::time::timeout(std::time::Duration::from_secs(5), rx.recv()).await {
+        if let Ok(Some(ev)) =
+            tokio::time::timeout(std::time::Duration::from_secs(5), rx.recv()).await
+        {
             println!("✓ SyncEvent received: {ev:?}");
         }
         println!("Startup check passed successfully.");

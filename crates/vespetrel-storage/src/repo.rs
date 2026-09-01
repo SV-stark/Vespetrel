@@ -2,8 +2,8 @@ use chrono::{DateTime, Utc};
 use rusqlite::{Connection, OptionalExtension, params};
 use tracing::warn;
 
-use vespetrel_core::{Account, Folder, Message};
 use crate::StorageResult;
+use vespetrel_core::{Account, Folder, Message};
 
 // Simple synchronous repository helpers - callers use deadpool-sqlite threadpool or blocking
 

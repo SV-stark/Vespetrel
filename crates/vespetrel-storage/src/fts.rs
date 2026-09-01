@@ -14,7 +14,16 @@ pub fn escape_fts5_query(raw: &str) -> String {
     for word in raw.split_whitespace() {
         let clean: String = word
             .chars()
-            .filter(|c| c.is_alphanumeric() || *c == '@' || *c == '.' || *c == '_' || *c == '-' || *c == '+' || *c == '#' || *c == '"')
+            .filter(|c| {
+                c.is_alphanumeric()
+                    || *c == '@'
+                    || *c == '.'
+                    || *c == '_'
+                    || *c == '-'
+                    || *c == '+'
+                    || *c == '#'
+                    || *c == '"'
+            })
             .collect();
         if !clean.is_empty() {
             // Double embedded quotes to prevent FTS5 injection: " -> ""

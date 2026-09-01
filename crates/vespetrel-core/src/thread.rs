@@ -196,7 +196,9 @@ impl ThreadTree {
         let mut root_nodes = Vec::new();
         let mut visited = AHashSet::with_capacity(messages.len());
         for rk in root_keys {
-            if let Some(node) = build_node_iterative(&rk, &id_to_msg, &parent_to_children, &mut visited) {
+            if let Some(node) =
+                build_node_iterative(&rk, &id_to_msg, &parent_to_children, &mut visited)
+            {
                 root_nodes.push(node);
             }
         }
@@ -208,7 +210,9 @@ impl ThreadTree {
             .cloned()
             .collect();
         for key in remaining_keys {
-            if let Some(node) = build_node_iterative(&key, &id_to_msg, &parent_to_children, &mut visited) {
+            if let Some(node) =
+                build_node_iterative(&key, &id_to_msg, &parent_to_children, &mut visited)
+            {
                 root_nodes.push(node);
             }
         }

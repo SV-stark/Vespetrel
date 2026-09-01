@@ -71,7 +71,9 @@ impl ImapConnection {
             if let Ok(stream) = tokio::time::timeout(
                 std::time::Duration::from_secs(5),
                 tokio::net::TcpStream::connect(&addr),
-            ).await? {
+            )
+            .await?
+            {
                 debug!(addr=%addr, "live persistent TCP stream established to IMAP endpoint");
                 self.stream = Some(stream);
             }
@@ -102,7 +104,9 @@ impl ImapConnection {
             use tokio::io::{AsyncReadExt, AsyncWriteExt};
             let _ = stream.write_all(tagged_line.as_bytes()).await;
             let mut buf = vec![0u8; 16384];
-            if let Ok(n) = stream.read(&mut buf).await && n > 0 {
+            if let Ok(n) = stream.read(&mut buf).await
+                && n > 0
+            {
                 let resp = String::from_utf8_lossy(&buf[..n]);
                 let lines: Vec<String> = resp
                     .lines()
@@ -136,7 +140,9 @@ impl ImapConnection {
                 lines.push("* 1 FETCH (UID 101 FLAGS (\\Seen) MODSEQ 101 RFC822.SIZE 1024)".into());
             } else {
                 lines.push("* 1 FETCH (UID 101 FLAGS (\\Seen) MODSEQ 101 RFC822.SIZE 1024)".into());
-                lines.push("* 2 FETCH (UID 102 FLAGS (\\Flagged) MODSEQ 102 RFC822.SIZE 2048)".into());
+                lines.push(
+                    "* 2 FETCH (UID 102 FLAGS (\\Flagged) MODSEQ 102 RFC822.SIZE 2048)".into(),
+                );
             }
         } else if upper.starts_with("UID STORE") {
             lines.push("* 1 FETCH (UID 101 FLAGS (\\Seen \\Flagged))".into());
@@ -153,7 +159,10 @@ impl ImapConnection {
 
         // If live stream returned literal MIME payload, extract it
         for line in &lines {
-            if line.contains("MIME-Version:") || line.contains("From:") || line.contains("Received:") {
+            if line.contains("MIME-Version:")
+                || line.contains("From:")
+                || line.contains("Received:")
+            {
                 return Ok(line.as_bytes().to_vec());
             }
         }
@@ -347,7 +356,12 @@ pub fn parse_imap_list_line(line: &str) -> Option<vespetrel_core::RemoteFolder> 
 /// Parse untagged `* <seq> FETCH (UID <uid> FLAGS (<flags>) MODSEQ <modseq> ...)` line
 pub fn parse_imap_fetch_line(
     line: &str,
-) -> Option<(u32, Vec<vespetrel_core::message::Flag>, Option<u64>, Option<usize>)> {
+) -> Option<(
+    u32,
+    Vec<vespetrel_core::message::Flag>,
+    Option<u64>,
+    Option<usize>,
+)> {
     if !line.starts_with("* ") || !line.contains("FETCH") {
         return None;
     }

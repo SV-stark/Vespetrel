@@ -1,5 +1,5 @@
-use rusqlite::Connection;
 use crate::StorageResult;
+use rusqlite::Connection;
 
 /// Run all DDL migrations - §3.2 with version tracking
 pub fn run_migrations(conn: &mut Connection) -> StorageResult<()> {
@@ -14,17 +14,20 @@ pub fn run_migrations(conn: &mut Connection) -> StorageResult<()> {
         "#,
     )?;
 
-    let user_ver: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0)).unwrap_or(0);
+    let user_ver: i64 = conn
+        .query_row("PRAGMA user_version", [], |r| r.get(0))
+        .unwrap_or(0);
 
     // Check if migration version 1 has been applied
-    let is_v1_applied: bool = user_ver >= 1 || conn
-        .query_row(
-            "SELECT count(*) FROM _schema_migrations WHERE version = 1",
-            [],
-            |r| r.get::<_, i64>(0),
-        )
-        .map(|count| count > 0)
-        .unwrap_or(false);
+    let is_v1_applied: bool = user_ver >= 1
+        || conn
+            .query_row(
+                "SELECT count(*) FROM _schema_migrations WHERE version = 1",
+                [],
+                |r| r.get::<_, i64>(0),
+            )
+            .map(|count| count > 0)
+            .unwrap_or(false);
 
     if !is_v1_applied {
         let tx = conn.transaction()?;
@@ -246,14 +249,15 @@ pub fn run_migrations(conn: &mut Connection) -> StorageResult<()> {
     }
 
     // Check if migration version 2 has been applied (FTS5 unicode61 remove_diacritics 2 + rebuild)
-    let is_v2_applied: bool = user_ver >= 2 || conn
-        .query_row(
-            "SELECT count(*) FROM _schema_migrations WHERE version = 2",
-            [],
-            |r| r.get::<_, i64>(0),
-        )
-        .map(|count| count > 0)
-        .unwrap_or(false);
+    let is_v2_applied: bool = user_ver >= 2
+        || conn
+            .query_row(
+                "SELECT count(*) FROM _schema_migrations WHERE version = 2",
+                [],
+                |r| r.get::<_, i64>(0),
+            )
+            .map(|count| count > 0)
+            .unwrap_or(false);
 
     if !is_v2_applied {
         let tx = conn.transaction()?;

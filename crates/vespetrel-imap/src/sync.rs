@@ -6,9 +6,7 @@ use vespetrel_core::folder::Folder;
 use vespetrel_core::message::{ComposedMessage, Flag};
 use vespetrel_core::provider::{MailProvider, ProviderError, RemoteFolder, SyncDelta, SyncMessage};
 
-use crate::client::{
-    ImapConfig, ImapConnection, parse_imap_fetch_line, parse_imap_list_line,
-};
+use crate::client::{ImapConfig, ImapConnection, parse_imap_fetch_line, parse_imap_list_line};
 
 pub struct ImapProvider {
     config: ImapConfig,
@@ -60,7 +58,11 @@ impl MailProvider for ImapProvider {
         Ok(folders)
     }
 
-    async fn sync_messages(&self, folder: &Folder, state: SyncState) -> Result<SyncDelta, ProviderError> {
+    async fn sync_messages(
+        &self,
+        folder: &Folder,
+        state: SyncState,
+    ) -> Result<SyncDelta, ProviderError> {
         let mut conn = self.conn();
         conn.connect()
             .await
@@ -145,9 +147,9 @@ impl MailProvider for ImapProvider {
     }
 
     async fn fetch_raw_message(&self, remote_id: &str) -> Result<Vec<u8>, ProviderError> {
-        let uid = remote_id
-            .parse::<u32>()
-            .map_err(|e| ProviderError::Protocol(format!("Invalid remote message UID '{remote_id}': {e}")))?;
+        let uid = remote_id.parse::<u32>().map_err(|e| {
+            ProviderError::Protocol(format!("Invalid remote message UID '{remote_id}': {e}"))
+        })?;
 
         let mut conn = self.conn();
         conn.connect()

@@ -44,7 +44,9 @@ mod tests {
     use vespetrel_core::account::SyncState;
     use vespetrel_core::folder::Folder;
     use vespetrel_core::message::{ComposedMessage, Flag};
-    use vespetrel_core::provider::{MailProvider, ProviderError, RemoteFolder, SyncDelta, SyncMessage};
+    use vespetrel_core::provider::{
+        MailProvider, ProviderError, RemoteFolder, SyncDelta, SyncMessage,
+    };
 
     struct MockProvider;
 

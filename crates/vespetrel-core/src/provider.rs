@@ -9,7 +9,11 @@ use crate::message::{ComposedMessage, Flag};
 #[async_trait]
 pub trait MailProvider: Send + Sync {
     async fn sync_folder_list(&self) -> Result<Vec<RemoteFolder>, ProviderError>;
-    async fn sync_messages(&self, folder: &Folder, state: SyncState) -> Result<SyncDelta, ProviderError>;
+    async fn sync_messages(
+        &self,
+        folder: &Folder,
+        state: SyncState,
+    ) -> Result<SyncDelta, ProviderError>;
     async fn fetch_raw_message(&self, remote_id: &str) -> Result<Vec<u8>, ProviderError>;
     async fn send_message(&self, message: &ComposedMessage) -> Result<(), ProviderError>;
     async fn update_flags(

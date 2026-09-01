@@ -8,10 +8,16 @@ pub fn safe_blob_path(base: &Path, id: &str) -> std::io::Result<PathBuf> {
     safe_blob_path_with_ext(base, id, "lz4")
 }
 
-pub fn safe_blob_path_with_ext(base: &Path, id: &str, default_ext: &str) -> std::io::Result<PathBuf> {
+pub fn safe_blob_path_with_ext(
+    base: &Path,
+    id: &str,
+    default_ext: &str,
+) -> std::io::Result<PathBuf> {
     if id.is_empty()
         || id.len() > 128
-        || !id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+        || !id
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
     {
         return Err(std::io::Error::new(
             std::io::ErrorKind::InvalidInput,

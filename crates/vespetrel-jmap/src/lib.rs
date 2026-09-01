@@ -160,7 +160,9 @@ pub fn parse_jmap_mailbox_response(resp: &serde_json::Value) -> Vec<RemoteFolder
 
 #[async_trait]
 impl MailProvider for JmapProvider {
-    async fn sync_folder_list(&self) -> Result<Vec<RemoteFolder>, vespetrel_core::provider::ProviderError> {
+    async fn sync_folder_list(
+        &self,
+    ) -> Result<Vec<RemoteFolder>, vespetrel_core::provider::ProviderError> {
         debug!(url=%self.config.base_url, "JMAP sync_folder_list");
         if self.config.base_url.starts_with("http")
             && !self.config.access_token.is_empty()
@@ -208,7 +210,11 @@ impl MailProvider for JmapProvider {
         ])
     }
 
-    async fn sync_messages(&self, folder: &Folder, state: SyncState) -> Result<SyncDelta, vespetrel_core::provider::ProviderError> {
+    async fn sync_messages(
+        &self,
+        folder: &Folder,
+        state: SyncState,
+    ) -> Result<SyncDelta, vespetrel_core::provider::ProviderError> {
         debug!(folder=%folder.name, state=?state.jmap_state, "JMAP sync_messages");
         if self.config.base_url.starts_with("http")
             && !self.config.access_token.is_empty()
@@ -259,7 +265,10 @@ impl MailProvider for JmapProvider {
         Ok(SyncDelta::default())
     }
 
-    async fn fetch_raw_message(&self, remote_id: &str) -> Result<Vec<u8>, vespetrel_core::provider::ProviderError> {
+    async fn fetch_raw_message(
+        &self,
+        remote_id: &str,
+    ) -> Result<Vec<u8>, vespetrel_core::provider::ProviderError> {
         debug!(remote_id, "JMAP fetch_raw_message");
         if self.config.base_url.starts_with("http")
             && !self.config.access_token.is_empty()
@@ -293,7 +302,10 @@ impl MailProvider for JmapProvider {
         .into_bytes())
     }
 
-    async fn send_message(&self, msg: &ComposedMessage) -> Result<(), vespetrel_core::provider::ProviderError> {
+    async fn send_message(
+        &self,
+        msg: &ComposedMessage,
+    ) -> Result<(), vespetrel_core::provider::ProviderError> {
         info!(subject=%msg.subject, "JMAP EmailSubmission");
         if self.config.base_url.starts_with("http")
             && !self.config.access_token.is_empty()
@@ -403,10 +415,12 @@ impl MailProvider for JmapProvider {
                     .json(&req)
                     .send()
                     .await
-                    .map_err(|e| vespetrel_core::provider::ProviderError::Protocol(e.to_string()))?;
-                let _ = resp
-                    .error_for_status()
-                    .map_err(|e| vespetrel_core::provider::ProviderError::Protocol(e.to_string()))?;
+                    .map_err(|e| {
+                        vespetrel_core::provider::ProviderError::Protocol(e.to_string())
+                    })?;
+                let _ = resp.error_for_status().map_err(|e| {
+                    vespetrel_core::provider::ProviderError::Protocol(e.to_string())
+                })?;
             }
         }
         Ok(())

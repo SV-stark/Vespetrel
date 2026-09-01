@@ -97,7 +97,10 @@ impl RichTextDocument {
                     code_lang = None;
                 } else {
                     in_code_block = true;
-                    code_lang = line_trimmed.strip_prefix("```").map(|s| s.trim().to_string()).filter(|s| !s.is_empty());
+                    code_lang = line_trimmed
+                        .strip_prefix("```")
+                        .map(|s| s.trim().to_string())
+                        .filter(|s| !s.is_empty());
                 }
                 continue;
             }

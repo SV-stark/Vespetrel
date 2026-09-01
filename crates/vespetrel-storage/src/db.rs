@@ -40,10 +40,12 @@ pub fn create_pool_with_key(
         .post_create(Hook::async_fn(move |conn, _metrics| {
             let key = key_owned.clone();
             Box::pin(async move {
-                conn.interact(move |c| init_connection_with_key(c, key.as_deref().map(|z| z.as_str())))
-                    .await
-                    .map_err(|e| HookError::message(e.to_string()))?
-                    .map_err(|e| HookError::message(e.to_string()))
+                conn.interact(move |c| {
+                    init_connection_with_key(c, key.as_deref().map(|z| z.as_str()))
+                })
+                .await
+                .map_err(|e| HookError::message(e.to_string()))?
+                .map_err(|e| HookError::message(e.to_string()))
             })
         }))
         .build()
@@ -69,7 +71,9 @@ pub fn init_connection_with_key(
             || key.contains('\r')
             || key.contains('\n')
         {
-            return Err(crate::StorageError::Pool("Invalid encryption key: forbidden characters detected".into()));
+            return Err(crate::StorageError::Pool(
+                "Invalid encryption key: forbidden characters detected".into(),
+            ));
         }
         let zero_key = Zeroizing::new(key.to_string());
         // Safe PRAGMA execution

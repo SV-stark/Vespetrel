@@ -84,7 +84,9 @@ pub fn clean_tracking_url(raw_url: &str) -> String {
                 Some(eq_pos) => &pair[..eq_pos],
                 None => *pair,
             };
-            !TRACKING_SET.iter().any(|&track| track.eq_ignore_ascii_case(key))
+            !TRACKING_SET
+                .iter()
+                .any(|&track| track.eq_ignore_ascii_case(key))
         })
         .collect();
 

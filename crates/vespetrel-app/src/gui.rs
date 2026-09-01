@@ -1,11 +1,11 @@
 #[cfg(feature = "gpui")]
 pub mod gpui_app {
+    use crate::views::message_list::ListFilter;
     use gpui::*;
     use vespetrel_core::{
-        Account, CalendarEvent, Contact, Folder, FolderRole, MessageSummary,
-        ProviderType, TaskItem, UserSettings, provider::SyncEvent,
+        Account, CalendarEvent, Contact, Folder, FolderRole, MessageSummary, ProviderType,
+        TaskItem, UserSettings, provider::SyncEvent,
     };
-    use crate::views::message_list::ListFilter;
 
     /// Active top-level navigation view
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -76,12 +76,18 @@ pub mod gpui_app {
             );
 
             let folders = vec![
-                Folder::new(&default_account.id, "INBOX", "Inbox", "INBOX").with_role(FolderRole::Inbox),
-                Folder::new(&default_account.id, "Drafts", "Drafts", "Drafts").with_role(FolderRole::Drafts),
-                Folder::new(&default_account.id, "Sent", "Sent", "Sent").with_role(FolderRole::Sent),
-                Folder::new(&default_account.id, "Archive", "Archive", "Archive").with_role(FolderRole::Archive),
-                Folder::new(&default_account.id, "Junk", "Junk", "Junk").with_role(FolderRole::Junk),
-                Folder::new(&default_account.id, "Trash", "Trash", "Trash").with_role(FolderRole::Trash),
+                Folder::new(&default_account.id, "INBOX", "Inbox", "INBOX")
+                    .with_role(FolderRole::Inbox),
+                Folder::new(&default_account.id, "Drafts", "Drafts", "Drafts")
+                    .with_role(FolderRole::Drafts),
+                Folder::new(&default_account.id, "Sent", "Sent", "Sent")
+                    .with_role(FolderRole::Sent),
+                Folder::new(&default_account.id, "Archive", "Archive", "Archive")
+                    .with_role(FolderRole::Archive),
+                Folder::new(&default_account.id, "Junk", "Junk", "Junk")
+                    .with_role(FolderRole::Junk),
+                Folder::new(&default_account.id, "Trash", "Trash", "Trash")
+                    .with_role(FolderRole::Trash),
             ];
 
             let now = chrono::Utc::now();
@@ -104,15 +110,18 @@ pub mod gpui_app {
                 let pool_clone = pool.clone();
                 cx.spawn(async move |this, cx| {
                     if let Ok(conn) = pool_clone.get().await {
-                        let _ = conn.interact(move |c| {
-                            let _ = vespetrel_storage::repo::list_accounts(c);
-                            let _ = vespetrel_storage::repo::get_user_settings(c);
-                        }).await;
+                        let _ = conn
+                            .interact(move |c| {
+                                let _ = vespetrel_storage::repo::list_accounts(c);
+                                let _ = vespetrel_storage::repo::get_user_settings(c);
+                            })
+                            .await;
                     }
                     let _ = this.update(cx, |_view, cx| {
                         cx.notify();
                     });
-                }).detach();
+                })
+                .detach();
             }
 
             let calendar_events = vec![
@@ -165,9 +174,15 @@ pub mod gpui_app {
             ];
 
             let tasks = vec![
-                TaskItem::new("cal-main", "Review IMAP IDLE connection heartbeat parameters"),
+                TaskItem::new(
+                    "cal-main",
+                    "Review IMAP IDLE connection heartbeat parameters",
+                ),
                 TaskItem::new("cal-main", "Configure S/MIME corporate trust anchors"),
-                TaskItem::new("cal-main", "Export backup address book via CardDAV vCard 4.0"),
+                TaskItem::new(
+                    "cal-main",
+                    "Export backup address book via CardDAV vCard 4.0",
+                ),
             ];
 
             // Spawn Tokio Bridge Listener bound to GPUI Context
@@ -178,7 +193,8 @@ pub mod gpui_app {
                         view.handle_sync_event(event, cx);
                     });
                 }
-            }).detach();
+            })
+            .detach();
 
             Self {
                 active_tab: ActiveViewTab::Mail,
@@ -211,7 +227,11 @@ pub mod gpui_app {
                     self.messages.splice(0..0, new_msgs);
                     cx.notify();
                 }
-                SyncEvent::MessageFlagsUpdated { id, is_read, is_flagged } => {
+                SyncEvent::MessageFlagsUpdated {
+                    id,
+                    is_read,
+                    is_flagged,
+                } => {
                     if let Some(m) = self.messages.iter_mut().find(|m| m.id == id) {
                         m.is_read = is_read;
                         m.is_flagged = is_flagged;
@@ -251,26 +271,30 @@ pub mod gpui_app {
 
         pub fn filtered_messages(&self) -> impl Iterator<Item = &MessageSummary> {
             let q = self.search_query.trim();
-            self.messages
-                .iter()
-                .filter(move |m| {
-                    let flag_match = match self.list_filter {
-                        ListFilter::All => true,
-                        ListFilter::Unread => !m.is_read,
-                        ListFilter::Flagged => m.is_flagged,
-                        ListFilter::WithAttachments => m.has_attachments,
-                    };
-                    if !flag_match {
-                        return false;
-                    }
-                    if q.is_empty() {
-                        return true;
-                    }
-                    m.subject.as_deref().is_some_and(|s| contains_ignore_case(s, q))
-                        || contains_ignore_case(&m.from_address, q)
-                        || m.from_name.as_deref().is_some_and(|n| contains_ignore_case(n, q))
-                        || m.snippet.as_deref().is_some_and(|sn| contains_ignore_case(sn, q))
-                })
+            self.messages.iter().filter(move |m| {
+                let flag_match = match self.list_filter {
+                    ListFilter::All => true,
+                    ListFilter::Unread => !m.is_read,
+                    ListFilter::Flagged => m.is_flagged,
+                    ListFilter::WithAttachments => m.has_attachments,
+                };
+                if !flag_match {
+                    return false;
+                }
+                if q.is_empty() {
+                    return true;
+                }
+                m.subject
+                    .as_deref()
+                    .is_some_and(|s| contains_ignore_case(s, q))
+                    || contains_ignore_case(&m.from_address, q)
+                    || m.from_name
+                        .as_deref()
+                        .is_some_and(|n| contains_ignore_case(n, q))
+                    || m.snippet
+                        .as_deref()
+                        .is_some_and(|sn| contains_ignore_case(sn, q))
+            })
         }
 
         pub fn trigger_sync(&mut self, cx: &mut Context<Self>) {
@@ -283,7 +307,8 @@ pub mod gpui_app {
                     view.status_message = "Mailboxes up to date".into();
                     cx.notify();
                 });
-            }).detach();
+            })
+            .detach();
             cx.notify();
         }
 
@@ -356,12 +381,16 @@ pub mod gpui_app {
                 .windows(n_bytes.len())
                 .any(|window| window.eq_ignore_ascii_case(n_bytes));
         }
-        let needle_chars: smallvec::SmallVec<[char; 32]> = needle.chars().flat_map(|c| c.to_lowercase()).collect();
-        let haystack_chars: smallvec::SmallVec<[char; 128]> = haystack.chars().flat_map(|c| c.to_lowercase()).collect();
+        let needle_chars: smallvec::SmallVec<[char; 32]> =
+            needle.chars().flat_map(|c| c.to_lowercase()).collect();
+        let haystack_chars: smallvec::SmallVec<[char; 128]> =
+            haystack.chars().flat_map(|c| c.to_lowercase()).collect();
         if haystack_chars.len() < needle_chars.len() {
             return false;
         }
-        haystack_chars.windows(needle_chars.len()).any(|w| w == needle_chars.as_slice())
+        haystack_chars
+            .windows(needle_chars.len())
+            .any(|w| w == needle_chars.as_slice())
     }
 
     impl Render for MainWindow {
@@ -380,7 +409,7 @@ pub mod gpui_app {
                         .flex_1()
                         .overflow_hidden()
                         .child(self.render_sidebar_tabs())
-                        .child(self.render_active_tab_content())
+                        .child(self.render_active_tab_content()),
                 )
                 .child(self.render_status_bar())
                 .child(self.render_modal_layer())
@@ -423,15 +452,15 @@ pub mod gpui_app {
                                 .text_color(rgb(0xffffff))
                                 .font_weight(FontWeight::BOLD)
                                 .text_sm()
-                                .child("V")
+                                .child("V"),
                         )
                         .child(
                             div()
                                 .font_weight(FontWeight::BOLD)
                                 .text_sm()
                                 .text_color(rgb(0xf8fafc))
-                                .child("Vespetrel Mail")
-                        )
+                                .child("Vespetrel Mail"),
+                        ),
                 )
                 .child(
                     div()
@@ -450,9 +479,13 @@ pub mod gpui_app {
                         .child(
                             div()
                                 .text_xs()
-                                .text_color(if self.search_query.is_empty() { rgb(0x64748b) } else { rgb(0xe2e8f0) })
-                                .child(search_display)
-                        )
+                                .text_color(if self.search_query.is_empty() {
+                                    rgb(0x64748b)
+                                } else {
+                                    rgb(0xe2e8f0)
+                                })
+                                .child(search_display),
+                        ),
                 )
                 .child(
                     div()
@@ -473,7 +506,7 @@ pub mod gpui_app {
                                 .text_xs()
                                 .font_weight(FontWeight::SEMIBOLD)
                                 .cursor_pointer()
-                                .child("✍️ Compose")
+                                .child("✍️ Compose"),
                         )
                         .child(
                             div()
@@ -486,7 +519,7 @@ pub mod gpui_app {
                                 .text_color(rgb(0xcbd5e1))
                                 .text_xs()
                                 .cursor_pointer()
-                                .child("🔄 Sync")
+                                .child("🔄 Sync"),
                         )
                         .child(
                             div()
@@ -499,8 +532,8 @@ pub mod gpui_app {
                                 .text_color(rgb(0x94a3b8))
                                 .text_xs()
                                 .cursor_pointer()
-                                .child("⌘K")
-                        )
+                                .child("⌘K"),
+                        ),
                 )
         }
 
@@ -534,10 +567,22 @@ pub mod gpui_app {
                         .w(px(44.0))
                         .h(px(44.0))
                         .rounded_lg()
-                        .bg(if is_active { rgb(0x1e293b) } else { rgb(0x11141c) })
-                        .text_color(if is_active { rgb(0x60a5fa) } else { rgb(0x64748b) })
+                        .bg(if is_active {
+                            rgb(0x1e293b)
+                        } else {
+                            rgb(0x11141c)
+                        })
+                        .text_color(if is_active {
+                            rgb(0x60a5fa)
+                        } else {
+                            rgb(0x64748b)
+                        })
                         .border_1()
-                        .border_color(if is_active { rgb(0x3b82f6) } else { rgb(0x00000000) })
+                        .border_color(if is_active {
+                            rgb(0x3b82f6)
+                        } else {
+                            rgb(0x00000000)
+                        })
                         .cursor_pointer()
                         .child(div().text_base().child(icon))
                         .child(div().text_xs().child(label))
@@ -589,14 +634,20 @@ pub mod gpui_app {
                         .flex_row()
                         .items_center()
                         .justify_between()
-                        .child(div().text_xs().font_weight(FontWeight::BOLD).text_color(rgb(0x94a3b8)).child("ACCOUNTS & FOLDERS"))
+                        .child(
+                            div()
+                                .text_xs()
+                                .font_weight(FontWeight::BOLD)
+                                .text_color(rgb(0x94a3b8))
+                                .child("ACCOUNTS & FOLDERS"),
+                        )
                         .child(
                             div()
                                 .text_xs()
                                 .text_color(rgb(0x60a5fa))
                                 .cursor_pointer()
-                                .child("+ Add")
-                        )
+                                .child("+ Add"),
+                        ),
                 )
                 .child(
                     div()
@@ -605,8 +656,19 @@ pub mod gpui_app {
                         .p(px(8.0))
                         .rounded_md()
                         .bg(rgb(0x181f2f))
-                        .child(div().text_xs().font_weight(FontWeight::SEMIBOLD).text_color(rgb(0xf8fafc)).child("user@vespetrel.example"))
-                        .child(div().text_xs().text_color(rgb(0x38bdf8)).child("IMAP / SMTP • XOAUTH2 Ready"))
+                        .child(
+                            div()
+                                .text_xs()
+                                .font_weight(FontWeight::SEMIBOLD)
+                                .text_color(rgb(0xf8fafc))
+                                .child("user@vespetrel.example"),
+                        )
+                        .child(
+                            div()
+                                .text_xs()
+                                .text_color(rgb(0x38bdf8))
+                                .child("IMAP / SMTP • XOAUTH2 Ready"),
+                        ),
                 )
                 .child(
                     div()
@@ -614,7 +676,8 @@ pub mod gpui_app {
                         .flex_col()
                         .gap(px(4.0))
                         .children(self.folders.iter().map(|f| {
-                            let is_selected = self.selected_folder_id.as_deref() == Some(&f.remote_id);
+                            let is_selected =
+                                self.selected_folder_id.as_deref() == Some(&f.remote_id);
                             let icon = match f.role {
                                 FolderRole::Inbox => "📥",
                                 FolderRole::Drafts => "📝",
@@ -624,7 +687,11 @@ pub mod gpui_app {
                                 FolderRole::Trash => "🗑️",
                                 FolderRole::Custom => "📁",
                             };
-                            let count = if f.role == FolderRole::Inbox { self.messages.len() } else { 0 };
+                            let count = if f.role == FolderRole::Inbox {
+                                self.messages.len()
+                            } else {
+                                0
+                            };
 
                             div()
                                 .flex()
@@ -634,8 +701,16 @@ pub mod gpui_app {
                                 .px(px(10.0))
                                 .py(px(6.0))
                                 .rounded_md()
-                                .bg(if is_selected { rgb(0x1e293b) } else { rgb(0x00000000) })
-                                .text_color(if is_selected { rgb(0x60a5fa) } else { rgb(0xcbd5e1) })
+                                .bg(if is_selected {
+                                    rgb(0x1e293b)
+                                } else {
+                                    rgb(0x00000000)
+                                })
+                                .text_color(if is_selected {
+                                    rgb(0x60a5fa)
+                                } else {
+                                    rgb(0xcbd5e1)
+                                })
                                 .cursor_pointer()
                                 .child(
                                     div()
@@ -644,23 +719,30 @@ pub mod gpui_app {
                                         .items_center()
                                         .gap(px(8.0))
                                         .child(div().text_xs().child(icon))
-                                        .child(div().text_xs().font_weight(if is_selected { FontWeight::BOLD } else { FontWeight::NORMAL }).child(f.name.clone()))
+                                        .child(
+                                            div()
+                                                .text_xs()
+                                                .font_weight(if is_selected {
+                                                    FontWeight::BOLD
+                                                } else {
+                                                    FontWeight::NORMAL
+                                                })
+                                                .child(f.name.clone()),
+                                        ),
                                 )
-                                .child(
-                                    if count > 0 {
-                                        div()
-                                            .px(px(6.0))
-                                            .py(px(1.0))
-                                            .rounded_full()
-                                            .bg(rgb(0x2563eb))
-                                            .text_color(rgb(0xffffff))
-                                            .text_xs()
-                                            .child(format!("{count}"))
-                                    } else {
-                                        div()
-                                    }
-                                )
-                        }))
+                                .child(if count > 0 {
+                                    div()
+                                        .px(px(6.0))
+                                        .py(px(1.0))
+                                        .rounded_full()
+                                        .bg(rgb(0x2563eb))
+                                        .text_color(rgb(0xffffff))
+                                        .text_xs()
+                                        .child(format!("{count}"))
+                                } else {
+                                    div()
+                                })
+                        })),
                 )
         }
 
@@ -687,7 +769,7 @@ pub mod gpui_app {
                         .child(self.render_filter_chip("All", ListFilter::All))
                         .child(self.render_filter_chip("Unread", ListFilter::Unread))
                         .child(self.render_filter_chip("Starred", ListFilter::Flagged))
-                        .child(self.render_filter_chip("📎 Files", ListFilter::WithAttachments))
+                        .child(self.render_filter_chip("📎 Files", ListFilter::WithAttachments)),
                 )
                 .child(
                     div()
@@ -707,7 +789,13 @@ pub mod gpui_app {
                                 .p(px(10.0))
                                 .border_b_1()
                                 .border_color(rgb(0x182030))
-                                .bg(if is_selected { rgb(0x1e2a42) } else if !msg.is_read { rgb(0x141a29) } else { rgb(0x10141d) })
+                                .bg(if is_selected {
+                                    rgb(0x1e2a42)
+                                } else if !msg.is_read {
+                                    rgb(0x141a29)
+                                } else {
+                                    rgb(0x10141d)
+                                })
                                 .cursor_pointer()
                                 .child(
                                     div()
@@ -721,20 +809,26 @@ pub mod gpui_app {
                                                 .flex_row()
                                                 .items_center()
                                                 .gap(px(6.0))
-                                                .child(
-                                                    if !msg.is_read {
-                                                        div().w(px(6.0)).h(px(6.0)).rounded_full().bg(rgb(0x3b82f6))
-                                                    } else {
-                                                        div().w(px(6.0)).h(px(6.0))
-                                                    }
-                                                )
+                                                .child(if !msg.is_read {
+                                                    div()
+                                                        .w(px(6.0))
+                                                        .h(px(6.0))
+                                                        .rounded_full()
+                                                        .bg(rgb(0x3b82f6))
+                                                } else {
+                                                    div().w(px(6.0)).h(px(6.0))
+                                                })
                                                 .child(
                                                     div()
                                                         .text_xs()
-                                                        .font_weight(if !msg.is_read { FontWeight::BOLD } else { FontWeight::MEDIUM })
+                                                        .font_weight(if !msg.is_read {
+                                                            FontWeight::BOLD
+                                                        } else {
+                                                            FontWeight::MEDIUM
+                                                        })
                                                         .text_color(rgb(0xf1f5f9))
-                                                        .child(sender.to_string())
-                                                )
+                                                        .child(sender.to_string()),
+                                                ),
                                         )
                                         .child(
                                             div()
@@ -745,33 +839,45 @@ pub mod gpui_app {
                                                 .child(
                                                     div()
                                                         .text_xs()
-                                                        .text_color(if msg.is_flagged { rgb(0xfbbf24) } else { rgb(0x475569) })
-                                                        .child(if msg.is_flagged { "★" } else { "☆" })
+                                                        .text_color(if msg.is_flagged {
+                                                            rgb(0xfbbf24)
+                                                        } else {
+                                                            rgb(0x475569)
+                                                        })
+                                                        .child(if msg.is_flagged {
+                                                            "★"
+                                                        } else {
+                                                            "☆"
+                                                        }),
                                                 )
                                                 .child(
                                                     div()
                                                         .text_xs()
                                                         .text_color(rgb(0x64748b))
-                                                        .child(date_str)
-                                                )
-                                        )
+                                                        .child(date_str),
+                                                ),
+                                        ),
                                 )
                                 .child(
                                     div()
                                         .pt(px(2.0))
                                         .text_xs()
-                                        .font_weight(if !msg.is_read { FontWeight::SEMIBOLD } else { FontWeight::NORMAL })
+                                        .font_weight(if !msg.is_read {
+                                            FontWeight::SEMIBOLD
+                                        } else {
+                                            FontWeight::NORMAL
+                                        })
                                         .text_color(rgb(0xe2e8f0))
-                                        .child(subject.to_string())
+                                        .child(subject.to_string()),
                                 )
-                                .child(
-                                    div()
-                                        .pt(px(2.0))
-                                        .text_xs()
-                                        .text_color(rgb(0x94a3b8))
-                                        .child(if snippet.len() > 60 { format!("{}...", &snippet[..60]) } else { snippet.to_string() })
-                                )
-                        }))
+                                .child(div().pt(px(2.0)).text_xs().text_color(rgb(0x94a3b8)).child(
+                                    if snippet.len() > 60 {
+                                        format!("{}...", &snippet[..60])
+                                    } else {
+                                        snippet.to_string()
+                                    },
+                                ))
+                        })),
                 )
         }
 
@@ -781,8 +887,16 @@ pub mod gpui_app {
                 .px(px(8.0))
                 .py(px(4.0))
                 .rounded_md()
-                .bg(if is_active { rgb(0x2563eb) } else { rgb(0x1a2233) })
-                .text_color(if is_active { rgb(0xffffff) } else { rgb(0x94a3b8) })
+                .bg(if is_active {
+                    rgb(0x2563eb)
+                } else {
+                    rgb(0x1a2233)
+                })
+                .text_color(if is_active {
+                    rgb(0xffffff)
+                } else {
+                    rgb(0x94a3b8)
+                })
                 .text_xs()
                 .cursor_pointer()
                 .child(label)
@@ -946,28 +1060,54 @@ pub mod gpui_app {
                         .flex_row()
                         .items_center()
                         .justify_between()
-                        .child(div().text_lg().font_weight(FontWeight::BOLD).text_color(rgb(0xf8fafc)).child("📅 Calendar (CalDAV RFC 4791 & iCalendar RFC 5545)"))
-                        .child(div().px(px(12.0)).py(px(6.0)).rounded_md().bg(rgb(0x2563eb)).text_color(rgb(0xffffff)).text_xs().child("+ New Event"))
-                )
-                .child(
-                    div()
-                        .flex()
-                        .flex_col()
-                        .gap(px(10.0))
-                        .children(self.calendar_events.iter().map(|ev| {
+                        .child(
                             div()
-                                .flex()
-                                .flex_col()
-                                .p(px(12.0))
-                                .rounded_lg()
-                                .bg(rgb(0x171c2a))
-                                .border_1()
-                                .border_color(rgb(0x232c40))
-                                .child(div().text_sm().font_weight(FontWeight::BOLD).text_color(rgb(0x60a5fa)).child(ev.title.clone()))
-                                .child(div().text_xs().text_color(rgb(0x94a3b8)).child(format!("Time: {} - {}", ev.start.format("%Y-%m-%d %H:%M"), ev.end.format("%H:%M"))))
-                                .child(div().text_xs().text_color(rgb(0xcbd5e1)).child(ev.description.clone().unwrap_or_default()))
-                        }))
+                                .text_lg()
+                                .font_weight(FontWeight::BOLD)
+                                .text_color(rgb(0xf8fafc))
+                                .child("📅 Calendar (CalDAV RFC 4791 & iCalendar RFC 5545)"),
+                        )
+                        .child(
+                            div()
+                                .px(px(12.0))
+                                .py(px(6.0))
+                                .rounded_md()
+                                .bg(rgb(0x2563eb))
+                                .text_color(rgb(0xffffff))
+                                .text_xs()
+                                .child("+ New Event"),
+                        ),
                 )
+                .child(div().flex().flex_col().gap(px(10.0)).children(
+                    self.calendar_events.iter().map(|ev| {
+                        div()
+                            .flex()
+                            .flex_col()
+                            .p(px(12.0))
+                            .rounded_lg()
+                            .bg(rgb(0x171c2a))
+                            .border_1()
+                            .border_color(rgb(0x232c40))
+                            .child(
+                                div()
+                                    .text_sm()
+                                    .font_weight(FontWeight::BOLD)
+                                    .text_color(rgb(0x60a5fa))
+                                    .child(ev.title.clone()),
+                            )
+                            .child(div().text_xs().text_color(rgb(0x94a3b8)).child(format!(
+                                "Time: {} - {}",
+                                ev.start.format("%Y-%m-%d %H:%M"),
+                                ev.end.format("%H:%M")
+                            )))
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .text_color(rgb(0xcbd5e1))
+                                    .child(ev.description.clone().unwrap_or_default()),
+                            )
+                    }),
+                ))
         }
 
         fn render_contacts_view(&self) -> Div {
@@ -984,8 +1124,23 @@ pub mod gpui_app {
                         .flex_row()
                         .items_center()
                         .justify_between()
-                        .child(div().text_lg().font_weight(FontWeight::BOLD).text_color(rgb(0xf8fafc)).child("👥 Address Book (CardDAV & vCard 4.0)"))
-                        .child(div().px(px(12.0)).py(px(6.0)).rounded_md().bg(rgb(0x2563eb)).text_color(rgb(0xffffff)).text_xs().child("+ Add Contact"))
+                        .child(
+                            div()
+                                .text_lg()
+                                .font_weight(FontWeight::BOLD)
+                                .text_color(rgb(0xf8fafc))
+                                .child("👥 Address Book (CardDAV & vCard 4.0)"),
+                        )
+                        .child(
+                            div()
+                                .px(px(12.0))
+                                .py(px(6.0))
+                                .rounded_md()
+                                .bg(rgb(0x2563eb))
+                                .text_color(rgb(0xffffff))
+                                .text_xs()
+                                .child("+ Add Contact"),
+                        ),
                 )
                 .child(
                     div()
@@ -1022,18 +1177,40 @@ pub mod gpui_app {
                                                 .text_color(rgb(0xffffff))
                                                 .font_weight(FontWeight::BOLD)
                                                 .text_xs()
-                                                .child(name.chars().next().unwrap_or('C').to_string())
+                                                .child(
+                                                    name.chars().next().unwrap_or('C').to_string(),
+                                                ),
                                         )
                                         .child(
                                             div()
                                                 .flex()
                                                 .flex_col()
-                                                .child(div().text_xs().font_weight(FontWeight::BOLD).text_color(rgb(0xf8fafc)).child(name.to_string()))
-                                                .child(div().text_xs().text_color(rgb(0x94a3b8)).child(c.email.clone()))
-                                        )
+                                                .child(
+                                                    div()
+                                                        .text_xs()
+                                                        .font_weight(FontWeight::BOLD)
+                                                        .text_color(rgb(0xf8fafc))
+                                                        .child(name.to_string()),
+                                                )
+                                                .child(
+                                                    div()
+                                                        .text_xs()
+                                                        .text_color(rgb(0x94a3b8))
+                                                        .child(c.email.clone()),
+                                                ),
+                                        ),
                                 )
-                                .child(div().px(px(10.0)).py(px(4.0)).rounded_md().bg(rgb(0x1e293b)).text_color(rgb(0x60a5fa)).text_xs().child("Write Email"))
-                        }))
+                                .child(
+                                    div()
+                                        .px(px(10.0))
+                                        .py(px(4.0))
+                                        .rounded_md()
+                                        .bg(rgb(0x1e293b))
+                                        .text_color(rgb(0x60a5fa))
+                                        .text_xs()
+                                        .child("Write Email"),
+                                )
+                        })),
                 )
         }
 
@@ -1051,8 +1228,23 @@ pub mod gpui_app {
                         .flex_row()
                         .items_center()
                         .justify_between()
-                        .child(div().text_lg().font_weight(FontWeight::BOLD).text_color(rgb(0xf8fafc)).child("✅ Tasks (RFC 5545 VTODO & CalDAV Tasks)"))
-                        .child(div().px(px(12.0)).py(px(6.0)).rounded_md().bg(rgb(0x2563eb)).text_color(rgb(0xffffff)).text_xs().child("+ Add Task"))
+                        .child(
+                            div()
+                                .text_lg()
+                                .font_weight(FontWeight::BOLD)
+                                .text_color(rgb(0xf8fafc))
+                                .child("✅ Tasks (RFC 5545 VTODO & CalDAV Tasks)"),
+                        )
+                        .child(
+                            div()
+                                .px(px(12.0))
+                                .py(px(6.0))
+                                .rounded_md()
+                                .bg(rgb(0x2563eb))
+                                .text_color(rgb(0xffffff))
+                                .text_xs()
+                                .child("+ Add Task"),
+                        ),
                 )
                 .child(
                     div()
@@ -1077,15 +1269,23 @@ pub mod gpui_app {
                                         .flex_row()
                                         .items_center()
                                         .gap(px(10.0))
-                                        .child(div().text_sm().child(if is_done { "☑️" } else { "⬜" }))
+                                        .child(div().text_sm().child(if is_done {
+                                            "☑️"
+                                        } else {
+                                            "⬜"
+                                        }))
                                         .child(
                                             div()
                                                 .text_xs()
-                                                .text_color(if is_done { rgb(0x64748b) } else { rgb(0xf1f5f9) })
-                                                .child(t.title.clone())
-                                        )
+                                                .text_color(if is_done {
+                                                    rgb(0x64748b)
+                                                } else {
+                                                    rgb(0xf1f5f9)
+                                                })
+                                                .child(t.title.clone()),
+                                        ),
                                 )
-                        }))
+                        })),
                 )
         }
 
@@ -1097,7 +1297,13 @@ pub mod gpui_app {
                 .p(px(20.0))
                 .bg(rgb(0x0f1117))
                 .gap(px(16.0))
-                .child(div().text_lg().font_weight(FontWeight::BOLD).text_color(rgb(0xf8fafc)).child("⚙️ Configuration & Preferences"))
+                .child(
+                    div()
+                        .text_lg()
+                        .font_weight(FontWeight::BOLD)
+                        .text_color(rgb(0xf8fafc))
+                        .child("⚙️ Configuration & Preferences"),
+                )
                 .child(
                     div()
                         .flex()
@@ -1108,12 +1314,33 @@ pub mod gpui_app {
                         .border_1()
                         .border_color(rgb(0x232c40))
                         .gap(px(10.0))
-                        .child(div().text_sm().font_weight(FontWeight::BOLD).text_color(rgb(0x60a5fa)).child("Storage & Database Engine"))
-                        .child(div().text_xs().text_color(rgb(0xcbd5e1)).child("• Database: SQLite 3 with WAL Mode and Memory-Mapped I/O (256MB)"))
-                        .child(div().text_xs().text_color(rgb(0xcbd5e1)).child("• Full-Text Search: SQLite FTS5 (unicode61 tokenizer, BM25 ranking)"))
-                        .child(div().text_xs().text_color(rgb(0xcbd5e1)).child("• Blob Compression: lz4_flex + zstd"))
-                        .child(div().text_xs().text_color(rgb(0xcbd5e1)).child("• Keyring Credentials: Native OS Keyring / Credential Manager"))
-                        .child(div().text_xs().text_color(rgb(0xcbd5e1)).child("• Crypto & Security: rPGP OpenPGP RFC 9580 + RustCrypto CMS S/MIME"))
+                        .child(
+                            div()
+                                .text_sm()
+                                .font_weight(FontWeight::BOLD)
+                                .text_color(rgb(0x60a5fa))
+                                .child("Storage & Database Engine"),
+                        )
+                        .child(div().text_xs().text_color(rgb(0xcbd5e1)).child(
+                            "• Database: SQLite 3 with WAL Mode and Memory-Mapped I/O (256MB)",
+                        ))
+                        .child(div().text_xs().text_color(rgb(0xcbd5e1)).child(
+                            "• Full-Text Search: SQLite FTS5 (unicode61 tokenizer, BM25 ranking)",
+                        ))
+                        .child(
+                            div()
+                                .text_xs()
+                                .text_color(rgb(0xcbd5e1))
+                                .child("• Blob Compression: lz4_flex + zstd"),
+                        )
+                        .child(
+                            div().text_xs().text_color(rgb(0xcbd5e1)).child(
+                                "• Keyring Credentials: Native OS Keyring / Credential Manager",
+                            ),
+                        )
+                        .child(div().text_xs().text_color(rgb(0xcbd5e1)).child(
+                            "• Crypto & Security: rPGP OpenPGP RFC 9580 + RustCrypto CMS S/MIME",
+                        )),
                 )
         }
 
@@ -1137,7 +1364,11 @@ pub mod gpui_app {
                         .items_center()
                         .gap(px(6.0))
                         .child(div().w(px(6.0)).h(px(6.0)).rounded_full().bg(rgb(0x10b981)))
-                        .child(div().text_color(rgb(0x94a3b8)).child(self.status_message.clone()))
+                        .child(
+                            div()
+                                .text_color(rgb(0x94a3b8))
+                                .child(self.status_message.clone()),
+                        ),
                 )
                 .child(div().child("120 FPS GPU Direct3D / Vulkan • Rust Edition 2024"))
         }
@@ -1152,9 +1383,21 @@ pub mod gpui_app {
         }
 
         fn render_compose_modal(&self) -> Div {
-            let to_text = if self.compose_to.is_empty() { "user@example.com".to_string() } else { self.compose_to.clone() };
-            let subj_text = if self.compose_subject.is_empty() { "Message subject...".to_string() } else { self.compose_subject.clone() };
-            let body_text = if self.compose_body.is_empty() { "Compose email body (Markdown / HTML enabled)...".to_string() } else { self.compose_body.clone() };
+            let to_text = if self.compose_to.is_empty() {
+                "user@example.com".to_string()
+            } else {
+                self.compose_to.clone()
+            };
+            let subj_text = if self.compose_subject.is_empty() {
+                "Message subject...".to_string()
+            } else {
+                self.compose_subject.clone()
+            };
+            let body_text = if self.compose_body.is_empty() {
+                "Compose email body (Markdown / HTML enabled)...".to_string()
+            } else {
+                self.compose_body.clone()
+            };
 
             div()
                 .flex()
@@ -1180,8 +1423,20 @@ pub mod gpui_app {
                                 .flex_row()
                                 .items_center()
                                 .justify_between()
-                                .child(div().text_base().font_weight(FontWeight::BOLD).text_color(rgb(0xf8fafc)).child("✍️ New Message Composer"))
-                                .child(div().text_sm().text_color(rgb(0x94a3b8)).cursor_pointer().child("✕"))
+                                .child(
+                                    div()
+                                        .text_base()
+                                        .font_weight(FontWeight::BOLD)
+                                        .text_color(rgb(0xf8fafc))
+                                        .child("✍️ New Message Composer"),
+                                )
+                                .child(
+                                    div()
+                                        .text_sm()
+                                        .text_color(rgb(0x94a3b8))
+                                        .cursor_pointer()
+                                        .child("✕"),
+                                ),
                         )
                         .child(
                             div()
@@ -1193,7 +1448,7 @@ pub mod gpui_app {
                                 .rounded_md()
                                 .bg(rgb(0x1c2333))
                                 .child(div().text_xs().text_color(rgb(0x94a3b8)).child("To:"))
-                                .child(div().text_xs().text_color(rgb(0xf1f5f9)).child(to_text))
+                                .child(div().text_xs().text_color(rgb(0xf1f5f9)).child(to_text)),
                         )
                         .child(
                             div()
@@ -1205,7 +1460,7 @@ pub mod gpui_app {
                                 .rounded_md()
                                 .bg(rgb(0x1c2333))
                                 .child(div().text_xs().text_color(rgb(0x94a3b8)).child("Subject:"))
-                                .child(div().text_xs().text_color(rgb(0xf1f5f9)).child(subj_text))
+                                .child(div().text_xs().text_color(rgb(0xf1f5f9)).child(subj_text)),
                         )
                         .child(
                             div()
@@ -1217,7 +1472,7 @@ pub mod gpui_app {
                                 .bg(rgb(0x111622))
                                 .border_1()
                                 .border_color(rgb(0x232c40))
-                                .child(div().text_xs().text_color(rgb(0xe2e8f0)).child(body_text))
+                                .child(div().text_xs().text_color(rgb(0xe2e8f0)).child(body_text)),
                         )
                         .child(
                             div()
@@ -1232,7 +1487,12 @@ pub mod gpui_app {
                                         .items_center()
                                         .gap(px(6.0))
                                         .child(div().text_xs().child("🔒"))
-                                        .child(div().text_xs().text_color(rgb(0x34d399)).child("Autocrypt OpenPGP Signature Attached"))
+                                        .child(
+                                            div()
+                                                .text_xs()
+                                                .text_color(rgb(0x34d399))
+                                                .child("Autocrypt OpenPGP Signature Attached"),
+                                        ),
                                 )
                                 .child(
                                     div()
@@ -1240,10 +1500,31 @@ pub mod gpui_app {
                                         .flex_row()
                                         .items_center()
                                         .gap(px(8.0))
-                                        .child(div().px(px(14.0)).py(px(6.0)).rounded_md().bg(rgb(0x1e293b)).text_color(rgb(0xcbd5e1)).text_xs().cursor_pointer().child("Discard"))
-                                        .child(div().px(px(16.0)).py(px(6.0)).rounded_md().bg(rgb(0x2563eb)).text_color(rgb(0xffffff)).text_xs().font_weight(FontWeight::BOLD).cursor_pointer().child("Send 🚀"))
-                                )
-                        )
+                                        .child(
+                                            div()
+                                                .px(px(14.0))
+                                                .py(px(6.0))
+                                                .rounded_md()
+                                                .bg(rgb(0x1e293b))
+                                                .text_color(rgb(0xcbd5e1))
+                                                .text_xs()
+                                                .cursor_pointer()
+                                                .child("Discard"),
+                                        )
+                                        .child(
+                                            div()
+                                                .px(px(16.0))
+                                                .py(px(6.0))
+                                                .rounded_md()
+                                                .bg(rgb(0x2563eb))
+                                                .text_color(rgb(0xffffff))
+                                                .text_xs()
+                                                .font_weight(FontWeight::BOLD)
+                                                .cursor_pointer()
+                                                .child("Send 🚀"),
+                                        ),
+                                ),
+                        ),
                 )
         }
 
@@ -1288,28 +1569,52 @@ pub mod gpui_app {
                                 .border_color(rgb(0x232c40))
                                 .gap(px(8.0))
                                 .child(div().text_sm().child("⌘"))
-                                .child(div().text_xs().text_color(rgb(0x94a3b8)).child("Type a command or search action..."))
+                                .child(
+                                    div()
+                                        .text_xs()
+                                        .text_color(rgb(0x94a3b8))
+                                        .child("Type a command or search action..."),
+                                ),
                         )
                         .child(
-                            div()
-                                .flex()
-                                .flex_col()
-                                .gap(px(4.0))
-                                .children(actions.into_iter().enumerate().map(|(idx, (title, shortcut))| {
-                                    div()
-                                        .flex()
-                                        .flex_row()
-                                        .items_center()
-                                        .justify_between()
-                                        .px(px(12.0))
-                                        .py(px(8.0))
-                                        .rounded_md()
-                                        .bg(if idx == 0 { rgb(0x1e293b) } else { rgb(0x00000000) })
-                                        .cursor_pointer()
-                                        .child(div().text_xs().text_color(rgb(0xf1f5f9)).child(title))
-                                        .child(div().px(px(6.0)).py(px(2.0)).rounded_md().bg(rgb(0x111622)).text_xs().text_color(rgb(0x94a3b8)).child(shortcut))
-                                }))
-                        )
+                            div().flex().flex_col().gap(px(4.0)).children(
+                                actions
+                                    .into_iter()
+                                    .enumerate()
+                                    .map(|(idx, (title, shortcut))| {
+                                        div()
+                                            .flex()
+                                            .flex_row()
+                                            .items_center()
+                                            .justify_between()
+                                            .px(px(12.0))
+                                            .py(px(8.0))
+                                            .rounded_md()
+                                            .bg(if idx == 0 {
+                                                rgb(0x1e293b)
+                                            } else {
+                                                rgb(0x00000000)
+                                            })
+                                            .cursor_pointer()
+                                            .child(
+                                                div()
+                                                    .text_xs()
+                                                    .text_color(rgb(0xf1f5f9))
+                                                    .child(title),
+                                            )
+                                            .child(
+                                                div()
+                                                    .px(px(6.0))
+                                                    .py(px(2.0))
+                                                    .rounded_md()
+                                                    .bg(rgb(0x111622))
+                                                    .text_xs()
+                                                    .text_color(rgb(0x94a3b8))
+                                                    .child(shortcut),
+                                            )
+                                    }),
+                            ),
+                        ),
                 )
         }
 
@@ -1337,25 +1642,78 @@ pub mod gpui_app {
                                 .flex_row()
                                 .items_center()
                                 .justify_between()
-                                .child(div().text_base().font_weight(FontWeight::BOLD).text_color(rgb(0xf8fafc)).child("Add Email Account"))
-                                .child(div().text_sm().text_color(rgb(0x94a3b8)).cursor_pointer().child("✕"))
+                                .child(
+                                    div()
+                                        .text_base()
+                                        .font_weight(FontWeight::BOLD)
+                                        .text_color(rgb(0xf8fafc))
+                                        .child("Add Email Account"),
+                                )
+                                .child(
+                                    div()
+                                        .text_sm()
+                                        .text_color(rgb(0x94a3b8))
+                                        .cursor_pointer()
+                                        .child("✕"),
+                                ),
                         )
                         .child(
                             div()
                                 .flex()
                                 .flex_col()
                                 .gap(px(8.0))
-                                .child(div().text_xs().text_color(rgb(0x94a3b8)).child("Select Provider:"))
+                                .child(
+                                    div()
+                                        .text_xs()
+                                        .text_color(rgb(0x94a3b8))
+                                        .child("Select Provider:"),
+                                )
                                 .child(
                                     div()
                                         .flex()
                                         .flex_row()
                                         .gap(px(8.0))
-                                        .child(div().px(px(10.0)).py(px(6.0)).rounded_md().bg(rgb(0x2563eb)).text_xs().text_color(rgb(0xffffff)).child("IMAP / SMTP"))
-                                        .child(div().px(px(10.0)).py(px(6.0)).rounded_md().bg(rgb(0x1e293b)).text_xs().text_color(rgb(0x94a3b8)).child("Google OAuth2"))
-                                        .child(div().px(px(10.0)).py(px(6.0)).rounded_md().bg(rgb(0x1e293b)).text_xs().text_color(rgb(0x94a3b8)).child("Fastmail JMAP"))
-                                        .child(div().px(px(10.0)).py(px(6.0)).rounded_md().bg(rgb(0x1e293b)).text_xs().text_color(rgb(0x94a3b8)).child("Microsoft 365"))
-                                )
+                                        .child(
+                                            div()
+                                                .px(px(10.0))
+                                                .py(px(6.0))
+                                                .rounded_md()
+                                                .bg(rgb(0x2563eb))
+                                                .text_xs()
+                                                .text_color(rgb(0xffffff))
+                                                .child("IMAP / SMTP"),
+                                        )
+                                        .child(
+                                            div()
+                                                .px(px(10.0))
+                                                .py(px(6.0))
+                                                .rounded_md()
+                                                .bg(rgb(0x1e293b))
+                                                .text_xs()
+                                                .text_color(rgb(0x94a3b8))
+                                                .child("Google OAuth2"),
+                                        )
+                                        .child(
+                                            div()
+                                                .px(px(10.0))
+                                                .py(px(6.0))
+                                                .rounded_md()
+                                                .bg(rgb(0x1e293b))
+                                                .text_xs()
+                                                .text_color(rgb(0x94a3b8))
+                                                .child("Fastmail JMAP"),
+                                        )
+                                        .child(
+                                            div()
+                                                .px(px(10.0))
+                                                .py(px(6.0))
+                                                .rounded_md()
+                                                .bg(rgb(0x1e293b))
+                                                .text_xs()
+                                                .text_color(rgb(0x94a3b8))
+                                                .child("Microsoft 365"),
+                                        ),
+                                ),
                         )
                         .child(
                             div()
@@ -1364,18 +1722,35 @@ pub mod gpui_app {
                                 .justify_end()
                                 .gap(px(8.0))
                                 .pt(px(12.0))
-                                .child(div().px(px(14.0)).py(px(6.0)).rounded_md().bg(rgb(0x1e293b)).text_xs().text_color(rgb(0xcbd5e1)).cursor_pointer().child("Cancel"))
-                                .child(div().px(px(16.0)).py(px(6.0)).rounded_md().bg(rgb(0x2563eb)).text_xs().text_color(rgb(0xffffff)).cursor_pointer().child("Connect Account"))
-                        )
+                                .child(
+                                    div()
+                                        .px(px(14.0))
+                                        .py(px(6.0))
+                                        .rounded_md()
+                                        .bg(rgb(0x1e293b))
+                                        .text_xs()
+                                        .text_color(rgb(0xcbd5e1))
+                                        .cursor_pointer()
+                                        .child("Cancel"),
+                                )
+                                .child(
+                                    div()
+                                        .px(px(16.0))
+                                        .py(px(6.0))
+                                        .rounded_md()
+                                        .bg(rgb(0x2563eb))
+                                        .text_xs()
+                                        .text_color(rgb(0xffffff))
+                                        .cursor_pointer()
+                                        .child("Connect Account"),
+                                ),
+                        ),
                 )
         }
     }
 
     /// Launch the GPUI Desktop Application
-    pub fn run_gpui_app(
-        sync_rx: flume::Receiver<SyncEvent>,
-        sync_tx: flume::Sender<SyncEvent>,
-    ) {
+    pub fn run_gpui_app(sync_rx: flume::Receiver<SyncEvent>, sync_tx: flume::Sender<SyncEvent>) {
         Application::new().run(move |cx: &mut App| {
             let rx = sync_rx.clone();
             let tx = sync_tx.clone();
@@ -1389,9 +1764,7 @@ pub mod gpui_app {
                     window_min_size: Some(size(px(900.0), px(600.0))),
                     ..Default::default()
                 },
-                move |_window, cx| {
-                    cx.new(|cx| MainWindow::new(cx, rx, tx))
-                },
+                move |_window, cx| cx.new(|cx| MainWindow::new(cx, rx, tx)),
             );
         });
     }

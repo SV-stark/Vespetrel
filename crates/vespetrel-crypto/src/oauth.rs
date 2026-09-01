@@ -187,7 +187,8 @@ impl OAuth2Engine {
         let port = self.redirect_port();
         let addr = format!("127.0.0.1:{port}");
         let listener = tokio::net::TcpListener::bind(&addr).await?;
-        self.wait_for_callback_on_listener(listener, timeout_secs, expected_state).await
+        self.wait_for_callback_on_listener(listener, timeout_secs, expected_state)
+            .await
     }
 
     pub async fn exchange_code(
