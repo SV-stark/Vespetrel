@@ -47,7 +47,7 @@ impl VespetrelApp {
     }
 
     pub fn create_storage_pool(&self) -> anyhow::Result<vespetrel_storage::db::StoragePool> {
-        vespetrel_storage::db::create_pool(&self.db_path)
+        vespetrel_storage::db::create_pool(&self.db_path).map_err(Into::into)
     }
 }
 
