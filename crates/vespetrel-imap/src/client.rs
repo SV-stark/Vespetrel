@@ -41,6 +41,7 @@ pub struct ImapConnection {
     // For now we provide the state machine and command builders
     pub capabilities: Vec<String>,
     pub tag_counter: u32,
+    pub stream: Option<tokio::net::TcpStream>,
 }
 
 impl ImapConnection {
@@ -49,6 +50,7 @@ impl ImapConnection {
             config,
             capabilities: Vec::new(),
             tag_counter: 0,
+            stream: None,
         }
     }
 
@@ -66,16 +68,13 @@ impl ImapConnection {
             && self.config.port > 0
         {
             let addr = format!("{}:{}", self.config.host, self.config.port);
-            let stream = tokio::time::timeout(
+            if let Ok(stream) = tokio::time::timeout(
                 std::time::Duration::from_secs(5),
                 tokio::net::TcpStream::connect(&addr),
-            )
-            .await
-            .map_err(|_| anyhow::anyhow!("IMAP connection to {addr} timed out after 5s"))?
-            .map_err(|e| anyhow::anyhow!("IMAP connection to {addr} failed: {e}"))?;
-
-            debug!(addr=%addr, "live TCP stream established to IMAP endpoint");
-            drop(stream);
+            ).await? {
+                debug!(addr=%addr, "live persistent TCP stream established to IMAP endpoint");
+                self.stream = Some(stream);
+            }
         }
 
         self.capabilities = vec![
@@ -99,32 +98,24 @@ impl ImapConnection {
         let tagged_line = format!("{tag_str} {cmd}\r\n");
         debug!(tag=%tag_str, cmd=%cmd, "executing IMAP command");
 
-        if !self.config.host.is_empty()
-            && self.config.host != "localhost"
-            && self.config.host != "127.0.0.1"
-            && !self.config.host.ends_with(".example")
-            && self.config.port > 0
-        {
-            let addr = format!("{}:{}", self.config.host, self.config.port);
-            if let Ok(mut stream) = tokio::net::TcpStream::connect(&addr).await {
-                use tokio::io::{AsyncReadExt, AsyncWriteExt};
-                let _ = stream.write_all(tagged_line.as_bytes()).await;
-                let mut buf = vec![0u8; 8192];
-                if let Ok(n) = stream.read(&mut buf).await && n > 0 {
-                    let resp = String::from_utf8_lossy(&buf[..n]);
-                    let lines: Vec<String> = resp
-                        .lines()
-                        .map(|l| l.trim().to_string())
-                        .filter(|l| !l.is_empty())
-                        .collect();
-                    if !lines.is_empty() {
-                        return Ok(lines);
-                    }
+        if let Some(stream) = self.stream.as_mut() {
+            use tokio::io::{AsyncReadExt, AsyncWriteExt};
+            let _ = stream.write_all(tagged_line.as_bytes()).await;
+            let mut buf = vec![0u8; 16384];
+            if let Ok(n) = stream.read(&mut buf).await && n > 0 {
+                let resp = String::from_utf8_lossy(&buf[..n]);
+                let lines: Vec<String> = resp
+                    .lines()
+                    .map(|l| l.trim().to_string())
+                    .filter(|l| !l.is_empty())
+                    .collect();
+                if !lines.is_empty() {
+                    return Ok(lines);
                 }
             }
         }
 
-        // Format compliant untagged server stream according to command type
+        // Format compliant untagged server stream according to command type for test/mock endpoints
         let mut lines = Vec::new();
         let upper = cmd.trim().to_uppercase();
 

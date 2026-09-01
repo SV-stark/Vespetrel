@@ -98,31 +98,22 @@ pub mod gpui_app {
                     is_flagged: true,
                     has_attachments: true,
                 },
-                MessageSummary {
-                    id: uuid::Uuid::new_v4().to_string(),
-                    thread_id: Some(uuid::Uuid::new_v4().to_string()),
-                    subject: Some("End-to-End Encryption & Security Audit".into()),
-                    from_address: "security@vespetrel.example".into(),
-                    from_name: Some("Security Team".into()),
-                    snippet: Some("Autocrypt 1.1 keys negotiated. Remote tracking pixels and external trackers have been automatically stripped.".into()),
-                    sent_at: now - chrono::Duration::hours(2),
-                    is_read: true,
-                    is_flagged: false,
-                    has_attachments: false,
-                },
-                MessageSummary {
-                    id: uuid::Uuid::new_v4().to_string(),
-                    thread_id: Some(uuid::Uuid::new_v4().to_string()),
-                    subject: Some("Release Announcement: 120 FPS Rendering & Instant FTS5 Search".into()),
-                    from_address: "updates@vespetrel.example".into(),
-                    from_name: Some("Vespetrel Releases".into()),
-                    snippet: Some("Sub-15ms search across 200,000+ emails using SQLite WAL + FTS5 full-text indexing.".into()),
-                    sent_at: now - chrono::Duration::days(1),
-                    is_read: true,
-                    is_flagged: true,
-                    has_attachments: false,
-                },
             ];
+
+            if let Some(pool) = &storage_pool {
+                let pool_clone = pool.clone();
+                cx.spawn(async move |this, cx| {
+                    if let Ok(conn) = pool_clone.get().await {
+                        let _ = conn.interact(move |c| {
+                            let _ = vespetrel_storage::repo::list_accounts(c);
+                            let _ = vespetrel_storage::repo::get_user_settings(c);
+                        }).await;
+                    }
+                    let _ = this.update(cx, |view, cx| {
+                        cx.notify();
+                    });
+                }).detach();
+            }
 
             let calendar_events = vec![
                 CalendarEvent {

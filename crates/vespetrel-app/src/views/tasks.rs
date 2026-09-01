@@ -87,7 +87,8 @@ impl TaskListView {
     ) -> &TaskItem {
         let task = TaskItem::new(calendar_id, title);
         self.tasks.push(task);
-        self.tasks.last().expect("task was just pushed into tasks list")
+        let idx = self.tasks.len() - 1;
+        &self.tasks[idx]
     }
 
     pub fn toggle_completion(&mut self, id: &str) {

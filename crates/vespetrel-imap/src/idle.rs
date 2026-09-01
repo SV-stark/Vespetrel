@@ -101,17 +101,42 @@ where
                 debug!(cmd=%idle_cmd, "issuing IDLE command");
                 let _ = conn.execute_cmd(idle_cmd).await;
 
-                debug!("entering IMAP IDLE mode");
-                if let Some(event) = idle_loop.handle_untagged("* 1 EXISTS") {
-                    on_event(event);
-                }
-
-                // Wait for either renew interval or connection drop
-                tokio::select! {
-                    _ = renew_ticker.tick() => {
-                        debug!("25-minute IDLE renewal interval elapsed, cycling IDLE/DONE");
-                        let _ = conn.execute_cmd("DONE").await;
-                        let _ = conn.execute_cmd(conn.cmd_idle()).await;
+                if let Some(stream) = conn.stream.as_mut() {
+                    use tokio::io::AsyncReadExt;
+                    let mut buf = [0u8; 4096];
+                    loop {
+                        tokio::select! {
+                            res = stream.read(&mut buf) => {
+                                match res {
+                                    Ok(n) if n > 0 => {
+                                        let text = String::from_utf8_lossy(&buf[..n]);
+                                        for line in text.lines() {
+                                            if let Some(ev) = idle_loop.handle_untagged(line) {
+                                                on_event(ev);
+                                            }
+                                        }
+                                    }
+                                    _ => {
+                                        debug!("IDLE connection stream closed, restarting connection");
+                                        break;
+                                    }
+                                }
+                            }
+                            _ = renew_ticker.tick() => {
+                                debug!("25-minute IDLE renewal interval elapsed, cycling IDLE/DONE");
+                                let _ = conn.execute_cmd("DONE").await;
+                                let _ = conn.execute_cmd(conn.cmd_idle()).await;
+                            }
+                        }
+                    }
+                } else {
+                    // Fallback for mock/test environments
+                    tokio::select! {
+                        _ = renew_ticker.tick() => {
+                            debug!("25-minute IDLE renewal interval elapsed, cycling IDLE/DONE");
+                            let _ = conn.execute_cmd("DONE").await;
+                            let _ = conn.execute_cmd(conn.cmd_idle()).await;
+                        }
                     }
                 }
             }
