@@ -83,6 +83,11 @@ impl Folder {
         }
     }
 
+    pub fn with_role(mut self, role: FolderRole) -> Self {
+        self.role = role;
+        self
+    }
+
     pub fn with_color(mut self, color: impl Into<String>) -> Self {
         self.color = Some(color.into());
         self

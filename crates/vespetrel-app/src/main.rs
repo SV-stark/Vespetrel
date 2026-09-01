@@ -160,6 +160,41 @@ async fn main() -> anyhow::Result<()> {
         return Ok(());
     }
 
+    // Launch GUI mode when gpui feature is active (default desktop experience)
+    #[cfg(feature = "gpui")]
+    let run_gui = args.contains(&"--gui".to_string())
+        || (!args.contains(&"--cli".to_string()) && !is_headless);
+
+    #[cfg(not(feature = "gpui"))]
+    let run_gui = false;
+
+    if run_gui {
+        #[cfg(feature = "gpui")]
+        {
+            let (gui_tx, gui_rx) = flume::unbounded();
+            let app_tx = gui_tx.clone();
+            let coordinator_sender = coordinator.event_sender();
+
+            // Bridge Tokio sync events to GPUI channel
+            tokio::spawn(async move {
+                while let Some(event) = rx.recv().await {
+                    let _ = gui_tx.send(event);
+                }
+            });
+
+            // Bridge GPUI outgoing sync requests to Tokio coordinator
+            let gui_rx_clone = gui_rx.clone();
+            tokio::spawn(async move {
+                while let Ok(event) = gui_rx_clone.recv_async().await {
+                    let _ = coordinator_sender.send(event);
+                }
+            });
+
+            vespetrel_app::gui::gpui_app::run_gpui_app(gui_rx, app_tx);
+            return Ok(());
+        }
+    }
+
     // Interactive Desktop Mode
     print_banner(&db_path, theme);
 

@@ -11,3 +11,4 @@ pub use command_palette::{ActionCategory, CommandPalette, PaletteAction};
 pub use views::quick_filter::QuickFilterState;
 
 pub mod gpui_bridge;
+pub mod gui;

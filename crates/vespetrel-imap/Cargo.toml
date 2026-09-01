@@ -20,4 +20,5 @@ mail-parser = { workspace = true }
 base64 = "0.22"
 rustls = { workspace = true }
 memchr = { workspace = true }
+chrono = { workspace = true }
 

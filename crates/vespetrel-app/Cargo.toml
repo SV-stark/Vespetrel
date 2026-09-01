@@ -10,10 +10,8 @@ name = "vespetrel"
 path = "src/main.rs"
 
 [features]
-default = []
-# Enable when real UI deps are available (requires adding gpui git deps):
-# gpui = ["dep:wry"]
-gpui = []
+default = ["gpui"]
+gpui = ["dep:gpui"]
 
 [dependencies]
 vespetrel-core = { path = "../vespetrel-core" }
@@ -40,6 +38,7 @@ parking_lot = { workspace = true }
 compact_str = { workspace = true }
 smallvec = { workspace = true }
 regex = { workspace = true }
+gpui = { workspace = true, optional = true }
 
 
 
