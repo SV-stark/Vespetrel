@@ -51,7 +51,7 @@ impl ImapConnection {
     }
 
     pub async fn connect(&mut self) -> anyhow::Result<()> {
-        info!(host=%self.config.host, port=self.config.port, "connecting to IMAP");
+        info!(host=%self.config.host, port=self.config.port, use_tls=self.config.use_tls, "connecting to IMAP");
         if !self.config.host.is_empty()
             && self.config.host != "localhost"
             && self.config.host != "127.0.0.1"
@@ -59,14 +59,16 @@ impl ImapConnection {
             && self.config.port > 0
         {
             let addr = format!("{}:{}", self.config.host, self.config.port);
-            if let Ok(Ok(_stream)) = tokio::time::timeout(
+            let stream = tokio::time::timeout(
                 std::time::Duration::from_secs(5),
                 tokio::net::TcpStream::connect(&addr),
             )
             .await
-            {
-                debug!(addr=%addr, "live TCP stream established to IMAP endpoint");
-            }
+            .map_err(|_| anyhow::anyhow!("IMAP connection to {addr} timed out after 5s"))?
+            .map_err(|e| anyhow::anyhow!("IMAP connection to {addr} failed: {e}"))?;
+
+            debug!(addr=%addr, "live TCP stream established to IMAP endpoint");
+            drop(stream);
         }
 
         self.capabilities = vec![
@@ -146,6 +148,35 @@ impl ImapConnection {
     }
 }
 
+/// Helper to parse quoted string or atom with backslash escape support
+fn parse_imap_token(s: &str) -> Option<(String, &str)> {
+    let trimmed = s.trim_start();
+    if trimmed.starts_with('"') {
+        let mut result = String::new();
+        let mut chars = trimmed[1..].char_indices();
+        let mut escaped = false;
+        while let Some((idx, c)) = chars.next() {
+            if escaped {
+                result.push(c);
+                escaped = false;
+            } else if c == '\\' {
+                escaped = true;
+            } else if c == '"' {
+                let remainder = &trimmed[1 + idx + 1..];
+                return Some((result, remainder));
+            } else {
+                result.push(c);
+            }
+        }
+        Some((result, ""))
+    } else {
+        let end = trimmed.find(char::is_whitespace).unwrap_or(trimmed.len());
+        let token = &trimmed[..end];
+        let remainder = &trimmed[end..];
+        Some((token.to_string(), remainder))
+    }
+}
+
 /// Parse an untagged `* LIST (\Flags) "/" "FolderName"` line using SIMD memchr
 pub fn parse_imap_list_line(line: &str) -> Option<vespetrel_core::RemoteFolder> {
     let bytes = line.as_bytes();
@@ -173,16 +204,9 @@ pub fn parse_imap_list_line(line: &str) -> Option<vespetrel_core::RemoteFolder> 
     }
 
     let rest = line[close_paren + 1..].trim();
-    let name_str: String = if let Some(last_quote_end) = rest.rfind('"') {
-        let before = &rest[..last_quote_end];
-        if let Some(first_quote_start) = before.rfind('"') {
-            before[first_quote_start + 1..].replace("\\\"", "\"")
-        } else {
-            rest.trim_matches('"').to_string()
-        }
-    } else {
-        rest.split_whitespace().last().unwrap_or(rest).to_string()
-    };
+    // In IMAP LIST format, the delimiter comes first (e.g. "/" or NIL), followed by folder name
+    let (_delimiter, mailbox_rest) = parse_imap_token(rest)?;
+    let (name_str, _) = parse_imap_token(mailbox_rest)?;
 
     Some(vespetrel_core::RemoteFolder {
         remote_id: name_str.clone(),
@@ -241,5 +265,10 @@ mod tests {
         let folder_sent = parse_imap_list_line(line_sent).unwrap();
         assert_eq!(folder_sent.name, "[Gmail]/Sent Mail");
         assert_eq!(folder_sent.role_hint.as_deref(), Some("\\Sent"));
+
+        let line_escaped = "* LIST (\\Archive) \"/\" \"My \\\"Escaped\\\" Archive\"";
+        let folder_escaped = parse_imap_list_line(line_escaped).unwrap();
+        assert_eq!(folder_escaped.name, "My \"Escaped\" Archive");
+        assert_eq!(folder_escaped.role_hint.as_deref(), Some("\\Archive"));
     }
 }

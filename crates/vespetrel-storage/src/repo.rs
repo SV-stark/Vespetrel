@@ -1,5 +1,6 @@
 use chrono::{DateTime, Utc};
 use rusqlite::{Connection, OptionalExtension, params};
+use tracing::warn;
 
 use vespetrel_core::{Account, Folder, Message};
 
@@ -31,20 +32,49 @@ pub fn upsert_account(conn: &Connection, acct: &Account) -> anyhow::Result<()> {
 pub fn list_accounts(conn: &Connection) -> anyhow::Result<Vec<Account>> {
     let mut stmt = conn.prepare("SELECT id, name, email, provider_type, auth_config, sync_state, is_active, color, created_at FROM accounts")?;
     let rows = stmt.query_map([], |row| {
+        let id: String = row.get(0)?;
         let pt_str: String = row.get(3)?;
-        let pt = pt_str.parse().unwrap_or(vespetrel_core::ProviderType::Imap);
+        let pt = match pt_str.parse() {
+            Ok(p) => p,
+            Err(e) => {
+                warn!(account_id=%id, error=%e, raw=%pt_str, "corrupted provider_type in DB, defaulting to Imap");
+                vespetrel_core::ProviderType::Imap
+            }
+        };
         let auth_json: String = row.get(4)?;
         let sync_json: String = row.get(5)?;
+        let auth_config = match serde_json::from_str(&auth_json) {
+            Ok(a) => a,
+            Err(e) => {
+                warn!(account_id=%id, error=%e, "corrupted auth_config JSON in DB");
+                Default::default()
+            }
+        };
+        let sync_state = match serde_json::from_str(&sync_json) {
+            Ok(s) => s,
+            Err(e) => {
+                warn!(account_id=%id, error=%e, "corrupted sync_state JSON in DB");
+                Default::default()
+            }
+        };
+        let created_ts: i64 = row.get(8)?;
+        let created_at = match DateTime::from_timestamp(created_ts, 0) {
+            Some(dt) => dt,
+            None => {
+                warn!(account_id=%id, timestamp=created_ts, "corrupted created_at timestamp in DB");
+                Utc::now()
+            }
+        };
         Ok(Account {
-            id: row.get(0)?,
+            id,
             name: row.get(1)?,
             email: row.get(2)?,
             provider_type: pt,
-            auth_config: serde_json::from_str(&auth_json).unwrap_or_default(),
-            sync_state: serde_json::from_str(&sync_json).unwrap_or_default(),
+            auth_config,
+            sync_state,
             is_active: row.get::<_, i64>(6)? != 0,
             color: row.get(7)?,
-            created_at: DateTime::from_timestamp(row.get::<_, i64>(8)?, 0).unwrap_or_else(Utc::now),
+            created_at,
         })
     })?;
     rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
@@ -274,13 +304,15 @@ pub fn delete_message(conn: &Connection, message_id: &str) -> anyhow::Result<()>
 
     if let Some(path_str) = blob_path {
         let p = std::path::Path::new(&path_str);
-        let is_safe_ext = p
-            .extension()
-            .and_then(|e| e.to_str())
-            .is_some_and(|ext| ext == "lz4" || ext == "zst" || ext == "blob");
-
-        if is_safe_ext && !path_str.contains("..") && p.is_file() {
-            let _ = std::fs::remove_file(p);
+        if let Some(ext) = p.extension().and_then(|e| e.to_str()) {
+            if (ext == "lz4" || ext == "zst" || ext == "blob")
+                && !path_str.contains("..")
+                && p.is_file()
+            {
+                if let Ok(canonical) = p.canonicalize() {
+                    let _ = std::fs::remove_file(canonical);
+                }
+            }
         }
     }
 

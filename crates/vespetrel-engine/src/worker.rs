@@ -95,6 +95,10 @@ impl AccountWorker {
         loop {
             tokio::select! {
                 _ = interval.tick() => {
+                    // Introduce random jitter to prevent thundering herd
+                    let jitter_ms = rand::random::<u64>() % 2000;
+                    tokio::time::sleep(Duration::from_millis(jitter_ms)).await;
+
                     match self.sync_once().await {
                         Ok(_) => {
                             backoff = Duration::from_secs(1);

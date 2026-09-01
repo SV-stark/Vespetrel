@@ -227,7 +227,18 @@ pub mod gpui_app {
                     }
                     cx.notify();
                 }
-                _ => {}
+                SyncEvent::SyncError { folder, error } => {
+                    self.status_message = format!("⚠️ Sync error ({folder}): {error}");
+                    cx.notify();
+                }
+                SyncEvent::SyncFinished { account_id: _ } => {
+                    self.status_message = "All mailboxes synchronized".into();
+                    cx.notify();
+                }
+                SyncEvent::FolderListUpdated(_) => {
+                    self.status_message = "Folders updated".into();
+                    cx.notify();
+                }
             }
         }
 
@@ -239,7 +250,7 @@ pub mod gpui_app {
         }
 
         pub fn filtered_messages(&self) -> Vec<&MessageSummary> {
-            let q = self.search_query.trim().to_lowercase();
+            let q = self.search_query.trim();
             self.messages
                 .iter()
                 .filter(|m| {
@@ -252,15 +263,13 @@ pub mod gpui_app {
                     if !flag_match {
                         return false;
                     }
-                    if !q.is_empty() {
-                        let subj = m.subject.as_deref().unwrap_or("").to_lowercase();
-                        let from = m.from_address.to_lowercase();
-                        let name = m.from_name.as_deref().unwrap_or("").to_lowercase();
-                        let snip = m.snippet.as_deref().unwrap_or("").to_lowercase();
-                        subj.contains(&q) || from.contains(&q) || name.contains(&q) || snip.contains(&q)
-                    } else {
-                        true
+                    if q.is_empty() {
+                        return true;
                     }
+                    m.subject.as_deref().is_some_and(|s| contains_ignore_case(s, q))
+                        || contains_ignore_case(&m.from_address, q)
+                        || m.from_name.as_deref().is_some_and(|n| contains_ignore_case(n, q))
+                        || m.snippet.as_deref().is_some_and(|sn| contains_ignore_case(sn, q))
                 })
                 .collect()
         }
@@ -332,6 +341,18 @@ pub mod gpui_app {
             self.compose_body.clear();
             cx.notify();
         }
+    }
+
+    fn contains_ignore_case(haystack: &str, needle: &str) -> bool {
+        if needle.is_empty() {
+            return true;
+        }
+        if haystack.len() < needle.len() {
+            return false;
+        }
+        haystack
+            .to_lowercase()
+            .contains(&needle.to_lowercase())
     }
 
     impl Render for MainWindow {

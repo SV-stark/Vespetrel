@@ -55,12 +55,19 @@ impl ThreadTree {
             };
         }
 
-        // Map: message_id_header -> index in table
-        let mut id_to_msg: AHashMap<String, &crate::Message> =
-            AHashMap::with_capacity(messages.len());
-        let mut child_to_parent: AHashMap<String, String> = AHashMap::with_capacity(messages.len());
+        // Cap processing to 50,000 messages to prevent memory exhaustion
+        let msg_slice = if messages.len() > 50_000 {
+            &messages[..50_000]
+        } else {
+            messages
+        };
+        let cap = msg_slice.len();
 
-        for msg in messages {
+        // Map: message_id_header -> index in table
+        let mut id_to_msg: AHashMap<String, &crate::Message> = AHashMap::with_capacity(cap);
+        let mut child_to_parent: AHashMap<String, String> = AHashMap::with_capacity(cap);
+
+        for msg in msg_slice {
             let key = msg
                 .message_id_header
                 .clone()
@@ -86,11 +93,10 @@ impl ThreadTree {
         }
 
         // Build child adjacency
-        let mut parent_to_children: AHashMap<String, Vec<String>> =
-            AHashMap::with_capacity(messages.len());
+        let mut parent_to_children: AHashMap<String, Vec<String>> = AHashMap::with_capacity(cap);
         let mut root_keys = Vec::new();
 
-        for msg in messages {
+        for msg in msg_slice {
             let key = msg
                 .message_id_header
                 .clone()
@@ -122,7 +128,7 @@ impl ThreadTree {
 
             let msg = id_to_msg.get(key)?;
             let mut children = Vec::new();
-            if depth <= 100
+            if depth <= 50
                 && let Some(child_keys) = parent_to_children.get(key)
             {
                 for ck in child_keys {

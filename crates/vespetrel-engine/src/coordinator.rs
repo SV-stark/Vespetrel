@@ -11,6 +11,8 @@ use crate::worker::{AccountWorker, WorkerCommand};
 pub struct SyncCoordinator {
     /// account_id -> command sender
     workers: HashMap<String, mpsc::UnboundedSender<WorkerCommand>>,
+    /// worker join handles for supervision and graceful shutdown
+    worker_handles: Vec<tokio::task::JoinHandle<()>>,
     /// UI event sender (Tokio mpsc -> GPUI)
     event_tx: mpsc::UnboundedSender<SyncEvent>,
     /// Bounded event sender for backpressure control
@@ -26,6 +28,7 @@ impl SyncCoordinator {
         let (tx, rx) = mpsc::unbounded_channel();
         let coord = Self {
             workers: HashMap::new(),
+            worker_handles: Vec::new(),
             event_tx: tx,
             flume_tx: None,
             storage_pool: None,
@@ -39,6 +42,7 @@ impl SyncCoordinator {
         let (tx, _rx) = mpsc::unbounded_channel();
         let coord = Self {
             workers: HashMap::new(),
+            worker_handles: Vec::new(),
             event_tx: tx,
             flume_tx: Some(flume_tx),
             storage_pool: None,
@@ -82,7 +86,8 @@ impl SyncCoordinator {
         if let Some(pool) = &self.storage_pool {
             worker = worker.with_storage_pool(pool.clone());
         }
-        tokio::spawn(worker.run());
+        let handle = tokio::spawn(worker.run());
+        self.worker_handles.push(handle);
         self.workers.insert(account_id.clone(), cmd_tx);
         info!(account_id=%account_id, "spawned worker with storage wiring");
     }
@@ -103,17 +108,14 @@ impl SyncCoordinator {
         for (_, tx) in self.workers.drain() {
             let _ = tx.send(WorkerCommand::Stop);
         }
+        for handle in self.worker_handles.drain(..) {
+            handle.abort();
+        }
     }
 }
 
-impl Default for SyncCoordinator {
-    fn default() -> Self {
-        let (tx, _rx) = mpsc::unbounded_channel();
-        Self {
-            workers: HashMap::new(),
-            event_tx: tx,
-            flume_tx: None,
-            storage_pool: None,
-        }
+impl Drop for SyncCoordinator {
+    fn drop(&mut self) {
+        self.stop_all();
     }
 }

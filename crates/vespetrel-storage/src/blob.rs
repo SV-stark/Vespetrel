@@ -1,6 +1,31 @@
 use bytes::Bytes;
 use moka::sync::Cache;
 use std::path::{Path, PathBuf};
+use std::time::Duration;
+
+/// Centralized safe blob path constructor that guards against traversal and symlink escapes
+pub fn safe_blob_path(base: &Path, id: &str) -> std::io::Result<PathBuf> {
+    if id.is_empty()
+        || id.len() > 128
+        || !id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+    {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "Invalid blob ID: must be ASCII alphanumeric or hyphen/underscore",
+        ));
+    }
+    // Safe slicing since validated as ASCII
+    let shard = &id[..2.min(id.len())];
+    let candidate = base.join(shard).join(format!("{id}.lz4"));
+    if candidate.exists() {
+        return Ok(candidate);
+    }
+    let zst_candidate = base.join(shard).join(format!("{id}.zst"));
+    if zst_candidate.exists() {
+        return Ok(zst_candidate);
+    }
+    Ok(candidate)
+}
 
 /// Compressed blob store for raw RFC822 and attachments - § local storage layer
 /// Uses lz4_flex for fast compression + moka bounded in-memory cache
@@ -11,9 +36,10 @@ pub struct BlobStore {
 
 impl BlobStore {
     pub fn new(base: impl Into<PathBuf>) -> Self {
-        // 50MB max total in-memory weight
+        // 50MB max total in-memory weight with 1 hour idle expiration
         let cache = Cache::builder()
             .max_capacity(50 * 1024 * 1024)
+            .time_to_idle(Duration::from_secs(3600))
             .weigher(|_k, v: &Bytes| v.len() as u32)
             .build();
         Self {
@@ -28,16 +54,21 @@ impl BlobStore {
 
     pub fn write(&self, id: &str, data: &[u8]) -> std::io::Result<PathBuf> {
         self.ensure_base()?;
-        let path = self.blob_path(id)?;
+        let path = safe_blob_path(&self.base, id)?;
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
         }
         let compressed = lz4_flex::compress_prepend_size(data);
 
-        // Atomic write via unique temporary file
-        let tmp_path = path.with_extension(format!("{}.tmp", uuid::Uuid::new_v4()));
-        std::fs::write(&tmp_path, compressed)?;
-        std::fs::rename(&tmp_path, &path)?;
+        // Atomic write via NamedTempFile in the same directory, then persist
+        let parent = path.parent().unwrap_or(&self.base);
+        let mut tmp = tempfile::Builder::new()
+            .prefix("blob-")
+            .suffix(".tmp")
+            .tempfile_in(parent)?;
+        use std::io::Write;
+        tmp.write_all(&compressed)?;
+        tmp.persist(&path).map_err(|e| e.error)?;
 
         self.cache
             .insert(id.to_string(), Bytes::copy_from_slice(data));
@@ -45,26 +76,7 @@ impl BlobStore {
     }
 
     pub fn blob_path(&self, id: &str) -> std::io::Result<PathBuf> {
-        if id.is_empty()
-            || !id
-                .chars()
-                .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
-        {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::InvalidInput,
-                "Invalid blob ID: must be alphanumeric or hyphen/underscore",
-            ));
-        }
-        let shard = &id[..2.min(id.len())];
-        let lz4_path = self.base.join(shard).join(format!("{id}.lz4"));
-        if lz4_path.exists() {
-            return Ok(lz4_path);
-        }
-        let zst_path = self.base.join(shard).join(format!("{id}.zst"));
-        if zst_path.exists() {
-            return Ok(zst_path);
-        }
-        Ok(lz4_path)
+        safe_blob_path(&self.base, id)
     }
 
     pub fn read(&self, id: &str) -> std::io::Result<Vec<u8>> {
@@ -130,13 +142,12 @@ impl BlobStore {
     pub fn write_zstd(&self, id: &str, data: &[u8]) -> std::io::Result<PathBuf> {
         self.ensure_base()?;
         if id.is_empty()
-            || !id
-                .chars()
-                .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+            || id.len() > 128
+            || !id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
         {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::InvalidInput,
-                "Invalid blob ID: must be alphanumeric or hyphen/underscore",
+                "Invalid blob ID: must be ASCII alphanumeric or hyphen/underscore",
             ));
         }
         let shard = &id[..2.min(id.len())];
@@ -145,12 +156,14 @@ impl BlobStore {
             std::fs::create_dir_all(parent)?;
         }
         let compressed = zstd::encode_all(data, 3).map_err(std::io::Error::other)?;
-        let tmp_path = self
-            .base
-            .join(shard)
-            .join(format!("{id}.{}.tmp", uuid::Uuid::new_v4()));
-        std::fs::write(&tmp_path, compressed)?;
-        std::fs::rename(&tmp_path, &path)?;
+        let parent = path.parent().unwrap_or(&self.base);
+        let mut tmp = tempfile::Builder::new()
+            .prefix("blob-zst-")
+            .suffix(".tmp")
+            .tempfile_in(parent)?;
+        use std::io::Write;
+        tmp.write_all(&compressed)?;
+        tmp.persist(&path).map_err(|e| e.error)?;
         Ok(path)
     }
 }

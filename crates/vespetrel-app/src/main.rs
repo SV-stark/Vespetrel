@@ -153,7 +153,7 @@ async fn main() -> anyhow::Result<()> {
             let _ = sender.send(SyncEvent::MessagesInserted(msgs));
         });
 
-        if let Some(ev) = rx.recv().await {
+        if let Ok(Some(ev)) = tokio::time::timeout(std::time::Duration::from_secs(5), rx.recv()).await {
             println!("✓ SyncEvent received: {ev:?}");
         }
         println!("Startup check passed successfully.");
@@ -171,26 +171,25 @@ async fn main() -> anyhow::Result<()> {
     if run_gui {
         #[cfg(feature = "gpui")]
         {
-            let (gui_tx, gui_rx) = flume::unbounded();
-            let app_tx = gui_tx.clone();
+            let (engine_to_gui_tx, engine_to_gui_rx) = flume::unbounded();
+            let (gui_to_engine_tx, gui_to_engine_rx) = flume::unbounded();
             let coordinator_sender = coordinator.event_sender();
 
             // Bridge Tokio sync events to GPUI channel
             tokio::spawn(async move {
                 while let Some(event) = rx.recv().await {
-                    let _ = gui_tx.send(event);
+                    let _ = engine_to_gui_tx.send(event);
                 }
             });
 
             // Bridge GPUI outgoing sync requests to Tokio coordinator
-            let gui_rx_clone = gui_rx.clone();
             tokio::spawn(async move {
-                while let Ok(event) = gui_rx_clone.recv_async().await {
+                while let Ok(event) = gui_to_engine_rx.recv_async().await {
                     let _ = coordinator_sender.send(event);
                 }
             });
 
-            vespetrel_app::gui::gpui_app::run_gpui_app(gui_rx, app_tx);
+            vespetrel_app::gui::gpui_app::run_gpui_app(engine_to_gui_rx, gui_to_engine_tx);
             return Ok(());
         }
     }

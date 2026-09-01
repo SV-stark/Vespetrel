@@ -8299,6 +8299,7 @@ dependencies = [
  "mail-parser",
  "memchr",
  "parking_lot",
+ "rand 0.8.8",
  "serde",
  "serde_json",
  "simdutf8",
@@ -8409,11 +8410,13 @@ dependencies = [
  "serde",
  "serde_json",
  "simdutf8",
+ "tempfile",
  "thiserror 2.0.20",
  "tokio",
  "tracing",
  "uuid",
  "vespetrel-core",
+ "zeroize",
  "zstd",
 ]
 

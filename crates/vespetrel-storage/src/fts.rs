@@ -14,11 +14,13 @@ pub fn escape_fts5_query(raw: &str) -> String {
     for word in raw.split_whitespace() {
         let clean: String = word
             .chars()
-            .filter(|c| c.is_alphanumeric() || *c == '@' || *c == '.' || *c == '_' || *c == '-')
+            .filter(|c| c.is_alphanumeric() || *c == '@' || *c == '.' || *c == '_' || *c == '-' || *c == '+' || *c == '#' || *c == '"')
             .collect();
         if !clean.is_empty() {
+            // Double embedded quotes to prevent FTS5 injection: " -> ""
+            let escaped = clean.replace('"', "\"\"");
             // Enclose each token in double quotes to prevent FTS5 keyword collisions
-            terms.push(format!("\"{clean}\""));
+            terms.push(format!("\"{escaped}\""));
         }
     }
     terms.join(" ")
@@ -73,6 +75,10 @@ mod tests {
         assert_eq!(
             escape_fts5_query("user@example.com OR 1=1"),
             "\"user@example.com\" \"OR\" \"11\""
+        );
+        assert_eq!(
+            escape_fts5_query("\"test\" OR C++"),
+            "\"\"\"test\"\"\" \"OR\" \"C++\""
         );
         assert_eq!(escape_fts5_query("   "), "");
     }

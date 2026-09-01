@@ -46,6 +46,37 @@ pub struct SyncMessage {
     pub mod_seq: Option<u64>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+pub struct Uid(pub u32);
+
+impl From<u32> for Uid {
+    fn from(v: u32) -> Self {
+        Self(v)
+    }
+}
+
+impl std::fmt::Display for Uid {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum ProviderError {
+    #[error("Authentication failed: {0}")]
+    AuthError(String),
+    #[error("UIDVALIDITY changed from {expected} to {actual} - local cache invalidated")]
+    UidValidityChanged { expected: u32, actual: u32 },
+    #[error("Protocol error: {0}")]
+    Protocol(String),
+    #[error("Connection timed out: {0}")]
+    Timeout(String),
+    #[error("IO error: {0}")]
+    Io(#[from] std::io::Error),
+    #[error("Other provider error: {0}")]
+    Other(String),
+}
+
 #[derive(Debug, Clone)]
 pub enum SyncEvent {
     FolderListUpdated(Vec<RemoteFolder>),

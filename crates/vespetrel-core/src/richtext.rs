@@ -48,18 +48,19 @@ impl RichTextDocument {
 
     /// Toggle formatting style over selection (e.g., Bold [Ctrl+B], Italic [Ctrl+I])
     pub fn toggle_style(&mut self, selection: Range<usize>, style: InlineStyle) {
-        if selection.is_empty() {
+        let snapped = snap_range_to_char_boundaries(&self.text, selection);
+        if snapped.is_empty() {
             return;
         }
         if let Some(pos) = self
             .spans
             .iter()
-            .position(|s| s.range == selection && s.style == style)
+            .position(|s| s.range == snapped && s.style == style)
         {
             self.spans.remove(pos);
         } else {
             self.spans.push(TextSpan {
-                range: selection,
+                range: snapped,
                 style,
                 link_url: None,
             });
@@ -68,11 +69,12 @@ impl RichTextDocument {
 
     /// Attach hyperlink to selected text [Ctrl+K]
     pub fn add_link(&mut self, selection: Range<usize>, url: impl Into<String>) {
-        if selection.is_empty() {
+        let snapped = snap_range_to_char_boundaries(&self.text, selection);
+        if snapped.is_empty() {
             return;
         }
         self.spans.push(TextSpan {
-            range: selection,
+            range: snapped,
             style: InlineStyle::Underline,
             link_url: Some(url.into()),
         });
@@ -136,8 +138,46 @@ impl RichTextDocument {
                 }
             }
         } else {
+            let mut in_bullet_list = false;
+            let mut in_numbered_list = false;
+
             for (range, kind) in &self.blocks {
                 let formatted_inner = render_inline_spans(&self.text, range.clone(), &self.spans);
+
+                // Handle list transitions
+                match kind {
+                    BlockKind::BulletList => {
+                        if in_numbered_list {
+                            html.push_str("</ol>\n");
+                            in_numbered_list = false;
+                        }
+                        if !in_bullet_list {
+                            html.push_str("<ul style=\"margin: 6px 0; padding-left: 20px;\">\n");
+                            in_bullet_list = true;
+                        }
+                    }
+                    BlockKind::NumberedList(_) => {
+                        if in_bullet_list {
+                            html.push_str("</ul>\n");
+                            in_bullet_list = false;
+                        }
+                        if !in_numbered_list {
+                            html.push_str("<ol style=\"margin: 6px 0; padding-left: 20px;\">\n");
+                            in_numbered_list = true;
+                        }
+                    }
+                    _ => {
+                        if in_bullet_list {
+                            html.push_str("</ul>\n");
+                            in_bullet_list = false;
+                        }
+                        if in_numbered_list {
+                            html.push_str("</ol>\n");
+                            in_numbered_list = false;
+                        }
+                    }
+                }
+
                 match kind {
                     BlockKind::Heading(1) => {
                         html.push_str(&format!("<h1 style=\"font-size: 1.5rem; font-weight: 700; margin: 16px 0 8px;\">{formatted_inner}</h1>\n"));
@@ -155,7 +195,7 @@ impl RichTextDocument {
                     }
                     BlockKind::NumberedList(num) => {
                         html.push_str(&format!(
-                            "<li value=\"{num}\" style=\"margin-left: 20px;\">{formatted_inner}</li>\n"
+                            "<li value=\"{num}\" style=\"margin: 4px 0;\">{formatted_inner}</li>\n"
                         ));
                     }
                     BlockKind::Blockquote => {
@@ -175,6 +215,13 @@ impl RichTextDocument {
                     }
                 }
             }
+
+            if in_bullet_list {
+                html.push_str("</ul>\n");
+            }
+            if in_numbered_list {
+                html.push_str("</ol>\n");
+            }
         }
 
         html.push_str("</div>");
@@ -184,6 +231,35 @@ impl RichTextDocument {
     pub fn to_plain_text(&self) -> &str {
         &self.text
     }
+}
+
+/// Snaps arbitrary byte range to nearest valid UTF-8 character boundaries within string
+pub fn snap_range_to_char_boundaries(text: &str, range: Range<usize>) -> Range<usize> {
+    if text.is_empty() {
+        return 0..0;
+    }
+    let len = text.len();
+    let start_clamped = range.start.min(len);
+    let end_clamped = range.end.min(len);
+
+    let start = if text.is_char_boundary(start_clamped) {
+        start_clamped
+    } else {
+        (0..=start_clamped)
+            .rev()
+            .find(|&i| text.is_char_boundary(i))
+            .unwrap_or(0)
+    };
+
+    let end = if text.is_char_boundary(end_clamped) {
+        end_clamped
+    } else {
+        (end_clamped..=len)
+            .find(|&i| text.is_char_boundary(i))
+            .unwrap_or(len)
+    };
+
+    start..end.max(start)
 }
 
 fn parse_inline_markdown(line: &str, base_offset: usize) -> (String, Vec<TextSpan>) {
@@ -406,18 +482,30 @@ mod tests {
 
     #[test]
     fn test_markdown_input_rules_and_html() {
-        let md = "# Team Update\nThis is **critical** info.\nCheck [Vespetrel](https://vespetrel.org).\n- Deliver Phase 7";
+        let md = "# Team Update\nThis is **critical** info.\nCheck [Vespetrel](https://vespetrel.org).\n- Deliver Phase 7\n- Second bullet";
         let doc = RichTextDocument::parse_markdown(md);
         assert!(!doc.spans.is_empty());
-        assert_eq!(doc.blocks.len(), 4);
+        assert_eq!(doc.blocks.len(), 5);
         assert_eq!(doc.blocks[0].1, BlockKind::Heading(1));
         assert_eq!(doc.blocks[3].1, BlockKind::BulletList);
 
         let html = doc.to_html();
         assert!(html.contains("<h1"));
+        assert!(html.contains("<ul"));
+        assert!(html.contains("</ul>"));
         assert!(html.contains("<li"));
         assert!(html.contains("font-family"));
         assert!(html.contains("<strong>critical</strong>"));
         assert!(html.contains("<a href=\"https://vespetrel.org\""));
+    }
+
+    #[test]
+    fn test_utf8_char_boundary_snapping() {
+        let mut doc = RichTextDocument::new("Héllo Wörld");
+        // 'é' is at byte 1..3, snapping 0..2 or 0..5 should never panic or slice invalid UTF-8
+        doc.toggle_style(0..2, InlineStyle::Bold);
+        assert_eq!(doc.spans.len(), 1);
+        let html = doc.to_html();
+        assert!(html.contains("<strong>Hé</strong>"));
     }
 }

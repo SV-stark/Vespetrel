@@ -3,6 +3,8 @@ use rusqlite::Connection;
 
 use crate::migrations::run_migrations;
 
+use zeroize::Zeroizing;
+
 /// PRAGMA configuration from §3.1
 pub const PRAGMAS: &[&str] = &[
     "PRAGMA journal_mode = WAL",
@@ -10,7 +12,6 @@ pub const PRAGMAS: &[&str] = &[
     "PRAGMA foreign_keys = ON",
     "PRAGMA busy_timeout = 5000",
     "PRAGMA cache_size = -64000",
-    "PRAGMA mmap_size = 268435456",
     "PRAGMA temp_store = MEMORY",
 ];
 
@@ -18,14 +19,14 @@ pub type StoragePool = Pool;
 
 pub fn create_pool(db_path: &str) -> anyhow::Result<StoragePool> {
     let key = get_keyring_encryption_key("vespetrel", "db_key");
-    create_pool_with_key(db_path, key.as_deref())
+    create_pool_with_key(db_path, key.as_ref().map(|z| z.as_str()))
 }
 
 pub fn create_pool_with_key(
     db_path: &str,
     encryption_key: Option<&str>,
 ) -> anyhow::Result<StoragePool> {
-    let key_owned = encryption_key.map(|s| s.to_string());
+    let key_owned = encryption_key.map(|s| Zeroizing::new(s.to_string()));
     let mut cfg = PoolConfig::new(db_path);
     cfg.pool = Some(deadpool_sqlite::PoolConfig::new(8));
     let pool = cfg
@@ -33,7 +34,7 @@ pub fn create_pool_with_key(
         .post_create(Hook::async_fn(move |conn, _metrics| {
             let key = key_owned.clone();
             Box::pin(async move {
-                conn.interact(move |c| init_connection_with_key(c, key.as_deref()))
+                conn.interact(move |c| init_connection_with_key(c, key.as_deref().map(|z| z.as_str())))
                     .await
                     .map_err(|e| HookError::message(e.to_string()))?
                     .map_err(|e| HookError::message(e.to_string()))
@@ -54,11 +55,25 @@ pub fn init_connection_with_key(
     encryption_key: Option<&str>,
 ) -> anyhow::Result<()> {
     if let Some(key) = encryption_key {
-        let escaped_key = key.replace('\'', "''");
-        conn.execute_batch(&format!("PRAGMA key = '{escaped_key}'"))?;
+        // Validate key to prevent injection (disallow single quote, semicolon, null, control chars)
+        if key.contains('\'')
+            || key.contains(';')
+            || key.contains('\0')
+            || key.contains('\r')
+            || key.contains('\n')
+        {
+            anyhow::bail!("Invalid encryption key: forbidden characters detected");
+        }
+        let zero_key = Zeroizing::new(key.to_string());
+        // Safe PRAGMA execution
+        conn.execute_batch(&format!("PRAGMA key = '{}'", zero_key.as_str()))?;
     }
     for pragma in PRAGMAS {
         conn.execute_batch(pragma)?;
+    }
+    // Attempt 256MB mmap, fallback to 64MB if unavailable (e.g. 32-bit platforms)
+    if conn.execute_batch("PRAGMA mmap_size = 268435456").is_err() {
+        let _ = conn.execute_batch("PRAGMA mmap_size = 67108864");
     }
     // Verify foreign keys are enabled
     let fk_enabled: i64 = conn.query_row("PRAGMA foreign_keys", [], |r| r.get(0))?;
@@ -70,17 +85,17 @@ pub fn init_connection_with_key(
 }
 
 /// Sourced database encryption key from OS keyring or environment
-pub fn get_keyring_encryption_key(service: &str, user: &str) -> Option<String> {
+pub fn get_keyring_encryption_key(service: &str, user: &str) -> Option<Zeroizing<String>> {
     if let Ok(key) = std::env::var("VESPETREL_DB_KEY")
         && !key.is_empty()
     {
-        return Some(key);
+        return Some(Zeroizing::new(key));
     }
     if let Ok(entry) = keyring::Entry::new(service, user)
         && let Ok(secret) = entry.get_password()
         && !secret.is_empty()
     {
-        return Some(secret);
+        return Some(Zeroizing::new(secret));
     }
     None
 }

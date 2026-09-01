@@ -25,6 +25,7 @@ memchr = { workspace = true }
 ahash = { workspace = true }
 mail-parser = { workspace = true }
 simdutf8 = { workspace = true }
+rand = { workspace = true }
 
 
 

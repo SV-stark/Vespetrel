@@ -82,7 +82,7 @@ impl OAuth2Engine {
         8989
     }
 
-    /// Wait for loopback OAuth2 redirect with customizable timeout and CSRF state check
+    /// Wait for loopback OAuth2 redirect with customizable timeout, Host check and CSRF state check
     pub async fn wait_for_callback(
         &self,
         timeout_secs: u64,
@@ -118,6 +118,17 @@ impl OAuth2Engine {
             }
 
             let request_str = String::from_utf8_lossy(&request_bytes);
+
+            // Validate Host header to prevent DNS rebinding / host injection
+            let host_header = request_str
+                .lines()
+                .find(|l| l.to_lowercase().starts_with("host:"))
+                .and_then(|l| l.split_once(':').map(|(_, v)| v.trim()))
+                .unwrap_or("");
+
+            if !host_header.starts_with("127.0.0.1") && !host_header.starts_with("localhost") {
+                anyhow::bail!("OAuth2 invalid Host header: security check failed");
+            }
 
             if let Some(expected) = expected_state {
                 let state = parse_param_from_http_request(&request_str, "state");
@@ -166,17 +177,22 @@ impl OAuth2Engine {
         code: String,
         pkce_verifier: String,
     ) -> anyhow::Result<TokenBundle> {
+        use std::time::Duration;
+        use zeroize::Zeroizing;
+
         info!(token_url=%self.config.token_url, "exchanging code for OAuth2 tokens");
         let client = reqwest::Client::builder()
             .user_agent("Vespetrel/0.1 OAuth2")
+            .timeout(Duration::from_secs(10))
             .build()?;
 
+        let zero_verifier = Zeroizing::new(pkce_verifier);
         let mut params = std::collections::HashMap::new();
         params.insert("client_id", self.config.client_id.as_str());
         params.insert("code", code.as_str());
         params.insert("redirect_uri", self.config.redirect_uri.as_str());
         params.insert("grant_type", "authorization_code");
-        params.insert("code_verifier", pkce_verifier.as_str());
+        params.insert("code_verifier", zero_verifier.as_str());
 
         if let Some(secret) = &self.config.client_secret {
             params.insert("client_secret", secret.as_str());
@@ -212,9 +228,12 @@ impl OAuth2Engine {
 
     /// Refresh an expired access token using the long-lived refresh_token
     pub async fn refresh_access_token(&self, refresh_token: &str) -> anyhow::Result<TokenBundle> {
+        use std::time::Duration;
+
         info!(token_url=%self.config.token_url, "refreshing expired OAuth2 access token");
         let client = reqwest::Client::builder()
             .user_agent("Vespetrel/0.1 OAuth2")
+            .timeout(Duration::from_secs(10))
             .build()?;
 
         let mut params = std::collections::HashMap::new();
