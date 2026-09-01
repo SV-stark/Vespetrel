@@ -44,13 +44,13 @@ mod tests {
     use vespetrel_core::account::SyncState;
     use vespetrel_core::folder::Folder;
     use vespetrel_core::message::{ComposedMessage, Flag};
-    use vespetrel_core::provider::{MailProvider, RemoteFolder, SyncDelta, SyncMessage};
+    use vespetrel_core::provider::{MailProvider, ProviderError, RemoteFolder, SyncDelta, SyncMessage};
 
     struct MockProvider;
 
     #[async_trait]
     impl MailProvider for MockProvider {
-        async fn sync_folder_list(&self) -> anyhow::Result<Vec<RemoteFolder>> {
+        async fn sync_folder_list(&self) -> Result<Vec<RemoteFolder>, ProviderError> {
             Ok(vec![RemoteFolder {
                 remote_id: "INBOX".into(),
                 name: "INBOX".into(),
@@ -65,7 +65,7 @@ mod tests {
             &self,
             _folder: &Folder,
             _state: SyncState,
-        ) -> anyhow::Result<SyncDelta> {
+        ) -> Result<SyncDelta, ProviderError> {
             Ok(SyncDelta {
                 inserted: vec![SyncMessage {
                     remote_uid: 101,
@@ -77,10 +77,10 @@ mod tests {
             })
         }
 
-        async fn fetch_raw_message(&self, _remote_id: &str) -> anyhow::Result<Vec<u8>> {
+        async fn fetch_raw_message(&self, _remote_id: &str) -> Result<Vec<u8>, ProviderError> {
             Ok(vec![])
         }
-        async fn send_message(&self, _msg: &ComposedMessage) -> anyhow::Result<()> {
+        async fn send_message(&self, _msg: &ComposedMessage) -> Result<(), ProviderError> {
             Ok(())
         }
         async fn update_flags(
@@ -88,7 +88,7 @@ mod tests {
             _uids: &[u32],
             _add: &[Flag],
             _rem: &[Flag],
-        ) -> anyhow::Result<()> {
+        ) -> Result<(), ProviderError> {
             Ok(())
         }
     }
