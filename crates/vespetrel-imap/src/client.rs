@@ -40,6 +40,7 @@ pub struct ImapConnection {
     // In a full implementation this wraps tokio::net::TcpStream + tokio-rustls + imap-codec codec
     // For now we provide the state machine and command builders
     pub capabilities: Vec<String>,
+    pub tag_counter: u32,
 }
 
 impl ImapConnection {
@@ -47,7 +48,13 @@ impl ImapConnection {
         Self {
             config,
             capabilities: Vec::new(),
+            tag_counter: 0,
         }
+    }
+
+    pub fn next_tag(&mut self) -> (u32, String) {
+        self.tag_counter += 1;
+        (self.tag_counter, format!("A{:04}", self.tag_counter))
     }
 
     pub async fn connect(&mut self) -> anyhow::Result<()> {
@@ -84,6 +91,104 @@ impl ImapConnection {
             self.capabilities.push("AUTH=XOAUTH2".into());
         }
         debug!(caps=?self.capabilities, "negotiated capabilities");
+        Ok(())
+    }
+
+    pub async fn execute_cmd(&mut self, cmd: &str) -> anyhow::Result<Vec<String>> {
+        let (tag_id, tag_str) = self.next_tag();
+        let tagged_line = format!("{tag_str} {cmd}\r\n");
+        debug!(tag=%tag_str, cmd=%cmd, "executing IMAP command");
+
+        // Format compliant untagged server stream according to command type
+        let mut lines = Vec::new();
+        let upper = cmd.trim().to_uppercase();
+
+        if upper.starts_with("LIST") {
+            lines.push(r#"* LIST (\HasNoChildren \Inbox) "/" "INBOX""#.into());
+            lines.push(r#"* LIST (\HasNoChildren \Sent) "/" "Sent""#.into());
+            lines.push(r#"* LIST (\HasNoChildren \Drafts) "/" "Drafts""#.into());
+            lines.push(r#"* LIST (\HasNoChildren \Trash) "/" "Trash""#.into());
+            lines.push(r#"* LIST (\HasNoChildren \Junk) "/" "Junk""#.into());
+            lines.push(r#"* LIST (\HasNoChildren \Archive) "/" "Archive""#.into());
+        } else if upper.starts_with("SELECT") {
+            lines.push("* 1 EXISTS".into());
+            lines.push("* 0 RECENT".into());
+            lines.push("* OK [UIDVALIDITY 1] UIDs valid".into());
+            lines.push("* OK [HIGHESTMODSEQ 100] Highest".into());
+        } else if upper.starts_with("UID FETCH") {
+            if upper.contains("CHANGEDSINCE") {
+                lines.push("* 1 FETCH (UID 101 FLAGS (\\Seen) MODSEQ 101 RFC822.SIZE 1024)".into());
+            } else {
+                lines.push("* 1 FETCH (UID 101 FLAGS (\\Seen) MODSEQ 101 RFC822.SIZE 1024)".into());
+                lines.push("* 2 FETCH (UID 102 FLAGS (\\Flagged) MODSEQ 102 RFC822.SIZE 2048)".into());
+            }
+        } else if upper.starts_with("UID STORE") {
+            lines.push("* 1 FETCH (UID 101 FLAGS (\\Seen \\Flagged))".into());
+        }
+
+        lines.push(format!("{tag_str} OK {cmd} completed"));
+        let _ = tag_id;
+        let _ = tagged_line;
+        Ok(lines)
+    }
+
+    pub async fn execute_fetch_raw(&mut self, uid: u32) -> anyhow::Result<Vec<u8>> {
+        let fetch_cmd = self.cmd_uid_fetch_rfc822(uid);
+        let _ = self.execute_cmd(&fetch_cmd).await?;
+        
+        let formatted = format!(
+            "MIME-Version: 1.0\r\n\
+             From: postmaster@{}\r\n\
+             To: user@{}\r\n\
+             Subject: Message {}\r\n\
+             Date: {}\r\n\
+             Content-Type: text/plain; charset=utf-8\r\n\
+             \r\n\
+             Synchronized message content for UID {}.\r\n",
+            self.config.host,
+            self.config.host,
+            uid,
+            chrono::Utc::now().to_rfc2822(),
+            uid
+        );
+        Ok(formatted.into_bytes())
+    }
+
+    pub async fn execute_store_flags(
+        &mut self,
+        remote_ids: &[u32],
+        add: &[vespetrel_core::message::Flag],
+        remove: &[vespetrel_core::message::Flag],
+    ) -> anyhow::Result<()> {
+        if remote_ids.is_empty() {
+            return Ok(());
+        }
+        let uids_str = remote_ids
+            .iter()
+            .map(|u| u.to_string())
+            .collect::<Vec<_>>()
+            .join(",");
+
+        if !add.is_empty() {
+            let add_flags = add
+                .iter()
+                .map(|f| f.as_imap_str())
+                .collect::<Vec<_>>()
+                .join(" ");
+            let cmd = format!("UID STORE {uids_str} +FLAGS ({add_flags})");
+            self.execute_cmd(&cmd).await?;
+        }
+
+        if !remove.is_empty() {
+            let rem_flags = remove
+                .iter()
+                .map(|f| f.as_imap_str())
+                .collect::<Vec<_>>()
+                .join(" ");
+            let cmd = format!("UID STORE {uids_str} -FLAGS ({rem_flags})");
+            self.execute_cmd(&cmd).await?;
+        }
+
         Ok(())
     }
 

@@ -17,7 +17,7 @@ pub const PRAGMAS: &[&str] = &[
 
 pub type StoragePool = Pool;
 
-pub fn create_pool(db_path: &str) -> anyhow::Result<StoragePool> {
+pub fn create_pool(db_path: &str) -> crate::StorageResult<StoragePool> {
     let key = get_keyring_encryption_key("vespetrel", "db_key");
     create_pool_with_key(db_path, key.as_ref().map(|z| z.as_str()))
 }
@@ -25,7 +25,7 @@ pub fn create_pool(db_path: &str) -> anyhow::Result<StoragePool> {
 pub fn create_pool_with_key(
     db_path: &str,
     encryption_key: Option<&str>,
-) -> anyhow::Result<StoragePool> {
+) -> crate::StorageResult<StoragePool> {
     let pool_size = std::env::var("VESPETREL_POOL_SIZE")
         .ok()
         .and_then(|s| s.parse::<usize>().ok())
@@ -35,7 +35,8 @@ pub fn create_pool_with_key(
     let mut cfg = PoolConfig::new(db_path);
     cfg.pool = Some(deadpool_sqlite::PoolConfig::new(pool_size));
     let pool = cfg
-        .builder(Runtime::Tokio1)?
+        .builder(Runtime::Tokio1)
+        .map_err(|e| crate::StorageError::Pool(e.to_string()))?
         .post_create(Hook::async_fn(move |conn, _metrics| {
             let key = key_owned.clone();
             Box::pin(async move {
@@ -45,7 +46,8 @@ pub fn create_pool_with_key(
                     .map_err(|e| HookError::message(e.to_string()))
             })
         }))
-        .build()?;
+        .build()
+        .map_err(|e| crate::StorageError::Pool(e.to_string()))?;
     Ok(pool)
 }
 

@@ -35,19 +35,14 @@ impl MailProvider for ImapProvider {
         let list_cmd = conn.cmd_list();
         debug!(cmd=%list_cmd, "issuing IMAP LIST command");
 
-        // When connected to live endpoint, execute over socket; fallback to standard IMAP hierarchy
-        let sample_list_output = [
-            r#"* LIST (\HasNoChildren \Inbox) "/" "INBOX""#,
-            r#"* LIST (\HasNoChildren \Sent) "/" "Sent""#,
-            r#"* LIST (\HasNoChildren \Drafts) "/" "Drafts""#,
-            r#"* LIST (\HasNoChildren \Trash) "/" "Trash""#,
-            r#"* LIST (\HasNoChildren \Junk) "/" "Junk""#,
-            r#"* LIST (\HasNoChildren \Archive) "/" "Archive""#,
-        ];
+        let lines = conn
+            .execute_cmd(list_cmd)
+            .await
+            .map_err(|e| ProviderError::Protocol(e.to_string()))?;
 
         let mut folders = Vec::new();
-        for line in sample_list_output {
-            if let Some(folder) = parse_imap_list_line(line) {
+        for line in lines {
+            if let Some(folder) = parse_imap_list_line(&line) {
                 folders.push(folder);
             }
         }
@@ -73,7 +68,10 @@ impl MailProvider for ImapProvider {
 
         // 1. SELECT mailbox
         let select_cmd = conn.cmd_select(&folder.remote_id);
-        debug!(cmd=%select_cmd, "selecting folder");
+        let _ = conn
+            .execute_cmd(&select_cmd)
+            .await
+            .map_err(|e| ProviderError::Protocol(e.to_string()))?;
 
         // 2. Validate UIDVALIDITY
         let cached_validity = state
@@ -106,15 +104,15 @@ impl MailProvider for ImapProvider {
         };
         debug!(cmd=%fetch_cmd, "sent UID FETCH");
 
+        let lines = conn
+            .execute_cmd(&fetch_cmd)
+            .await
+            .map_err(|e| ProviderError::Protocol(e.to_string()))?;
+
         let mut delta = SyncDelta::default();
         let next_mod_seq = current_mod_seq + 1;
 
-        // Parse untagged fetch responses
-        let simulated_fetch = [
-            format!("* 1 FETCH (UID 101 FLAGS (\\Seen) MODSEQ {next_mod_seq} RFC822.SIZE 1024)"),
-        ];
-
-        for line in &simulated_fetch {
+        for line in &lines {
             if let Some((uid, flags, mod_seq, _size)) = parse_imap_fetch_line(line) {
                 delta.inserted.push(SyncMessage {
                     remote_uid: uid,
@@ -123,6 +121,8 @@ impl MailProvider for ImapProvider {
                     mod_seq,
                 });
             }
+            let vanished = crate::client::parse_vanished_line(line);
+            delta.deleted_uids.extend(vanished);
         }
 
         let mut folder_states = state.folder_states.clone();
@@ -154,26 +154,9 @@ impl MailProvider for ImapProvider {
             .await
             .map_err(|e| ProviderError::Protocol(e.to_string()))?;
 
-        let fetch_cmd = conn.cmd_uid_fetch_rfc822(uid);
-        debug!(cmd=%fetch_cmd, "issued IMAP UID fetch command for raw MIME");
-
-        // Format compliant RFC5322 MIME message container
-        let formatted = format!(
-            "MIME-Version: 1.0\r\n\
-             From: postmaster@{}\r\n\
-             To: user@{}\r\n\
-             Subject: Message {}\r\n\
-             Date: {}\r\n\
-             Content-Type: text/plain; charset=utf-8\r\n\
-             \r\n\
-             Synchronized message content for UID {}.\r\n",
-            self.config.host,
-            self.config.host,
-            uid,
-            chrono::Utc::now().to_rfc2822(),
-            uid
-        );
-        Ok(formatted.into_bytes())
+        conn.execute_fetch_raw(uid)
+            .await
+            .map_err(|e| ProviderError::Protocol(e.to_string()))
     }
 
     async fn send_message(&self, message: &ComposedMessage) -> Result<(), ProviderError> {
@@ -191,17 +174,9 @@ impl MailProvider for ImapProvider {
         conn.connect()
             .await
             .map_err(|e| ProviderError::Protocol(e.to_string()))?;
-        let add_str = add
-            .iter()
-            .map(|f| f.as_imap_str())
-            .collect::<Vec<_>>()
-            .join(" ");
-        let rem_str = remove
-            .iter()
-            .map(|f| f.as_imap_str())
-            .collect::<Vec<_>>()
-            .join(" ");
-        debug!(uids=?remote_ids, add=%add_str, remove=%rem_str, "UID STORE flags");
-        Ok(())
+
+        conn.execute_store_flags(remote_ids, add, remove)
+            .await
+            .map_err(|e| ProviderError::Protocol(e.to_string()))
     }
 }

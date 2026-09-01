@@ -10,6 +10,7 @@ use vespetrel_core::provider::{MailProvider, SyncEvent};
 #[derive(Debug)]
 pub enum WorkerCommand {
     SyncNow,
+    IdlePush,
     Stop,
     UpdateFlags {
         folder_remote_id: String,
@@ -113,13 +114,13 @@ impl AccountWorker {
                 }
                 cmd = self.cmd_rx.recv() => {
                     match cmd {
-                        Some(WorkerCommand::SyncNow) => {
+                        Some(WorkerCommand::SyncNow) | Some(WorkerCommand::IdlePush) => {
                             match self.sync_once().await {
                                 Ok(_) => {
                                     backoff = Duration::from_secs(1);
                                 }
                                 Err(e) => {
-                                    error!(error=%e, "on-demand sync failed");
+                                    error!(error=%e, "triggered sync failed");
                                     self.emit(SyncEvent::SyncError{ folder: "all".into(), error: e.to_string() });
                                 }
                             }

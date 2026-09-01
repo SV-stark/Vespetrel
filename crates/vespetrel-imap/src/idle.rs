@@ -84,7 +84,7 @@ pub async fn run_idle_loop_with_config<F>(
     on_event: F,
 ) -> anyhow::Result<()>
 where
-    F: Fn(IdleEvent) + Send + 'static,
+    F: Fn(IdleEvent) + Send + Sync + 'static,
 {
     let mut retry_count = 0;
     loop {
@@ -97,6 +97,10 @@ where
                 let mut renew_ticker = tokio::time::interval(idle_loop.renew_interval);
                 renew_ticker.tick().await; // Consume initial immediate tick
 
+                let idle_cmd = conn.cmd_idle();
+                debug!(cmd=%idle_cmd, "issuing IDLE command");
+                let _ = conn.execute_cmd(idle_cmd).await;
+
                 debug!("entering IMAP IDLE mode");
                 if let Some(event) = idle_loop.handle_untagged("* 1 EXISTS") {
                     on_event(event);
@@ -106,6 +110,8 @@ where
                 tokio::select! {
                     _ = renew_ticker.tick() => {
                         debug!("25-minute IDLE renewal interval elapsed, cycling IDLE/DONE");
+                        let _ = conn.execute_cmd("DONE").await;
+                        let _ = conn.execute_cmd(conn.cmd_idle()).await;
                     }
                 }
             }

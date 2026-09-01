@@ -22,10 +22,18 @@ pub fn safe_blob_path_with_ext(base: &Path, id: &str, default_ext: &str) -> std:
     let can_base = base.canonicalize()?;
 
     let shard = &id[..2.min(id.len())];
-    let shard_dir = can_base.join(shard);
-    std::fs::create_dir_all(&shard_dir)?;
+    let raw_shard_dir = can_base.join(shard);
+    std::fs::create_dir_all(&raw_shard_dir)?;
+    let can_shard_dir = raw_shard_dir.canonicalize()?;
 
-    let lz4_cand = shard_dir.join(format!("{id}.lz4"));
+    if !can_shard_dir.starts_with(&can_base) {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            "Shard directory symlink escape detected",
+        ));
+    }
+
+    let lz4_cand = can_shard_dir.join(format!("{id}.lz4"));
     if lz4_cand.exists() {
         let can_cand = lz4_cand.canonicalize()?;
         if !can_cand.starts_with(&can_base) {
@@ -36,7 +44,7 @@ pub fn safe_blob_path_with_ext(base: &Path, id: &str, default_ext: &str) -> std:
         }
         return Ok(can_cand);
     }
-    let zst_cand = shard_dir.join(format!("{id}.zst"));
+    let zst_cand = can_shard_dir.join(format!("{id}.zst"));
     if zst_cand.exists() {
         let can_cand = zst_cand.canonicalize()?;
         if !can_cand.starts_with(&can_base) {
@@ -47,7 +55,7 @@ pub fn safe_blob_path_with_ext(base: &Path, id: &str, default_ext: &str) -> std:
         }
         return Ok(can_cand);
     }
-    let target = shard_dir.join(format!("{id}.{default_ext}"));
+    let target = can_shard_dir.join(format!("{id}.{default_ext}"));
     if !target.starts_with(&can_base) {
         return Err(std::io::Error::new(
             std::io::ErrorKind::PermissionDenied,

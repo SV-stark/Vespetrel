@@ -1,32 +1,36 @@
 ; NSIS Modern User Interface script for Vespetrel Mail Client
 ; -------------------------------------------------------------
+Unicode True
+!cd "..\.."
+
 !include "MUI2.nsh"
 !include "FileFunc.nsh"
 
 ; General Definitions
 !define PRODUCT_NAME "Vespetrel"
-!define PRODUCT_VERSION "0.1.0"
+!ifndef VERSION
+  !define VERSION "0.1.0"
+!endif
+!define PRODUCT_VERSION "${VERSION}"
 !define PRODUCT_PUBLISHER "Vespetrel Team"
 !define PRODUCT_WEB_SITE "https://github.com/SV-stark/Vespetrel"
 !define PRODUCT_EXE "vespetrel.exe"
 !define PRODUCT_UNINST_KEY "Software\Microsoft\Windows\CurrentVersion\Uninstall\${PRODUCT_NAME}"
-!define PRODUCT_UNINST_ROOT_KEY "HKLM"
+!define PRODUCT_UNINST_ROOT_KEY "HKCU"
 
 Name "${PRODUCT_NAME} ${PRODUCT_VERSION}"
-OutFile "..\..\dist\vespetrel-setup-windows-x86_64.exe"
-InstallDir "$PROGRAMFILES64\${PRODUCT_NAME}"
-InstallDirRegKey HKLM "Software\${PRODUCT_NAME}" "InstallDir"
-RequestExecutionLevel admin
+OutFile "dist\vespetrel-setup-windows-x86_64.exe"
+InstallDir "$LOCALAPPDATA\Programs\${PRODUCT_NAME}"
+InstallDirRegKey HKCU "Software\${PRODUCT_NAME}" "InstallDir"
+RequestExecutionLevel user
 SetCompressor /SOLID lzma
 
 ; UI Settings
 !define MUI_ABORTWARNING
-!define MUI_ICON "${NSISDIR}\Contrib\Graphics\Icons\modern-install.ico"
-!define MUI_UNICON "${NSISDIR}\Contrib\Graphics\Icons\modern-uninstall.ico"
 
 ; Pages
 !insertmacro MUI_PAGE_WELCOME
-!insertmacro MUI_PAGE_LICENSE "..\..\LICENSE-MIT"
+!insertmacro MUI_PAGE_LICENSE "LICENSE"
 !insertmacro MUI_PAGE_DIRECTORY
 !insertmacro MUI_PAGE_INSTFILES
 !define MUI_FINISHPAGE_RUN "$INSTDIR\${PRODUCT_EXE}"
@@ -41,44 +45,49 @@ SetCompressor /SOLID lzma
 Section "MainSection" SEC01
     SetOutPath "$INSTDIR"
     SetOverwrite on
-    File "..\..\target\release\${PRODUCT_EXE}"
-    File "..\..\README.md"
-    File "..\..\LICENSE-MIT"
+    File "staging\vespetrel\${PRODUCT_EXE}"
+    File "staging\vespetrel\README.md"
+    File "staging\vespetrel\LICENSE"
+
+    ; Save installation directory
+    WriteRegStr HKCU "Software\${PRODUCT_NAME}" "InstallDir" "$INSTDIR"
 
     ; Create Shortcuts
     CreateDirectory "$SMPROGRAMS\${PRODUCT_NAME}"
     CreateShortCut "$SMPROGRAMS\${PRODUCT_NAME}\${PRODUCT_NAME}.lnk" "$INSTDIR\${PRODUCT_EXE}"
-    CreateShortCut "$SMPROGRAMS\${PRODUCT_NAME}\Uninstall.lnk" "$INSTDIR\uninst.exe"
+    CreateShortCut "$SMPROGRAMS\${PRODUCT_NAME}\Uninstall ${PRODUCT_NAME}.lnk" "$INSTDIR\uninstall.exe"
     CreateShortCut "$DESKTOP\${PRODUCT_NAME}.lnk" "$INSTDIR\${PRODUCT_EXE}"
 
-    ; Register mailto: protocol handler
-    WriteRegStr HKCR "mailto" "" "URL:MailTo Protocol"
-    WriteRegStr HKCR "mailto" "URL Protocol" ""
-    WriteRegStr HKCR "mailto\shell\open\command" "" '"$INSTDIR\${PRODUCT_EXE}" --compose "%1"'
+    ; Register mailto: protocol handler under current user classes
+    WriteRegStr HKCU "Software\Classes\mailto" "" "URL:MailTo Protocol"
+    WriteRegStr HKCU "Software\Classes\mailto" "URL Protocol" ""
+    WriteRegStr HKCU "Software\Classes\mailto\shell\open\command" "" '"$INSTDIR\${PRODUCT_EXE}" --compose "%1"'
 
     ; Write Uninstaller registry entries
-    WriteRegStr ${PRODUCT_UNINST_ROOT_KEY} "${PRODUCT_UNINST_KEY}" "DisplayName" "${PRODUCT_NAME}"
-    WriteRegStr ${PRODUCT_UNINST_ROOT_KEY} "${PRODUCT_UNINST_KEY}" "UninstallString" "$INSTDIR\uninst.exe"
+    WriteRegStr ${PRODUCT_UNINST_ROOT_KEY} "${PRODUCT_UNINST_KEY}" "DisplayName" "Vespetrel Mail Client"
+    WriteRegStr ${PRODUCT_UNINST_ROOT_KEY} "${PRODUCT_UNINST_KEY}" "UninstallString" '"$INSTDIR\uninstall.exe"'
     WriteRegStr ${PRODUCT_UNINST_ROOT_KEY} "${PRODUCT_UNINST_KEY}" "DisplayIcon" "$INSTDIR\${PRODUCT_EXE}"
     WriteRegStr ${PRODUCT_UNINST_ROOT_KEY} "${PRODUCT_UNINST_KEY}" "DisplayVersion" "${PRODUCT_VERSION}"
     WriteRegStr ${PRODUCT_UNINST_ROOT_KEY} "${PRODUCT_UNINST_KEY}" "URLInfoAbout" "${PRODUCT_WEB_SITE}"
     WriteRegStr ${PRODUCT_UNINST_ROOT_KEY} "${PRODUCT_UNINST_KEY}" "Publisher" "${PRODUCT_PUBLISHER}"
-    WriteUninstaller "$INSTDIR\uninst.exe"
+    WriteUninstaller "$INSTDIR\uninstall.exe"
 SectionEnd
 
 Section "Uninstall"
+    SetOutPath "$TEMP"
+
+    Delete "$DESKTOP\${PRODUCT_NAME}.lnk"
+    Delete "$SMPROGRAMS\${PRODUCT_NAME}\${PRODUCT_NAME}.lnk"
+    Delete "$SMPROGRAMS\${PRODUCT_NAME}\Uninstall ${PRODUCT_NAME}.lnk"
+    RMDir "$SMPROGRAMS\${PRODUCT_NAME}"
+
     Delete "$INSTDIR\${PRODUCT_EXE}"
     Delete "$INSTDIR\README.md"
-    Delete "$INSTDIR\LICENSE-MIT"
-    Delete "$INSTDIR\uninst.exe"
-
-    Delete "$SMPROGRAMS\${PRODUCT_NAME}\${PRODUCT_NAME}.lnk"
-    Delete "$SMPROGRAMS\${PRODUCT_NAME}\Uninstall.lnk"
-    Delete "$DESKTOP\${PRODUCT_NAME}.lnk"
-    RMDir "$SMPROGRAMS\${PRODUCT_NAME}"
+    Delete "$INSTDIR\LICENSE"
+    Delete "$INSTDIR\uninstall.exe"
     RMDir "$INSTDIR"
 
-    DeleteRegKey HKCR "mailto"
+    DeleteRegKey HKCU "Software\Classes\mailto"
     DeleteRegKey ${PRODUCT_UNINST_ROOT_KEY} "${PRODUCT_UNINST_KEY}"
-    DeleteRegKey HKLM "Software\${PRODUCT_NAME}"
+    DeleteRegKey HKCU "Software\${PRODUCT_NAME}"
 SectionEnd

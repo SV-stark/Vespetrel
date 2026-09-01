@@ -98,6 +98,12 @@ impl SyncCoordinator {
         }
     }
 
+    pub fn trigger_idle_push(&self, account_id: &str) {
+        if let Some(tx) = self.workers.get(account_id) {
+            let _ = tx.send(WorkerCommand::IdlePush);
+        }
+    }
+
     pub fn stop_worker(&mut self, account_id: &str) {
         if let Some(tx) = self.workers.remove(account_id) {
             let _ = tx.send(WorkerCommand::Stop);

@@ -73,7 +73,7 @@ jobs:
             throw "Unable to find or install makensis executable"
           }
           Write-Host "Found makensis at: $makensis, compiling for version $version"
-          & $makensis /DVERSION=$version /V4 .github/installer.nsi
+          & $makensis /DVERSION=$version /V4 packaging/windows/vespetrel.nsi
           if ($LASTEXITCODE -ne 0) {
             throw "makensis failed with exit code $LASTEXITCODE"
           }

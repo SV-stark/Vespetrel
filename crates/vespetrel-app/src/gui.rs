@@ -186,8 +186,8 @@ pub mod gpui_app {
                 accounts: vec![default_account],
                 folders,
                 selected_folder_id: Some("INBOX".into()),
+                selected_message_id: messages.first().map(|m| m.id.clone()),
                 messages,
-                selected_message_id: Some("msg-welcome".into()),
                 list_filter: ListFilter::All,
                 search_query: String::new(),
                 block_remote_images: true,
@@ -249,11 +249,11 @@ pub mod gpui_app {
                 .or_else(|| self.messages.first())
         }
 
-        pub fn filtered_messages(&self) -> Vec<&MessageSummary> {
+        pub fn filtered_messages(&self) -> impl Iterator<Item = &MessageSummary> {
             let q = self.search_query.trim();
             self.messages
                 .iter()
-                .filter(|m| {
+                .filter(move |m| {
                     let flag_match = match self.list_filter {
                         ListFilter::All => true,
                         ListFilter::Unread => !m.is_read,
@@ -271,7 +271,6 @@ pub mod gpui_app {
                         || m.from_name.as_deref().is_some_and(|n| contains_ignore_case(n, q))
                         || m.snippet.as_deref().is_some_and(|sn| contains_ignore_case(sn, q))
                 })
-                .collect()
         }
 
         pub fn trigger_sync(&mut self, cx: &mut Context<Self>) {
