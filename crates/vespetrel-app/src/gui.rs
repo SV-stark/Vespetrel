@@ -136,7 +136,7 @@ pub mod gpui_app {
                                 if !flds.is_empty() {
                                     view.folders = flds;
                                     if let Some(first_fld) = view.folders.first() {
-                                        view.selected_folder_id = first_fld.id.clone();
+                                        view.selected_folder_id = Some(first_fld.id.clone());
                                     }
                                 }
                                 view.settings = stgs;
