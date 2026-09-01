@@ -109,7 +109,7 @@ pub mod gpui_app {
                             let _ = vespetrel_storage::repo::get_user_settings(c);
                         }).await;
                     }
-                    let _ = this.update(cx, |view, cx| {
+                    let _ = this.update(cx, |_view, cx| {
                         cx.notify();
                     });
                 }).detach();

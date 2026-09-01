@@ -102,7 +102,7 @@ where
                 let _ = conn.execute_cmd(idle_cmd).await;
 
                 if let Some(stream) = conn.stream.as_mut() {
-                    use tokio::io::AsyncReadExt;
+                    use tokio::io::{AsyncReadExt, AsyncWriteExt};
                     let mut buf = [0u8; 4096];
                     loop {
                         tokio::select! {
@@ -124,8 +124,8 @@ where
                             }
                             _ = renew_ticker.tick() => {
                                 debug!("25-minute IDLE renewal interval elapsed, cycling IDLE/DONE");
-                                let _ = conn.execute_cmd("DONE").await;
-                                let _ = conn.execute_cmd(conn.cmd_idle()).await;
+                                let _ = stream.write_all(b"DONE\r\n").await;
+                                let _ = stream.write_all(b"A0001 IDLE\r\n").await;
                             }
                         }
                     }
