@@ -140,11 +140,10 @@ impl ImapConnection {
         "IDLE"
     }
 
-    /// Format a structured tagged IMAP command (e.g. `A001 SELECT "INBOX"\r\n`)
+    /// Format a structured tagged IMAP command (e.g. `A0001 SELECT "INBOX"\r\n`)
     pub fn format_tagged_command(&self, tag_id: u32, cmd: &str) -> String {
-        let tag = imap_types::core::Tag::try_from(format!("A{tag_id:04}"))
-            .unwrap_or_else(|_| imap_types::core::Tag::try_from("A0001").unwrap());
-        format!("{} {}\r\n", tag.as_ref(), cmd)
+        let tag_str = format!("A{tag_id:04}");
+        format!("{tag_str} {cmd}\r\n")
     }
 }
 
@@ -216,6 +215,102 @@ pub fn parse_imap_list_line(line: &str) -> Option<vespetrel_core::RemoteFolder> 
         uid_validity: Some(1),
         highest_mod_seq: Some(1),
     })
+}
+
+/// Parse untagged `* <seq> FETCH (UID <uid> FLAGS (<flags>) MODSEQ <modseq> ...)` line
+pub fn parse_imap_fetch_line(
+    line: &str,
+) -> Option<(u32, Vec<vespetrel_core::message::Flag>, Option<u64>, Option<usize>)> {
+    if !line.starts_with("* ") || !line.contains("FETCH") {
+        return None;
+    }
+
+    let upper = line.to_uppercase();
+    let uid = if let Some(uid_pos) = upper.find("UID ") {
+        let after_uid = line[uid_pos + 4..].trim_start();
+        let end = after_uid
+            .find(|c: char| !c.is_ascii_digit())
+            .unwrap_or(after_uid.len());
+        after_uid[..end].parse::<u32>().ok()?
+    } else {
+        return None;
+    };
+
+    let mut flags = Vec::new();
+    if let Some(flags_pos) = upper.find("FLAGS (") {
+        let after_flags = &line[flags_pos + 7..];
+        if let Some(close) = after_flags.find(')') {
+            let flags_str = &after_flags[..close];
+            for token in flags_str.split_whitespace() {
+                if token.eq_ignore_ascii_case("\\Seen") {
+                    flags.push(vespetrel_core::message::Flag::Seen);
+                } else if token.eq_ignore_ascii_case("\\Flagged") {
+                    flags.push(vespetrel_core::message::Flag::Flagged);
+                } else if token.eq_ignore_ascii_case("\\Answered") {
+                    flags.push(vespetrel_core::message::Flag::Answered);
+                } else if token.eq_ignore_ascii_case("\\Draft") {
+                    flags.push(vespetrel_core::message::Flag::Draft);
+                } else if token.eq_ignore_ascii_case("\\Deleted") {
+                    flags.push(vespetrel_core::message::Flag::Deleted);
+                }
+            }
+        }
+    }
+
+    let mod_seq = if let Some(mod_pos) = upper.find("MODSEQ (") {
+        let after_mod = line[mod_pos + 8..].trim_start();
+        let end = after_mod
+            .find(|c: char| !c.is_ascii_digit())
+            .unwrap_or(after_mod.len());
+        after_mod[..end].parse::<u64>().ok()
+    } else if let Some(mod_pos) = upper.find("MODSEQ ") {
+        let after_mod = line[mod_pos + 7..].trim_start();
+        let end = after_mod
+            .find(|c: char| !c.is_ascii_digit())
+            .unwrap_or(after_mod.len());
+        after_mod[..end].parse::<u64>().ok()
+    } else {
+        None
+    };
+
+    let size = if let Some(size_pos) = upper.find("RFC822.SIZE ") {
+        let after_size = line[size_pos + 12..].trim_start();
+        let end = after_size
+            .find(|c: char| !c.is_ascii_digit())
+            .unwrap_or(after_size.len());
+        after_size[..end].parse::<usize>().ok()
+    } else {
+        None
+    };
+
+    Some((uid, flags, mod_seq, size))
+}
+
+/// Parse untagged `* VANISHED (EARLIER) <uids>` line
+pub fn parse_vanished_line(line: &str) -> Vec<u32> {
+    if !line.starts_with("* VANISHED") {
+        return Vec::new();
+    }
+    let mut uids = Vec::new();
+    let parts = line.split_whitespace().collect::<Vec<_>>();
+    for part in parts {
+        if part.starts_with('*') || part == "VANISHED" || part == "(EARLIER)" {
+            continue;
+        }
+        for sub in part.split(',') {
+            let sub = sub.trim_matches(|c| c == '(' || c == ')');
+            if let Some((start_s, end_s)) = sub.split_once(':') {
+                if let (Ok(start), Ok(end)) = (start_s.parse::<u32>(), end_s.parse::<u32>()) {
+                    for u in start..=end {
+                        uids.push(u);
+                    }
+                }
+            } else if let Ok(u) = sub.parse::<u32>() {
+                uids.push(u);
+            }
+        }
+    }
+    uids
 }
 
 #[cfg(test)]

@@ -50,15 +50,15 @@ pub fn create_pool_with_key(
 }
 
 /// Initialize a single connection with optional encryption key, PRAGMAs, and migrations
-pub fn init_connection(conn: &Connection) -> anyhow::Result<()> {
+pub fn init_connection(conn: &mut Connection) -> crate::StorageResult<()> {
     init_connection_with_key(conn, None)
 }
 
 /// Initialize connection with optional SQLCipher encryption key
 pub fn init_connection_with_key(
-    conn: &Connection,
+    conn: &mut Connection,
     encryption_key: Option<&str>,
-) -> anyhow::Result<()> {
+) -> crate::StorageResult<()> {
     if let Some(key) = encryption_key {
         // Validate key to prevent injection (disallow single quote, semicolon, null, control chars)
         if key.contains('\'')
@@ -67,7 +67,7 @@ pub fn init_connection_with_key(
             || key.contains('\r')
             || key.contains('\n')
         {
-            anyhow::bail!("Invalid encryption key: forbidden characters detected");
+            return Err(crate::StorageError::Pool("Invalid encryption key: forbidden characters detected".into()));
         }
         let zero_key = Zeroizing::new(key.to_string());
         // Safe PRAGMA execution
@@ -106,9 +106,9 @@ pub fn get_keyring_encryption_key(service: &str, user: &str) -> Option<Zeroizing
 }
 
 /// Helper to open an in-memory DB for tests with full schema
-pub fn open_in_memory() -> anyhow::Result<Connection> {
-    let conn = Connection::open_in_memory()?;
-    init_connection(&conn)?;
+pub fn open_in_memory() -> crate::StorageResult<Connection> {
+    let mut conn = Connection::open_in_memory()?;
+    init_connection(&mut conn)?;
     Ok(conn)
 }
 
@@ -127,8 +127,8 @@ mod tests {
 
     #[test]
     fn test_init_connection_with_key() {
-        let conn = Connection::open_in_memory().unwrap();
-        init_connection_with_key(&conn, Some("test_secret_key_123")).unwrap();
+        let mut conn = Connection::open_in_memory().unwrap();
+        init_connection_with_key(&mut conn, Some("test_secret_key_123")).unwrap();
         let fk: i64 = conn
             .query_row("PRAGMA foreign_keys", [], |r| r.get(0))
             .unwrap();

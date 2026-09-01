@@ -78,8 +78,8 @@ pub mod gpui_app {
             let now = chrono::Utc::now();
             let messages = vec![
                 MessageSummary {
-                    id: "msg-welcome".into(),
-                    thread_id: Some("th-1".into()),
+                    id: uuid::Uuid::new_v4().to_string(),
+                    thread_id: Some(uuid::Uuid::new_v4().to_string()),
                     subject: Some("Welcome to Vespetrel — Pure Rust Desktop Mail".into()),
                     from_address: "team@vespetrel.example".into(),
                     from_name: Some("Vespetrel Core Team".into()),
@@ -90,8 +90,8 @@ pub mod gpui_app {
                     has_attachments: true,
                 },
                 MessageSummary {
-                    id: "msg-security".into(),
-                    thread_id: Some("th-2".into()),
+                    id: uuid::Uuid::new_v4().to_string(),
+                    thread_id: Some(uuid::Uuid::new_v4().to_string()),
                     subject: Some("End-to-End Encryption & Security Audit".into()),
                     from_address: "security@vespetrel.example".into(),
                     from_name: Some("Security Team".into()),
@@ -102,8 +102,8 @@ pub mod gpui_app {
                     has_attachments: false,
                 },
                 MessageSummary {
-                    id: "msg-release".into(),
-                    thread_id: Some("th-3".into()),
+                    id: uuid::Uuid::new_v4().to_string(),
+                    thread_id: Some(uuid::Uuid::new_v4().to_string()),
                     subject: Some("Release Announcement: 120 FPS Rendering & Instant FTS5 Search".into()),
                     from_address: "updates@vespetrel.example".into(),
                     from_name: Some("Vespetrel Releases".into()),
@@ -357,9 +357,12 @@ pub mod gpui_app {
                 .windows(n_bytes.len())
                 .any(|window| window.eq_ignore_ascii_case(n_bytes));
         }
-        haystack
-            .to_lowercase()
-            .contains(&needle.to_lowercase())
+        let needle_chars: smallvec::SmallVec<[char; 32]> = needle.chars().flat_map(|c| c.to_lowercase()).collect();
+        let haystack_chars: smallvec::SmallVec<[char; 128]> = haystack.chars().flat_map(|c| c.to_lowercase()).collect();
+        if haystack_chars.len() < needle_chars.len() {
+            return false;
+        }
+        haystack_chars.windows(needle_chars.len()).any(|w| w == needle_chars.as_slice())
     }
 
     impl Render for MainWindow {

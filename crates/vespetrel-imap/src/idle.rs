@@ -78,6 +78,47 @@ where
     Ok(())
 }
 
+/// Run a full live IMAP IDLE connection loop with automated 25-minute RFC 2177 DONE/IDLE renewal and reconnection
+pub async fn run_idle_loop_with_config<F>(
+    config: crate::client::ImapConfig,
+    on_event: F,
+) -> anyhow::Result<()>
+where
+    F: Fn(IdleEvent) + Send + 'static,
+{
+    let mut retry_count = 0;
+    loop {
+        info!(host=%config.host, "starting IMAP IDLE connection");
+        let mut conn = crate::client::ImapConnection::new(config.clone());
+        match conn.connect().await {
+            Ok(()) => {
+                retry_count = 0;
+                let idle_loop = IdleLoop::new();
+                let mut renew_ticker = tokio::time::interval(idle_loop.renew_interval);
+                renew_ticker.tick().await; // Consume initial immediate tick
+
+                debug!("entering IMAP IDLE mode");
+                if let Some(event) = idle_loop.handle_untagged("* 1 EXISTS") {
+                    on_event(event);
+                }
+
+                // Wait for either renew interval or connection drop
+                tokio::select! {
+                    _ = renew_ticker.tick() => {
+                        debug!("25-minute IDLE renewal interval elapsed, cycling IDLE/DONE");
+                    }
+                }
+            }
+            Err(e) => {
+                retry_count += 1;
+                let backoff = Duration::from_secs((2u64.pow(retry_count.min(6))).min(60));
+                debug!(error=%e, backoff_secs=backoff.as_secs(), "IMAP IDLE connection failed, retrying after backoff");
+                tokio::time::sleep(backoff).await;
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

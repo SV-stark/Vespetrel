@@ -3,10 +3,11 @@ use rusqlite::{Connection, OptionalExtension, params};
 use tracing::warn;
 
 use vespetrel_core::{Account, Folder, Message};
+use crate::{StorageError, StorageResult};
 
 // Simple synchronous repository helpers - callers use deadpool-sqlite threadpool or blocking
 
-pub fn upsert_account(conn: &Connection, acct: &Account) -> anyhow::Result<()> {
+pub fn upsert_account(conn: &Connection, acct: &Account) -> StorageResult<()> {
     conn.execute(
         r#"INSERT INTO accounts (id, name, email, provider_type, auth_config, sync_state, is_active, color, created_at)
            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
@@ -29,7 +30,7 @@ pub fn upsert_account(conn: &Connection, acct: &Account) -> anyhow::Result<()> {
     Ok(())
 }
 
-pub fn list_accounts(conn: &Connection) -> anyhow::Result<Vec<Account>> {
+pub fn list_accounts(conn: &Connection) -> StorageResult<Vec<Account>> {
     let mut stmt = conn.prepare("SELECT id, name, email, provider_type, auth_config, sync_state, is_active, color, created_at FROM accounts")?;
     let rows = stmt.query_map([], |row| {
         let id: String = row.get(0)?;
@@ -80,7 +81,7 @@ pub fn list_accounts(conn: &Connection) -> anyhow::Result<Vec<Account>> {
     rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
 }
 
-pub fn get_account(conn: &Connection, id: &str) -> anyhow::Result<Option<Account>> {
+pub fn get_account(conn: &Connection, id: &str) -> StorageResult<Option<Account>> {
     let mut stmt = conn.prepare("SELECT id, name, email, provider_type, auth_config, sync_state, is_active, color, created_at FROM accounts WHERE id = ?1")?;
     stmt.query_row(params![id], |row| {
         let id: String = row.get(0)?;
@@ -132,7 +133,7 @@ pub fn get_account(conn: &Connection, id: &str) -> anyhow::Result<Option<Account
     .map_err(Into::into)
 }
 
-pub fn upsert_folder(conn: &Connection, folder: &Folder) -> anyhow::Result<()> {
+pub fn upsert_folder(conn: &Connection, folder: &Folder) -> StorageResult<()> {
     conn.execute(
         r#"INSERT INTO folders (id, account_id, remote_id, name, path, role, uid_validity, highest_mod_seq, total_count, unread_count, color)
            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
@@ -157,7 +158,7 @@ pub fn upsert_folder(conn: &Connection, folder: &Folder) -> anyhow::Result<()> {
     Ok(())
 }
 
-pub fn list_folders(conn: &Connection, account_id: &str) -> anyhow::Result<Vec<Folder>> {
+pub fn list_folders(conn: &Connection, account_id: &str) -> StorageResult<Vec<Folder>> {
     let mut stmt = conn.prepare("SELECT id, account_id, remote_id, name, path, role, uid_validity, highest_mod_seq, total_count, unread_count, color FROM folders WHERE account_id = ?1")?;
     let rows = stmt.query_map(params![account_id], |row| {
         let role_str: String = row.get(5)?;
@@ -184,7 +185,7 @@ pub fn get_folder(
     conn: &Connection,
     account_id: &str,
     remote_id: &str,
-) -> anyhow::Result<Option<Folder>> {
+) -> StorageResult<Option<Folder>> {
     let mut stmt = conn.prepare("SELECT id, account_id, remote_id, name, path, role, uid_validity, highest_mod_seq, total_count, unread_count, color FROM folders WHERE account_id = ?1 AND remote_id = ?2")?;
     stmt.query_row(params![account_id, remote_id], |row| {
         let role_str: String = row.get(5)?;
@@ -208,7 +209,7 @@ pub fn get_folder(
     .map_err(Into::into)
 }
 
-pub fn insert_message(conn: &Connection, msg: &Message) -> anyhow::Result<()> {
+pub fn insert_message(conn: &Connection, msg: &Message) -> StorageResult<()> {
     let reply_to_json = msg
         .reply_to
         .as_ref()
@@ -280,7 +281,7 @@ pub fn list_messages_in_folder(
     folder_id: &str,
     limit: usize,
     offset: usize,
-) -> anyhow::Result<Vec<Message>> {
+) -> StorageResult<Vec<Message>> {
     let mut stmt = conn.prepare(
         "SELECT id, account_id, folder_id, thread_id, remote_uid, message_id_header, in_reply_to, references_header, subject, from_address, from_name, to_addresses, cc_addresses, bcc_addresses, reply_to, sent_at, received_at, is_read, is_flagged, is_draft, has_attachments, body_snippet, body_text_preview, blob_path, size_bytes FROM messages WHERE folder_id = ?1 ORDER BY sent_at DESC LIMIT ?2 OFFSET ?3"
     )?;
@@ -324,7 +325,7 @@ pub fn update_message_flags(
     message_id: &str,
     is_read: Option<bool>,
     is_flagged: Option<bool>,
-) -> anyhow::Result<()> {
+) -> StorageResult<()> {
     let read_val = is_read.map(|r| if r { 1 } else { 0 });
     let flag_val = is_flagged.map(|f| if f { 1 } else { 0 });
     let rows = conn.execute(
@@ -340,7 +341,7 @@ pub fn update_message_flags(
     Ok(())
 }
 
-pub fn delete_message(conn: &Connection, message_id: &str) -> anyhow::Result<()> {
+pub fn delete_message(conn: &Connection, message_id: &str) -> StorageResult<()> {
     let blob_path: Option<String> = conn
         .query_row(
             "SELECT blob_path FROM messages WHERE id = ?1",
@@ -371,7 +372,7 @@ pub fn delete_message(conn: &Connection, message_id: &str) -> anyhow::Result<()>
     Ok(())
 }
 
-pub fn upsert_thread(conn: &Connection, thread: &vespetrel_core::Thread) -> anyhow::Result<()> {
+pub fn upsert_thread(conn: &Connection, thread: &vespetrel_core::Thread) -> StorageResult<()> {
     conn.execute(
         r#"INSERT INTO threads (id, account_id, subject, last_message_at, message_count, unread_count, snippet)
            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
@@ -394,7 +395,7 @@ pub fn upsert_thread(conn: &Connection, thread: &vespetrel_core::Thread) -> anyh
 pub fn list_threads(
     conn: &Connection,
     account_id: &str,
-) -> anyhow::Result<Vec<vespetrel_core::Thread>> {
+) -> StorageResult<Vec<vespetrel_core::Thread>> {
     let mut stmt = conn.prepare("SELECT id, account_id, subject, last_message_at, message_count, unread_count, snippet FROM threads WHERE account_id = ?1 ORDER BY last_message_at DESC")?;
     let rows = stmt.query_map(params![account_id], |row| {
         Ok(vespetrel_core::Thread {
@@ -415,7 +416,7 @@ pub fn upsert_contact(
     conn: &Connection,
     account_id: &str,
     contact: &vespetrel_core::Contact,
-) -> anyhow::Result<()> {
+) -> StorageResult<()> {
     conn.execute(
         r#"INSERT INTO contacts (id, account_id, remote_id, display_name, email, vcard_data)
            VALUES (?1, ?2, ?3, ?4, ?5, ?6)
@@ -436,7 +437,7 @@ pub fn upsert_contact(
 pub fn list_contacts(
     conn: &Connection,
     account_id: &str,
-) -> anyhow::Result<Vec<vespetrel_core::Contact>> {
+) -> StorageResult<Vec<vespetrel_core::Contact>> {
     let mut stmt = conn.prepare("SELECT id, remote_id, display_name, email, vcard_data FROM contacts WHERE account_id = ?1 ORDER BY display_name ASC")?;
     let rows = stmt.query_map(params![account_id], |row| {
         Ok(vespetrel_core::Contact {
@@ -453,7 +454,7 @@ pub fn list_contacts(
 pub fn upsert_calendar_event(
     conn: &Connection,
     event: &vespetrel_core::CalendarEvent,
-) -> anyhow::Result<()> {
+) -> StorageResult<()> {
     conn.execute(
         r#"INSERT INTO calendar_events (id, calendar_id, ical_uid, title, description, start_at, end_at, location, raw_ical)
            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
@@ -478,7 +479,7 @@ pub fn upsert_calendar_event(
 pub fn list_calendar_events(
     conn: &Connection,
     calendar_id: &str,
-) -> anyhow::Result<Vec<vespetrel_core::CalendarEvent>> {
+) -> StorageResult<Vec<vespetrel_core::CalendarEvent>> {
     let mut stmt = conn.prepare("SELECT id, calendar_id, ical_uid, title, description, start_at, end_at, location, raw_ical FROM calendar_events WHERE calendar_id = ?1 ORDER BY start_at ASC")?;
     let rows = stmt.query_map(params![calendar_id], |row| {
         Ok(vespetrel_core::CalendarEvent {
@@ -496,7 +497,7 @@ pub fn list_calendar_events(
     rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
 }
 
-pub fn upsert_task(conn: &Connection, task: &vespetrel_core::TaskItem) -> anyhow::Result<()> {
+pub fn upsert_task(conn: &Connection, task: &vespetrel_core::TaskItem) -> StorageResult<()> {
     conn.execute(
         r#"INSERT INTO tasks (id, calendar_id, ical_uid, title, description, due_at, is_completed, completed_at, priority)
            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
@@ -521,7 +522,7 @@ pub fn upsert_task(conn: &Connection, task: &vespetrel_core::TaskItem) -> anyhow
 pub fn list_tasks(
     conn: &Connection,
     calendar_id: &str,
-) -> anyhow::Result<Vec<vespetrel_core::TaskItem>> {
+) -> StorageResult<Vec<vespetrel_core::TaskItem>> {
     let mut stmt = conn.prepare(
         "SELECT id, calendar_id, ical_uid, title, description, due_at, is_completed, completed_at, priority FROM tasks WHERE calendar_id = ?1 ORDER BY is_completed ASC, due_at ASC",
     )?;
@@ -550,7 +551,7 @@ pub fn toggle_task_completion(
     conn: &Connection,
     id: &str,
     is_completed: bool,
-) -> anyhow::Result<()> {
+) -> StorageResult<()> {
     let now = if is_completed {
         Some(Utc::now().timestamp())
     } else {
@@ -563,12 +564,12 @@ pub fn toggle_task_completion(
     Ok(())
 }
 
-pub fn delete_task(conn: &Connection, id: &str) -> anyhow::Result<()> {
+pub fn delete_task(conn: &Connection, id: &str) -> StorageResult<()> {
     conn.execute("DELETE FROM tasks WHERE id = ?1", params![id])?;
     Ok(())
 }
 
-pub fn upsert_signature(conn: &Connection, sig: &vespetrel_core::Signature) -> anyhow::Result<()> {
+pub fn upsert_signature(conn: &Connection, sig: &vespetrel_core::Signature) -> StorageResult<()> {
     if sig.is_default {
         conn.execute(
             "UPDATE signatures SET is_default = 0 WHERE account_id = ?1",
@@ -601,7 +602,7 @@ pub fn upsert_signature(conn: &Connection, sig: &vespetrel_core::Signature) -> a
 pub fn list_signatures_for_account(
     conn: &Connection,
     account_id: &str,
-) -> anyhow::Result<Vec<vespetrel_core::Signature>> {
+) -> StorageResult<Vec<vespetrel_core::Signature>> {
     let mut stmt = conn.prepare(
         "SELECT id, account_id, name, raw_html, plain_text, is_default, include_in_replies, created_at, updated_at
          FROM signatures
@@ -634,12 +635,12 @@ pub fn list_signatures_for_account(
 pub fn get_default_signature(
     conn: &Connection,
     account_id: &str,
-) -> anyhow::Result<Option<vespetrel_core::Signature>> {
+) -> StorageResult<Option<vespetrel_core::Signature>> {
     let list = list_signatures_for_account(conn, account_id)?;
     Ok(list.into_iter().find(|s| s.is_default))
 }
 
-pub fn delete_signature(conn: &Connection, id: &str) -> anyhow::Result<()> {
+pub fn delete_signature(conn: &Connection, id: &str) -> StorageResult<()> {
     conn.execute("DELETE FROM signatures WHERE id = ?1", params![id])?;
     Ok(())
 }
@@ -647,7 +648,7 @@ pub fn delete_signature(conn: &Connection, id: &str) -> anyhow::Result<()> {
 pub fn save_user_settings(
     conn: &Connection,
     settings: &vespetrel_core::UserSettings,
-) -> anyhow::Result<()> {
+) -> StorageResult<()> {
     let json = serde_json::to_string(settings)?;
     let now = chrono::Utc::now().timestamp();
     conn.execute(
@@ -660,7 +661,7 @@ pub fn save_user_settings(
     Ok(())
 }
 
-pub fn get_user_settings(conn: &Connection) -> anyhow::Result<vespetrel_core::UserSettings> {
+pub fn get_user_settings(conn: &Connection) -> StorageResult<vespetrel_core::UserSettings> {
     let mut stmt = conn.prepare("SELECT value FROM user_settings WHERE key = 'global'")?;
     let opt_json: Option<String> = stmt.query_row([], |row| row.get(0)).optional()?;
     match opt_json {

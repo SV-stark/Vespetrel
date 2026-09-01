@@ -18,33 +18,43 @@ pub fn safe_blob_path_with_ext(base: &Path, id: &str, default_ext: &str) -> std:
             "Invalid blob ID: must be ASCII alphanumeric or hyphen/underscore",
         ));
     }
-    // Safe slicing since validated as ASCII
+    std::fs::create_dir_all(base)?;
+    let can_base = base.canonicalize()?;
+
     let shard = &id[..2.min(id.len())];
-    let lz4_cand = base.join(shard).join(format!("{id}.lz4"));
+    let shard_dir = can_base.join(shard);
+    std::fs::create_dir_all(&shard_dir)?;
+
+    let lz4_cand = shard_dir.join(format!("{id}.lz4"));
     if lz4_cand.exists() {
-        if let (Ok(can_cand), Ok(can_base)) = (lz4_cand.canonicalize(), base.canonicalize()) {
-            if !can_cand.starts_with(can_base) {
-                return Err(std::io::Error::new(
-                    std::io::ErrorKind::PermissionDenied,
-                    "Path traversal / symlink escape detected",
-                ));
-            }
+        let can_cand = lz4_cand.canonicalize()?;
+        if !can_cand.starts_with(&can_base) {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                "Path traversal / symlink escape detected",
+            ));
         }
-        return Ok(lz4_cand);
+        return Ok(can_cand);
     }
-    let zst_cand = base.join(shard).join(format!("{id}.zst"));
+    let zst_cand = shard_dir.join(format!("{id}.zst"));
     if zst_cand.exists() {
-        if let (Ok(can_cand), Ok(can_base)) = (zst_cand.canonicalize(), base.canonicalize()) {
-            if !can_cand.starts_with(can_base) {
-                return Err(std::io::Error::new(
-                    std::io::ErrorKind::PermissionDenied,
-                    "Path traversal / symlink escape detected",
-                ));
-            }
+        let can_cand = zst_cand.canonicalize()?;
+        if !can_cand.starts_with(&can_base) {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                "Path traversal / symlink escape detected",
+            ));
         }
-        return Ok(zst_cand);
+        return Ok(can_cand);
     }
-    Ok(base.join(shard).join(format!("{id}.{default_ext}")))
+    let target = shard_dir.join(format!("{id}.{default_ext}"));
+    if !target.starts_with(&can_base) {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            "Path traversal detected",
+        ));
+    }
+    Ok(target)
 }
 
 /// Compressed blob store for raw RFC822 and attachments - § local storage layer

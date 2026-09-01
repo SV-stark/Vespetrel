@@ -1,7 +1,8 @@
 use rusqlite::Connection;
+use crate::StorageResult;
 
 /// Run all DDL migrations - §3.2 with version tracking
-pub fn run_migrations(conn: &Connection) -> anyhow::Result<()> {
+pub fn run_migrations(conn: &mut Connection) -> StorageResult<()> {
     // 1. Ensure migration tracking table exists
     conn.execute_batch(
         r#"
@@ -26,7 +27,8 @@ pub fn run_migrations(conn: &Connection) -> anyhow::Result<()> {
         .unwrap_or(false);
 
     if !is_v1_applied {
-        conn.execute_batch(
+        let tx = conn.transaction()?;
+        tx.execute_batch(
             r#"
             -- Accounts
 
@@ -235,10 +237,11 @@ pub fn run_migrations(conn: &Connection) -> anyhow::Result<()> {
 
         // Record migration version 1
         let now = chrono::Utc::now().timestamp();
-        conn.execute(
+        tx.execute(
             "INSERT OR IGNORE INTO _schema_migrations (version, name, applied_at) VALUES (1, 'initial_schema_fts5', ?1)",
             [now],
         )?;
+        tx.commit()?;
         conn.execute_batch("PRAGMA user_version = 1")?;
     }
 
@@ -253,8 +256,9 @@ pub fn run_migrations(conn: &Connection) -> anyhow::Result<()> {
         .unwrap_or(false);
 
     if !is_v2_applied {
+        let tx = conn.transaction()?;
         // Recreate FTS5 table with accent-folding unicode61 tokenizer
-        conn.execute_batch(
+        tx.execute_batch(
             r#"
             DROP TABLE IF EXISTS messages_fts;
 
@@ -297,10 +301,11 @@ pub fn run_migrations(conn: &Connection) -> anyhow::Result<()> {
         )?;
 
         let now = chrono::Utc::now().timestamp();
-        conn.execute(
+        tx.execute(
             "INSERT OR IGNORE INTO _schema_migrations (version, name, applied_at) VALUES (2, 'fts5_unicode61_diacritics_rebuild', ?1)",
             [now],
         )?;
+        tx.commit()?;
         conn.execute_batch("PRAGMA user_version = 2")?;
     }
 
@@ -314,9 +319,9 @@ mod tests {
 
     #[test]
     fn migrations_idempotent() {
-        let conn = Connection::open_in_memory().unwrap();
-        run_migrations(&conn).unwrap();
-        run_migrations(&conn).unwrap(); // second run should not fail
+        let mut conn = Connection::open_in_memory().unwrap();
+        run_migrations(&mut conn).unwrap();
+        run_migrations(&mut conn).unwrap(); // second run should not fail
         // verify tables exist
         let count: i64 = conn
             .query_row(

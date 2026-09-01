@@ -42,6 +42,36 @@ pub fn detect_system_theme() -> OsTheme {
         }
     }
 
+    #[cfg(target_os = "macos")]
+    {
+        if let Ok(output) = std::process::Command::new("defaults")
+            .args(["read", "-g", "AppleInterfaceStyle"])
+            .output()
+        {
+            let s = String::from_utf8_lossy(&output.stdout);
+            if s.trim().eq_ignore_ascii_case("Dark") {
+                return OsTheme::Dark;
+            } else {
+                return OsTheme::Light;
+            }
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    {
+        if let Ok(output) = std::process::Command::new("gsettings")
+            .args(["get", "org.gnome.desktop.interface", "color-scheme"])
+            .output()
+        {
+            let s = String::from_utf8_lossy(&output.stdout);
+            if s.contains("prefer-dark") || s.contains("dark") {
+                return OsTheme::Dark;
+            } else if s.contains("prefer-light") || s.contains("default") {
+                return OsTheme::Light;
+            }
+        }
+    }
+
     // Default to dark theme for modern desktop mail client aesthetic
     OsTheme::Dark
 }

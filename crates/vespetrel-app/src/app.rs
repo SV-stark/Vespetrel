@@ -73,8 +73,8 @@ mod tests {
     async fn test_app_init_temp_file() {
         let temp_dir =
             std::env::temp_dir().join(format!("vespetrel_test_{}", uuid::Uuid::new_v4()));
-        let db_path = temp_dir.join("test.db");
-        let app = VespetrelApp::new(db_path.to_str().unwrap());
+        let db_str = db_path.to_string_lossy();
+        let app = VespetrelApp::new(&db_str);
         assert!(app.init_storage().await.is_ok());
         let _ = std::fs::remove_dir_all(temp_dir);
     }

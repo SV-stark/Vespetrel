@@ -145,7 +145,7 @@ impl ThreadTree {
                 built_children: Vec::new(),
             }];
 
-            let mut result = None;
+            let mut root_node = None;
 
             while let Some(top) = stack.last_mut() {
                 if top.child_idx < top.child_keys.len() {
@@ -167,8 +167,7 @@ impl ThreadTree {
                             built_children: Vec::new(),
                         });
                     }
-                } else {
-                    let frame = stack.pop().unwrap();
+                } else if let Some(frame) = stack.pop() {
                     let mut children = frame.built_children;
                     children.sort_by_key(|c| c.sent_at);
 
@@ -185,13 +184,13 @@ impl ThreadTree {
                     if let Some(parent_frame) = stack.last_mut() {
                         parent_frame.built_children.push(node);
                     } else {
-                        result = Some(node);
+                        root_node = Some(node);
                         break;
                     }
                 }
             }
 
-            result
+            root_node
         }
 
         let mut root_nodes = Vec::new();

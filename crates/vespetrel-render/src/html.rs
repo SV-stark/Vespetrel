@@ -127,7 +127,11 @@ fn ammonia_clean(html: &str) -> String {
             "video", "audio", "source", "table", "thead", "tbody", "tr", "th", "td",
         ])
         .link_rel(Some("noopener noreferrer"))
-        .add_generic_attributes(["data-blocked-src"])
+        .add_generic_attributes([
+            "data-blocked-src",
+            "data-blocked-srcset",
+            "data-blocked-poster",
+        ])
         .add_url_schemes(["blob", "cid"]);
 
     builder.clean(html).to_string()

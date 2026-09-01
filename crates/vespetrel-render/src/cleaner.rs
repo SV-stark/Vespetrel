@@ -170,9 +170,15 @@ fn extract_host(url: &str) -> Option<&str> {
 }
 
 fn domains_match(d1: &str, d2: &str) -> bool {
-    let clean1 = d1.trim_start_matches("www.");
-    let clean2 = d2.trim_start_matches("www.");
-    clean1 == clean2
+    let clean1 = d1.trim_start_matches("www.").to_ascii_lowercase();
+    let clean2 = d2.trim_start_matches("www.").to_ascii_lowercase();
+    if clean1 == clean2 {
+        return true;
+    }
+    if clean1.ends_with(&format!(".{clean2}")) || clean2.ends_with(&format!(".{clean1}")) {
+        return true;
+    }
+    false
 }
 
 #[cfg(test)]
