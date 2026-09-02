@@ -329,7 +329,7 @@ fn parse_inline_markdown(line: &str, base_offset: usize) -> (String, Vec<TextSpa
             let delimiter = c;
             let mut italic_content = String::new();
             let mut closed = false;
-            while let Some(ic) = chars.next() {
+            for ic in chars.by_ref() {
                 if ic == delimiter {
                     closed = true;
                     break;

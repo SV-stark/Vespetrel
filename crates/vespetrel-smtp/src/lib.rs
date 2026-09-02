@@ -271,7 +271,7 @@ impl SmtpClient {
             if self.config.dkim_key.is_some() {
                 debug!("DKIM signing configured");
             }
-            return Ok(());
+            Ok(())
         }
 
         #[cfg(not(any(test, feature = "mock")))]

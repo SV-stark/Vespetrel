@@ -87,13 +87,12 @@ impl MailProvider for ImapProvider {
         for sl in &select_lines {
             if let Some(pos) = sl.to_uppercase().find("HIGHESTMODSEQ") {
                 let rest = &sl[pos + "HIGHESTMODSEQ".len()..];
-                if let Some(num_str) = rest
+                if let Some(seq) = rest
                     .split(|c: char| !c.is_ascii_digit())
                     .find(|s| !s.is_empty())
+                    .and_then(|s| s.parse::<u64>().ok())
                 {
-                    if let Ok(seq) = num_str.parse::<u64>() {
-                        highest_mod_seq_found = Some(seq);
-                    }
+                    highest_mod_seq_found = Some(seq);
                 }
             }
         }

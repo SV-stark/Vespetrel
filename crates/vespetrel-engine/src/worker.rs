@@ -331,10 +331,8 @@ impl AccountWorker {
                         msg.is_flagged = sync_msg.flags.contains(&vespetrel_core::Flag::Flagged);
                         msg.is_draft = sync_msg.flags.contains(&vespetrel_core::Flag::Draft);
 
-                        if let Some(ref raw) = raw_bytes_opt {
-                            if !raw.is_empty() {
-                                blobs_to_write.push((msg.id.clone(), raw.clone()));
-                            }
+                        if let Some(raw) = raw_bytes_opt.as_ref().filter(|r| !r.is_empty()) {
+                            blobs_to_write.push((msg.id.clone(), raw.clone()));
                         }
 
                         summaries.push(msg.summary());
@@ -342,39 +340,40 @@ impl AccountWorker {
                     }
 
                     // Batch write blobs concurrently in a single background task
-                    if let Some(store) = self.blob_store.clone() {
-                        if !blobs_to_write.is_empty() {
-                            let res = tokio::task::spawn_blocking(move || {
-                                for (id, raw) in blobs_to_write {
-                                    if let Err(e) = store.write(&id, &raw) {
-                                        error!(msg_id=%id, error=%e, "failed to write message to BlobStore");
-                                    }
+                    if let Some(store) = self
+                        .blob_store
+                        .clone()
+                        .filter(|_| !blobs_to_write.is_empty())
+                    {
+                        let res = tokio::task::spawn_blocking(move || {
+                            for (id, raw) in blobs_to_write {
+                                if let Err(e) = store.write(&id, &raw) {
+                                    error!(msg_id=%id, error=%e, "failed to write message to BlobStore");
                                 }
-                            })
-                            .await;
-                            if let Err(e) = res {
-                                error!(error=%e, "blob store batch write task panicked");
                             }
+                        })
+                        .await;
+                        if let Err(e) = res {
+                            error!(error=%e, "blob store batch write task panicked");
                         }
                     }
 
                     // Batch persist synced messages to storage in a single atomic transaction
-                    if let Some(conn) = &storage_conn {
-                        if !msgs_to_store.is_empty() {
-                            let msgs_batch = msgs_to_store.clone();
-                            let res = conn
-                                .interact(move |c| -> anyhow::Result<()> {
-                                    let tx = c.transaction()?;
-                                    for m in &msgs_batch {
-                                        vespetrel_storage::repo::insert_message(&tx, m)?;
-                                    }
-                                    tx.commit()?;
-                                    Ok(())
-                                })
-                                .await;
-                            if let Err(e) = res {
-                                error!(error=%e, "storage interact error batch inserting messages");
-                            }
+                    if let Some(conn) = storage_conn.as_ref().filter(|_| !msgs_to_store.is_empty())
+                    {
+                        let msgs_batch = msgs_to_store.clone();
+                        let res = conn
+                            .interact(move |c| -> anyhow::Result<()> {
+                                let tx = c.transaction()?;
+                                for m in &msgs_batch {
+                                    vespetrel_storage::repo::insert_message(&tx, m)?;
+                                }
+                                tx.commit()?;
+                                Ok(())
+                            })
+                            .await;
+                        if let Err(e) = res {
+                            error!(error=%e, "storage interact error batch inserting messages");
                         }
                     }
 

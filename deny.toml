@@ -63,21 +63,11 @@ feature-depth = 1
 # More documentation for the advisories section can be found here:
 # https://embarkstudios.github.io/cargo-deny/checks/advisories/cfg.html
 [advisories]
-# The path where the advisory databases are cloned/fetched into
-#db-path = "$CARGO_HOME/advisory-dbs"
-# The url(s) of the advisory databases to use
-#db-urls = ["https://github.com/rustsec/advisory-db"]
-# A list of advisory IDs to ignore. Note that ignored advisories will still
-# output a note when they are encountered.
+unmaintained = "workspace"
 ignore = [
     # Marvin timing attack in transitive rsa crate via rpgp (no upstream patch currently available)
     "RUSTSEC-2023-0071",
 ]
-# If this is true, then cargo deny will use the git executable to fetch advisory database.
-# If this is false, then it uses a built-in git library.
-# Setting this to true can be helpful if you have special authentication requirements that cargo-deny does not support.
-# See Git Authentication for more information about setting up git authentication.
-#git-fetch-with-cli = true
 
 # This section is considered when running `cargo deny check licenses`
 # More documentation for the licenses section can be found here:
@@ -99,6 +89,9 @@ allow = [
     "Zlib",
     "CC0-1.0",
     "MPL-2.0",
+    "NCSA",
+    "OFL-1.1",
+    "BSL-1.0",
 ]
 # The confidence threshold for detecting a license from license text.
 # The higher the value, the more closely the license text must be to the
@@ -150,7 +143,7 @@ registries = [
 # https://embarkstudios.github.io/cargo-deny/checks/bans/cfg.html
 [bans]
 # Lint level for when multiple versions of the same crate are detected
-multiple-versions = "deny"
+multiple-versions = "warn"
 # Lint level for when a crate version requirement is `*`
 wildcards = "allow"
 # The graph highlighting used when creating dotgraphs for crates

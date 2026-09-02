@@ -139,17 +139,19 @@ async fn main() -> anyhow::Result<()> {
     let (mut coordinator, mut rx) = vespetrel_engine::SyncCoordinator::create();
     if let Some(ref pool) = storage_pool {
         coordinator = coordinator.with_storage_pool(pool.clone());
-        if let Ok(conn) = pool.get().await {
-            if let Ok(Ok(accounts)) = conn
+        let accounts = match pool.get().await {
+            Ok(conn) => conn
                 .interact(|c| vespetrel_storage::repo::list_accounts(c))
                 .await
-            {
-                for acct in &accounts {
-                    let provider = vespetrel_engine::make_provider(acct);
-                    coordinator.spawn_worker(&acct.id, provider);
-                    tracing::info!(account_id=%acct.id, email=%acct.email, "spawned sync worker for account");
-                }
-            }
+                .ok()
+                .and_then(|r| r.ok())
+                .unwrap_or_default(),
+            Err(_) => Vec::new(),
+        };
+        for acct in &accounts {
+            let provider = vespetrel_engine::make_provider(acct);
+            coordinator.spawn_worker(&acct.id, provider);
+            tracing::info!(account_id=%acct.id, email=%acct.email, "spawned sync worker for account");
         }
     }
     coordinator = coordinator.with_blob_store(blob_store);
@@ -349,15 +351,30 @@ async fn main() -> anyhow::Result<()> {
                                     println!("\n🔍 FTS5 Search Results for '{query}':");
                                     let mut found = false;
                                     if let Some(ref pool) = storage_pool {
-                                        if let Ok(conn) = pool.get().await {
-                                            let q = query.clone();
-                                            if let Ok(Ok(results)) = conn.interact(move |c| vespetrel_storage::fts::search_messages(c, &q, None, 20)).await {
-                                                if !results.is_empty() {
-                                                    found = true;
-                                                    for (idx, r) in results.iter().enumerate() {
-                                                        println!("  • [{}] {} - {}", idx + 1, r.subject.as_deref().unwrap_or("No Subject"), r.snippet.as_deref().unwrap_or(""));
-                                                    }
-                                                }
+                                        let results = match pool.get().await {
+                                            Ok(conn) => {
+                                                let q = query.clone();
+                                                conn.interact(move |c| {
+                                                    vespetrel_storage::fts::search_messages(
+                                                        c, &q, None, 20,
+                                                    )
+                                                })
+                                                .await
+                                                .ok()
+                                                .and_then(|r| r.ok())
+                                                .unwrap_or_default()
+                                            }
+                                            Err(_) => Vec::new(),
+                                        };
+                                        if !results.is_empty() {
+                                            found = true;
+                                            for (idx, r) in results.iter().enumerate() {
+                                                println!(
+                                                    "  • [{}] {} - {}",
+                                                    idx + 1,
+                                                    r.subject.as_deref().unwrap_or("No Subject"),
+                                                    r.snippet.as_deref().unwrap_or("")
+                                                );
                                             }
                                         }
                                     }
@@ -385,12 +402,17 @@ async fn main() -> anyhow::Result<()> {
                             "6" | "sync" => {
                                 println!("🔄 Triggering IMAP/JMAP/EWS sync engine...");
                                 if let Some(ref pool) = storage_pool {
-                                    if let Ok(conn) = pool.get().await {
-                                        if let Ok(Ok(accounts)) = conn.interact(|c| vespetrel_storage::repo::list_accounts(c)).await {
-                                            for acct in &accounts {
-                                                coordinator.trigger_sync(&acct.id);
-                                            }
-                                        }
+                                    let accounts = match pool.get().await {
+                                        Ok(conn) => conn
+                                            .interact(|c| vespetrel_storage::repo::list_accounts(c))
+                                            .await
+                                            .ok()
+                                            .and_then(|r| r.ok())
+                                            .unwrap_or_default(),
+                                        Err(_) => Vec::new(),
+                                    };
+                                    for acct in &accounts {
+                                        coordinator.trigger_sync(&acct.id);
                                     }
                                 }
                             }

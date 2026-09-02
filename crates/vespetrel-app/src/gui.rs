@@ -69,6 +69,7 @@ pub mod gpui_app {
         }
 
         /// Production entry point: creates `MainWindow` and initializes asynchronous hydration from the storage pool.
+        #[allow(clippy::type_complexity)]
         pub fn from_storage(
             cx: &mut Context<Self>,
             sync_rx: flume::Receiver<SyncEvent>,
@@ -114,14 +115,12 @@ pub mod gpui_app {
                                     .find(|f| f.role == FolderRole::Inbox)
                                     .or_else(|| all_folders.first())
                                 {
-                                    if let Ok(msgs) =
-                                        vespetrel_storage::repo::list_messages_in_folder(
-                                            c, &inbox.id, 100, 0,
-                                        )
-                                    {
-                                        initial_messages =
-                                            msgs.into_iter().map(|m| m.summary()).collect();
-                                    }
+                                    let msgs = vespetrel_storage::repo::list_messages_in_folder(
+                                        c, &inbox.id, 100, 0,
+                                    )
+                                    .unwrap_or_default();
+                                    initial_messages =
+                                        msgs.into_iter().map(|m| m.summary()).collect();
                                 }
 
                                 let mut all_contacts = Vec::new();
@@ -133,28 +132,25 @@ pub mod gpui_app {
                                     }
                                 }
                                 if all_contacts.is_empty() {
-                                    if let Ok(contacts) =
+                                    let contacts =
                                         vespetrel_storage::repo::list_contacts(c, "addr-main")
-                                    {
-                                        all_contacts.extend(contacts);
-                                    }
+                                            .unwrap_or_default();
+                                    all_contacts.extend(contacts);
                                 }
 
                                 let mut cal_events = Vec::new();
-                                if let Ok(mut stmt) =
-                                    c.prepare("SELECT DISTINCT calendar_id FROM calendar_events")
-                                {
-                                    if let Ok(rows) = stmt.query_map([], |r| r.get::<_, String>(0))
+                                let cal_ids: Vec<String> = c
+                                    .prepare("SELECT DISTINCT calendar_id FROM calendar_events")
+                                    .and_then(|mut stmt| {
+                                        let rows = stmt.query_map([], |r| r.get::<_, String>(0))?;
+                                        Ok(rows.flatten().collect())
+                                    })
+                                    .unwrap_or_default();
+                                for cal_id in cal_ids {
+                                    if let Ok(events) =
+                                        vespetrel_storage::repo::list_calendar_events(c, &cal_id)
                                     {
-                                        for cal_id in rows.flatten() {
-                                            if let Ok(events) =
-                                                vespetrel_storage::repo::list_calendar_events(
-                                                    c, &cal_id,
-                                                )
-                                            {
-                                                cal_events.extend(events);
-                                            }
-                                        }
+                                        cal_events.extend(events);
                                     }
                                 }
                                 if cal_events.is_empty() {
@@ -165,18 +161,18 @@ pub mod gpui_app {
                                 }
 
                                 let mut task_items = Vec::new();
-                                if let Ok(mut stmt) =
-                                    c.prepare("SELECT DISTINCT calendar_id FROM tasks")
-                                {
-                                    if let Ok(rows) = stmt.query_map([], |r| r.get::<_, String>(0))
+                                let task_cal_ids: Vec<String> = c
+                                    .prepare("SELECT DISTINCT calendar_id FROM tasks")
+                                    .and_then(|mut stmt| {
+                                        let rows = stmt.query_map([], |r| r.get::<_, String>(0))?;
+                                        Ok(rows.flatten().collect())
+                                    })
+                                    .unwrap_or_default();
+                                for cal_id in task_cal_ids {
+                                    if let Ok(tasks) =
+                                        vespetrel_storage::repo::list_tasks(c, &cal_id)
                                     {
-                                        for cal_id in rows.flatten() {
-                                            if let Ok(tasks) =
-                                                vespetrel_storage::repo::list_tasks(c, &cal_id)
-                                            {
-                                                task_items.extend(tasks);
-                                            }
-                                        }
+                                        task_items.extend(tasks);
                                     }
                                 }
                                 if task_items.is_empty() {
@@ -274,10 +270,12 @@ pub mod gpui_app {
                 }
                 SyncEvent::MessagesDeleted(ids) => {
                     self.messages.retain(|m| !ids.contains(&m.id));
-                    if let Some(sel) = &self.selected_message_id {
-                        if ids.contains(sel) {
-                            self.selected_message_id = self.messages.first().map(|m| m.id.clone());
-                        }
+                    if self
+                        .selected_message_id
+                        .as_ref()
+                        .is_some_and(|sel| ids.contains(sel))
+                    {
+                        self.selected_message_id = self.messages.first().map(|m| m.id.clone());
                     }
                     cx.notify();
                 }

@@ -356,7 +356,7 @@ pub fn update_message_flags(
         params![read_val, flag_val, message_id],
     )?;
     if rows == 0 {
-        return Err(crate::StorageError::NotFound(message_id.to_string()).into());
+        return Err(crate::StorageError::NotFound(message_id.to_string()));
     }
     Ok(())
 }
@@ -364,7 +364,7 @@ pub fn update_message_flags(
 pub fn delete_message(conn: &Connection, message_id: &str) -> StorageResult<()> {
     let rows = conn.execute("DELETE FROM messages WHERE id = ?1", params![message_id])?;
     if rows == 0 {
-        return Err(crate::StorageError::NotFound(message_id.to_string()).into());
+        return Err(crate::StorageError::NotFound(message_id.to_string()));
     }
     Ok(())
 }

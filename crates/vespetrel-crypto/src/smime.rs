@@ -87,7 +87,7 @@ impl SmimeEngine {
         }
 
         // 2. Try parsing as SubjectPublicKeyInfo
-        if let Ok(_) = x509_cert::spki::SubjectPublicKeyInfoRef::from_der(&der_bytes) {
+        if x509_cert::spki::SubjectPublicKeyInfoRef::from_der(&der_bytes).is_ok() {
             return Ok(SmimeVerificationResult {
                 is_valid: true,
                 signer_email: None,

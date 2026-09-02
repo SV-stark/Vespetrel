@@ -34,6 +34,7 @@ impl ImapConfig {
     }
 }
 /// Supported transport streams for IMAP client (plain TCP or TLS)
+#[allow(clippy::large_enum_variant)]
 pub enum ImapStream {
     Plain(tokio::net::TcpStream),
     Tls(tokio_rustls::client::TlsStream<tokio::net::TcpStream>),
@@ -146,11 +147,9 @@ impl ImapConnection {
                     // Query server capabilities dynamically
                     if let Ok(cap_lines) = self.execute_cmd("CAPABILITY").await {
                         for line in cap_lines {
-                            if line.starts_with("* CAPABILITY") {
-                                self.capabilities = line["* CAPABILITY".len()..]
-                                    .split_whitespace()
-                                    .map(|s| s.to_string())
-                                    .collect();
+                            if let Some(rest) = line.strip_prefix("* CAPABILITY") {
+                                self.capabilities =
+                                    rest.split_whitespace().map(|s| s.to_string()).collect();
                             }
                         }
                     }
@@ -212,92 +211,94 @@ impl ImapConnection {
         debug!(tag=%tag_str, cmd=%cmd, "executing IMAP command");
 
         if let Some(stream) = self.stream.as_mut() {
-            if stream.write_all(tagged_line.as_bytes()).await.is_ok() {
-                let _ = stream.flush().await;
-                let mut accumulated = Vec::new();
-                let mut chunk = vec![0u8; 8192];
-                let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+            if stream.write_all(tagged_line.as_bytes()).await.is_err() {
+                anyhow::bail!("failed to write IMAP command to stream");
+            }
+            let _ = stream.flush().await;
+            let mut accumulated = Vec::new();
+            let mut chunk = vec![0u8; 8192];
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
 
-                while std::time::Instant::now() < deadline {
-                    match tokio::time::timeout(
-                        std::time::Duration::from_millis(500),
-                        stream.read(&mut chunk),
-                    )
-                    .await
-                    {
-                        Ok(Ok(n)) if n > 0 => {
-                            if accumulated.len() + n > Self::MAX_IMAP_RESPONSE {
-                                anyhow::bail!("IMAP response exceeded 16MB limit: potential DoS");
-                            }
-                            accumulated.extend_from_slice(&chunk[..n]);
+            while std::time::Instant::now() < deadline {
+                match tokio::time::timeout(
+                    std::time::Duration::from_millis(500),
+                    stream.read(&mut chunk),
+                )
+                .await
+                {
+                    Ok(Ok(n)) if n > 0 => {
+                        if accumulated.len() + n > Self::MAX_IMAP_RESPONSE {
+                            anyhow::bail!("IMAP response exceeded 16MB limit: potential DoS");
+                        }
+                        accumulated.extend_from_slice(&chunk[..n]);
 
-                            // Literal {N}\r\n, ~{N}\r\n, {N+}\r\n boundary detection (RFC 3501 & RFC 7888 LITERAL+)
-                            let text = String::from_utf8_lossy(&accumulated);
-                            if let Some(lit_pos) = text.find('{') {
-                                if let Some(close_brace) = text[lit_pos..].find("}\r\n") {
-                                    let raw_size = &text[lit_pos + 1..lit_pos + close_brace];
-                                    let size_str = raw_size.trim_matches(['+', '~']);
-                                    if let Ok(expected_lit_len) = size_str.parse::<usize>() {
-                                        if expected_lit_len > Self::MAX_IMAP_RESPONSE {
-                                            anyhow::bail!(
-                                                "IMAP literal size {expected_lit_len} exceeds 16MB limit: potential DoS"
-                                            );
-                                        }
-                                        let lit_start = lit_pos + close_brace + 3;
-                                        let lit_read = accumulated.len().saturating_sub(lit_start);
-                                        if lit_read < expected_lit_len {
-                                            let mut remaining = expected_lit_len - lit_read;
-                                            let mut lit_buf = vec![0u8; remaining.min(65536)];
-                                            while remaining > 0 {
-                                                if let Ok(Ok(rn)) = tokio::time::timeout(
-                                                    std::time::Duration::from_secs(5),
-                                                    stream.read(&mut lit_buf),
-                                                )
-                                                .await
-                                                {
-                                                    if rn == 0 {
-                                                        break;
-                                                    }
-                                                    accumulated.extend_from_slice(&lit_buf[..rn]);
-                                                    remaining = remaining.saturating_sub(rn);
-                                                } else {
-                                                    break;
-                                                }
+                        // Literal {N}\r\n, ~{N}\r\n, {N+}\r\n boundary detection (RFC 3501 & RFC 7888 LITERAL+)
+                        let text = String::from_utf8_lossy(&accumulated);
+                        if let Some((lit_pos, close_brace)) = text
+                            .find('{')
+                            .and_then(|pos| text[pos..].find("}\r\n").map(|close| (pos, close)))
+                        {
+                            let raw_size = &text[lit_pos + 1..lit_pos + close_brace];
+                            let size_str = raw_size.trim_matches(['+', '~']);
+                            if let Ok(expected_lit_len) = size_str.parse::<usize>() {
+                                if expected_lit_len > Self::MAX_IMAP_RESPONSE {
+                                    anyhow::bail!(
+                                        "IMAP literal size {expected_lit_len} exceeds 16MB limit: potential DoS"
+                                    );
+                                }
+                                let lit_start = lit_pos + close_brace + 3;
+                                let lit_read = accumulated.len().saturating_sub(lit_start);
+                                if lit_read < expected_lit_len {
+                                    let mut remaining = expected_lit_len - lit_read;
+                                    let mut lit_buf = vec![0u8; remaining.min(65536)];
+                                    while remaining > 0 {
+                                        if let Ok(Ok(rn)) = tokio::time::timeout(
+                                            std::time::Duration::from_secs(5),
+                                            stream.read(&mut lit_buf),
+                                        )
+                                        .await
+                                        {
+                                            if rn == 0 {
+                                                break;
                                             }
+                                            accumulated.extend_from_slice(&lit_buf[..rn]);
+                                            remaining = remaining.saturating_sub(rn);
+                                        } else {
+                                            break;
                                         }
                                     }
                                 }
                             }
-
-                            let text = String::from_utf8_lossy(&accumulated);
-                            // Check if tagged terminal line or continuation received
-                            if text.contains(&format!("{tag_str} OK"))
-                                || text.contains(&format!("{tag_str} NO"))
-                                || text.contains(&format!("{tag_str} BAD"))
-                                || text.starts_with('+')
-                            {
-                                let lines: Vec<String> = text
-                                    .lines()
-                                    .map(|l| l.trim().to_string())
-                                    .filter(|l| !l.is_empty())
-                                    .collect();
-                                return Ok(lines);
-                            }
                         }
-                        _ => break,
-                    }
-                }
 
-                if !accumulated.is_empty() {
-                    let text = String::from_utf8_lossy(&accumulated);
-                    let lines: Vec<String> = text
-                        .lines()
-                        .map(|l| l.trim().to_string())
-                        .filter(|l| !l.is_empty())
-                        .collect();
-                    if !lines.is_empty() {
-                        return Ok(lines);
+                        let text = String::from_utf8_lossy(&accumulated);
+                        // Check if tagged terminal line or continuation received
+                        if text.contains(&format!("{tag_str} OK"))
+                            || text.contains(&format!("{tag_str} NO"))
+                            || text.contains(&format!("{tag_str} BAD"))
+                            || text.starts_with('+')
+                        {
+                            let lines: Vec<String> = text
+                                .lines()
+                                .map(|l| l.trim().to_string())
+                                .filter(|l| !l.is_empty())
+                                .collect();
+                            return Ok(lines);
+                        }
                     }
+                    _ => break,
+                }
+            }
+
+            if !accumulated.is_empty() {
+                let text = String::from_utf8_lossy(&accumulated);
+                let lines: Vec<String> = text
+                    .lines()
+                    .map(|l| l.trim().to_string())
+                    .filter(|l| !l.is_empty())
+                    .collect();
+                if !lines.is_empty() {
+                    return Ok(lines);
                 }
             }
         }
@@ -339,7 +340,7 @@ impl ImapConnection {
 
             lines.push(format!("{tag_str} OK {cmd} completed"));
             let _ = tag_id;
-            return Ok(lines);
+            Ok(lines)
         }
 
         #[cfg(not(any(test, feature = "mock")))]
@@ -426,7 +427,7 @@ impl ImapConnection {
                 chrono::Utc::now().to_rfc2822(),
                 uid
             );
-            return Ok(formatted.into_bytes());
+            Ok(formatted.into_bytes())
         }
 
         #[cfg(not(any(test, feature = "mock")))]
@@ -549,18 +550,18 @@ impl ImapConnection {
 /// Helper to parse quoted string or atom with backslash escape support
 fn parse_imap_token(s: &str) -> Option<(String, &str)> {
     let trimmed = s.trim_start();
-    if trimmed.starts_with('"') {
+    if let Some(stripped) = trimmed.strip_prefix('"') {
         let mut result = String::new();
-        let mut chars = trimmed[1..].char_indices();
+        let chars = stripped.char_indices();
         let mut escaped = false;
-        while let Some((idx, c)) = chars.next() {
+        for (idx, c) in chars {
             if escaped {
                 result.push(c);
                 escaped = false;
             } else if c == '\\' {
                 escaped = true;
             } else if c == '"' {
-                let remainder = &trimmed[1 + idx + 1..];
+                let remainder = &stripped[idx + 1..];
                 return Some((result, remainder));
             } else {
                 result.push(c);
@@ -628,6 +629,7 @@ fn find_ascii_case_insensitive(haystack: &str, needle: &str) -> Option<usize> {
 }
 
 /// Parse untagged `* <seq> FETCH (UID <uid> FLAGS (<flags>) MODSEQ <modseq> ...)` line
+#[allow(clippy::type_complexity)]
 pub fn parse_imap_fetch_line(
     line: &str,
 ) -> Option<(
@@ -640,15 +642,12 @@ pub fn parse_imap_fetch_line(
         return None;
     }
 
-    let uid = if let Some(uid_pos) = find_ascii_case_insensitive(line, "UID ") {
-        let after_uid = line[uid_pos + 4..].trim_start();
-        let end = after_uid
-            .find(|c: char| !c.is_ascii_digit())
-            .unwrap_or(after_uid.len());
-        after_uid[..end].parse::<u32>().ok()?
-    } else {
-        return None;
-    };
+    let uid_pos = find_ascii_case_insensitive(line, "UID ")?;
+    let after_uid = line[uid_pos + 4..].trim_start();
+    let end = after_uid
+        .find(|c: char| !c.is_ascii_digit())
+        .unwrap_or(after_uid.len());
+    let uid = after_uid[..end].parse::<u32>().ok()?;
 
     let mut flags = Vec::new();
     if let Some(flags_pos) = find_ascii_case_insensitive(line, "FLAGS (") {

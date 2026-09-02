@@ -96,11 +96,11 @@ impl DavClient {
 
         #[cfg(any(test, feature = "mock"))]
         {
-            return Ok(vec![RemoteCalendar {
+            Ok(vec![RemoteCalendar {
                 id: "personal".into(),
                 name: "Personal".into(),
                 color: Some("#3b82f6".into()),
-            }]);
+            }])
         }
 
         #[cfg(not(any(test, feature = "mock")))]
@@ -165,10 +165,10 @@ impl DavClient {
 
         #[cfg(any(test, feature = "mock"))]
         {
-            return Ok(CalendarSyncResult {
+            Ok(CalendarSyncResult {
                 events: vec![],
                 new_sync_token: Some("sync-token-1".into()),
-            });
+            })
         }
 
         #[cfg(not(any(test, feature = "mock")))]
@@ -326,12 +326,9 @@ fn parse_ical_datetime(raw: &str) -> Option<chrono::DateTime<chrono::Utc>> {
         ));
     }
     if let Ok(naive_date) = chrono::NaiveDate::parse_from_str(clean, "%Y%m%d") {
-        if let Some(naive) = naive_date.and_hms_opt(0, 0, 0) {
-            return Some(chrono::DateTime::from_naive_utc_and_offset(
-                naive,
-                chrono::Utc,
-            ));
-        }
+        return naive_date
+            .and_hms_opt(0, 0, 0)
+            .map(|naive| chrono::DateTime::from_naive_utc_and_offset(naive, chrono::Utc));
     }
     None
 }
@@ -386,18 +383,18 @@ pub fn parse_ical_events(
                 location = Some(val.to_string());
             } else if let Some(val) = line.strip_prefix("UID:") {
                 ical_uid = Some(val.to_string());
-            } else if line.starts_with("DTSTART") {
-                if let Some((_, val)) = line.split_once(':') {
-                    if let Some(dt) = parse_ical_datetime(val) {
-                        start = dt;
-                    }
-                }
-            } else if line.starts_with("DTEND") {
-                if let Some((_, val)) = line.split_once(':') {
-                    if let Some(dt) = parse_ical_datetime(val) {
-                        end = dt;
-                    }
-                }
+            } else if let Some(dt) = line
+                .strip_prefix("DTSTART")
+                .and_then(|_| line.split_once(':'))
+                .and_then(|(_, val)| parse_ical_datetime(val))
+            {
+                start = dt;
+            } else if let Some(dt) = line
+                .strip_prefix("DTEND")
+                .and_then(|_| line.split_once(':'))
+                .and_then(|(_, val)| parse_ical_datetime(val))
+            {
+                end = dt;
             }
         }
     }
