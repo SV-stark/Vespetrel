@@ -152,7 +152,7 @@ impl ThreadTree {
                     let next_key = top.child_keys[top.child_idx].clone();
                     top.child_idx += 1;
 
-                    if stack.len() <= 50
+                    if stack.len() <= 256
                         && visited.insert(next_key.clone())
                         && let Some(&child_msg) = id_to_msg.get(&next_key)
                     {
@@ -194,7 +194,7 @@ impl ThreadTree {
         }
 
         let mut root_nodes = Vec::new();
-        let mut visited = AHashSet::with_capacity(messages.len());
+        let mut visited = AHashSet::with_capacity(cap);
         for rk in root_keys {
             if let Some(node) =
                 build_node_iterative(&rk, &id_to_msg, &parent_to_children, &mut visited)
@@ -288,6 +288,8 @@ pub fn normalize_subject(subject: &str) -> String {
         if bytes.len() >= 4
             && (bytes[..3].eq_ignore_ascii_case(b"re[") || bytes[..3].eq_ignore_ascii_case(b"fw["))
             && let Some(idx) = memchr::memchr(b']', bytes)
+            && idx > 3
+            && bytes[3..idx].iter().all(|b| b.is_ascii_digit())
             && idx + 1 < bytes.len()
             && bytes[idx + 1] == b':'
         {

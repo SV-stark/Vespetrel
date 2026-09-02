@@ -308,7 +308,35 @@ pub struct TaskSyncResult {
     pub new_sync_token: Option<String>,
 }
 
-/// Parse VEVENT blocks into CalendarEvent instances
+fn parse_ical_datetime(raw: &str) -> Option<chrono::DateTime<chrono::Utc>> {
+    let clean = raw.trim();
+    if let Ok(dt) = chrono::DateTime::parse_from_rfc3339(clean) {
+        return Some(dt.with_timezone(&chrono::Utc));
+    }
+    if let Ok(naive) = chrono::NaiveDateTime::parse_from_str(clean, "%Y%m%dT%H%M%SZ") {
+        return Some(chrono::DateTime::from_naive_utc_and_offset(
+            naive,
+            chrono::Utc,
+        ));
+    }
+    if let Ok(naive) = chrono::NaiveDateTime::parse_from_str(clean, "%Y%m%dT%H%M%S") {
+        return Some(chrono::DateTime::from_naive_utc_and_offset(
+            naive,
+            chrono::Utc,
+        ));
+    }
+    if let Ok(naive_date) = chrono::NaiveDate::parse_from_str(clean, "%Y%m%d") {
+        if let Some(naive) = naive_date.and_hms_opt(0, 0, 0) {
+            return Some(chrono::DateTime::from_naive_utc_and_offset(
+                naive,
+                chrono::Utc,
+            ));
+        }
+    }
+    None
+}
+
+/// Parse RFC 5545 VEVENT components from raw iCalendar string
 pub fn parse_ical_events(
     calendar_id: &str,
     ical_str: &str,
@@ -358,14 +386,18 @@ pub fn parse_ical_events(
                 location = Some(val.to_string());
             } else if let Some(val) = line.strip_prefix("UID:") {
                 ical_uid = Some(val.to_string());
-            } else if let Some(val) = line.strip_prefix("DTSTART:")
-                && let Ok(dt) = chrono::DateTime::parse_from_rfc3339(val)
-            {
-                start = dt.with_timezone(&chrono::Utc);
-            } else if let Some(val) = line.strip_prefix("DTEND:")
-                && let Ok(dt) = chrono::DateTime::parse_from_rfc3339(val)
-            {
-                end = dt.with_timezone(&chrono::Utc);
+            } else if line.starts_with("DTSTART") {
+                if let Some((_, val)) = line.split_once(':') {
+                    if let Some(dt) = parse_ical_datetime(val) {
+                        start = dt;
+                    }
+                }
+            } else if line.starts_with("DTEND") {
+                if let Some((_, val)) = line.split_once(':') {
+                    if let Some(dt) = parse_ical_datetime(val) {
+                        end = dt;
+                    }
+                }
             }
         }
     }

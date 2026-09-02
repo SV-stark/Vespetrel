@@ -123,10 +123,16 @@ async fn main() -> anyhow::Result<()> {
 
     // Initialize storage pool and BlobStore
     let storage_pool = app.create_storage_pool().ok();
-    let blob_dir = std::path::Path::new(&db_path)
-        .parent()
-        .unwrap_or_else(|| std::path::Path::new("."))
-        .join("blobs");
+    let blob_dir = if db_path == ":memory:" {
+        let p = std::env::temp_dir().join(format!("vespetrel_blobs_{}", uuid::Uuid::new_v4()));
+        let _ = std::fs::create_dir_all(&p);
+        p
+    } else {
+        std::path::Path::new(&db_path)
+            .parent()
+            .unwrap_or_else(|| std::path::Path::new("."))
+            .join("blobs")
+    };
     let blob_store = std::sync::Arc::new(vespetrel_storage::blob::BlobStore::new(blob_dir));
 
     // Initialize sync coordinator and spawn workers for all configured accounts
@@ -338,23 +344,39 @@ async fn main() -> anyhow::Result<()> {
                             "5" | "search" => {
                                 let query = parts.get(1..).map(|p| p.join(" ")).unwrap_or_default();
                                 if query.is_empty() {
-                                    println!("Usage: search <query> (e.g. search welcome)");
+                                    println!("Usage: search <query> (e.g. search welcome or search from:user)");
                                 } else {
                                     println!("\n🔍 FTS5 Search Results for '{query}':");
-                                    let matches: Vec<_> = state
-                                        .messages
-                                        .iter()
-                                        .enumerate()
-                                        .filter(|(_, m)| {
-                                            m.subject.as_deref().unwrap_or("").to_lowercase().contains(&query.to_lowercase())
-                                                || m.snippet.as_deref().unwrap_or("").to_lowercase().contains(&query.to_lowercase())
-                                        })
-                                        .collect();
-                                    if matches.is_empty() {
-                                        println!("  No matching messages found.");
-                                    } else {
-                                        for (idx, m) in matches {
-                                            println!("  • [{}] {} - {}", idx + 1, m.from_address, m.subject.as_deref().unwrap_or(""));
+                                    let mut found = false;
+                                    if let Some(ref pool) = storage_pool {
+                                        if let Ok(conn) = pool.get().await {
+                                            let q = query.clone();
+                                            if let Ok(Ok(results)) = conn.interact(move |c| vespetrel_storage::fts::search_messages(c, &q, None, 20)).await {
+                                                if !results.is_empty() {
+                                                    found = true;
+                                                    for (idx, r) in results.iter().enumerate() {
+                                                        println!("  • [{}] {} - {}", idx + 1, r.subject.as_deref().unwrap_or("No Subject"), r.snippet.as_deref().unwrap_or(""));
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                    if !found {
+                                        let matches: Vec<_> = state
+                                            .messages
+                                            .iter()
+                                            .enumerate()
+                                            .filter(|(_, m)| {
+                                                m.subject.as_deref().unwrap_or("").to_lowercase().contains(&query.to_lowercase())
+                                                    || m.snippet.as_deref().unwrap_or("").to_lowercase().contains(&query.to_lowercase())
+                                            })
+                                            .collect();
+                                        if matches.is_empty() {
+                                            println!("  No matching messages found.");
+                                        } else {
+                                            for (idx, m) in matches {
+                                                println!("  • [{}] {} - {}", idx + 1, m.from_address, m.subject.as_deref().unwrap_or(""));
+                                            }
                                         }
                                     }
                                     println!();

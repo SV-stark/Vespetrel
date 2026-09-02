@@ -6,8 +6,8 @@ pub mod gpui_app {
     };
     use gpui::*;
     use vespetrel_core::{
-        Account, CalendarEvent, Contact, Folder, FolderRole, MessageSummary, ProviderType,
-        TaskItem, UserSettings, provider::SyncEvent,
+        Account, CalendarEvent, Contact, Folder, FolderRole, MessageSummary, TaskItem,
+        UserSettings, provider::SyncEvent,
     };
 
     /// Active top-level navigation view

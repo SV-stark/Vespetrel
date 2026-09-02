@@ -35,10 +35,12 @@ pub fn list_accounts(conn: &Connection) -> StorageResult<Vec<Account>> {
     let rows = stmt.query_map([], |row| {
         let id: String = row.get(0)?;
         let pt_str: String = row.get(3)?;
+        let mut corrupted = false;
         let pt = match pt_str.parse() {
             Ok(p) => p,
             Err(e) => {
-                warn!(account_id=%id, error=%e, raw=%pt_str, "corrupted provider_type in DB, defaulting to Imap");
+                warn!(account_id=%id, error=%e, raw=%pt_str, "corrupted provider_type in DB; marking inactive");
+                corrupted = true;
                 vespetrel_core::ProviderType::Imap
             }
         };
@@ -47,14 +49,16 @@ pub fn list_accounts(conn: &Connection) -> StorageResult<Vec<Account>> {
         let auth_config = match serde_json::from_str(&auth_json) {
             Ok(a) => a,
             Err(e) => {
-                warn!(account_id=%id, error=%e, "corrupted auth_config JSON in DB");
+                warn!(account_id=%id, error=%e, "corrupted auth_config JSON in DB; marking inactive");
+                corrupted = true;
                 Default::default()
             }
         };
         let sync_state = match serde_json::from_str(&sync_json) {
             Ok(s) => s,
             Err(e) => {
-                warn!(account_id=%id, error=%e, "corrupted sync_state JSON in DB");
+                warn!(account_id=%id, error=%e, "corrupted sync_state JSON in DB; marking inactive");
+                corrupted = true;
                 Default::default()
             }
         };
@@ -62,9 +66,15 @@ pub fn list_accounts(conn: &Connection) -> StorageResult<Vec<Account>> {
         let created_at = match DateTime::from_timestamp(created_ts, 0) {
             Some(dt) => dt,
             None => {
-                warn!(account_id=%id, timestamp=created_ts, "corrupted created_at timestamp in DB");
-                Utc::now()
+                warn!(account_id=%id, timestamp=created_ts, "corrupted created_at timestamp in DB; marking inactive");
+                corrupted = true;
+                DateTime::from_timestamp(0, 0).unwrap_or_default()
             }
+        };
+        let is_active = if corrupted {
+            false
+        } else {
+            row.get::<_, i64>(6)? != 0
         };
         Ok(Account {
             id,
@@ -73,7 +83,7 @@ pub fn list_accounts(conn: &Connection) -> StorageResult<Vec<Account>> {
             provider_type: pt,
             auth_config,
             sync_state,
-            is_active: row.get::<_, i64>(6)? != 0,
+            is_active,
             color: row.get(7)?,
             created_at,
         })
@@ -86,10 +96,12 @@ pub fn get_account(conn: &Connection, id: &str) -> StorageResult<Option<Account>
     stmt.query_row(params![id], |row| {
         let id: String = row.get(0)?;
         let pt_str: String = row.get(3)?;
+        let mut corrupted = false;
         let pt = match pt_str.parse() {
             Ok(p) => p,
             Err(e) => {
-                warn!(account_id=%id, error=%e, raw=%pt_str, "corrupted provider_type in DB, defaulting to Imap");
+                warn!(account_id=%id, error=%e, raw=%pt_str, "corrupted provider_type in DB; marking inactive");
+                corrupted = true;
                 vespetrel_core::ProviderType::Imap
             }
         };
@@ -98,14 +110,16 @@ pub fn get_account(conn: &Connection, id: &str) -> StorageResult<Option<Account>
         let auth_config = match serde_json::from_str(&auth_json) {
             Ok(a) => a,
             Err(e) => {
-                warn!(account_id=%id, error=%e, "corrupted auth_config JSON in DB");
+                warn!(account_id=%id, error=%e, "corrupted auth_config JSON in DB; marking inactive");
+                corrupted = true;
                 Default::default()
             }
         };
         let sync_state = match serde_json::from_str(&sync_json) {
             Ok(s) => s,
             Err(e) => {
-                warn!(account_id=%id, error=%e, "corrupted sync_state JSON in DB");
+                warn!(account_id=%id, error=%e, "corrupted sync_state JSON in DB; marking inactive");
+                corrupted = true;
                 Default::default()
             }
         };
@@ -113,9 +127,15 @@ pub fn get_account(conn: &Connection, id: &str) -> StorageResult<Option<Account>
         let created_at = match DateTime::from_timestamp(created_ts, 0) {
             Some(dt) => dt,
             None => {
-                warn!(account_id=%id, timestamp=created_ts, "corrupted created_at timestamp in DB");
-                Utc::now()
+                warn!(account_id=%id, timestamp=created_ts, "corrupted created_at timestamp in DB; marking inactive");
+                corrupted = true;
+                DateTime::from_timestamp(0, 0).unwrap_or_default()
             }
+        };
+        let is_active = if corrupted {
+            false
+        } else {
+            row.get::<_, i64>(6)? != 0
         };
         Ok(Account {
             id,
@@ -124,7 +144,7 @@ pub fn get_account(conn: &Connection, id: &str) -> StorageResult<Option<Account>
             provider_type: pt,
             auth_config,
             sync_state,
-            is_active: row.get::<_, i64>(6)? != 0,
+            is_active,
             color: row.get(7)?,
             created_at,
         })
@@ -357,13 +377,22 @@ pub fn delete_message(conn: &Connection, message_id: &str) -> StorageResult<()> 
 
     if let Some(path_str) = blob_path {
         let p = std::path::Path::new(&path_str);
-        if let Some(ext) = p.extension().and_then(|e| e.to_str()) {
-            if (ext == "lz4" || ext == "zst" || ext == "blob")
-                && !path_str.contains("..")
-                && p.is_file()
-            {
-                if let Ok(canonical) = p.canonicalize() {
-                    let _ = std::fs::remove_file(canonical);
+        if !path_str.contains("..") {
+            if let Some(stem) = p.file_stem().and_then(|s| s.to_str()) {
+                if stem == message_id {
+                    if let Some(ext) = p.extension().and_then(|e| e.to_str()) {
+                        if ext == "lz4" || ext == "zst" || ext == "blob" {
+                            if let Ok(canonical) = p.canonicalize() {
+                                if let Some(parent) =
+                                    p.parent().and_then(|pr| pr.canonicalize().ok())
+                                {
+                                    if canonical.starts_with(&parent) && canonical.is_file() {
+                                        let _ = std::fs::remove_file(canonical);
+                                    }
+                                }
+                            }
+                        }
+                    }
                 }
             }
         }
@@ -570,33 +599,46 @@ pub fn delete_task(conn: &Connection, id: &str) -> StorageResult<()> {
 }
 
 pub fn upsert_signature(conn: &Connection, sig: &vespetrel_core::Signature) -> StorageResult<()> {
-    if sig.is_default {
-        conn.execute(
-            "UPDATE signatures SET is_default = 0 WHERE account_id = ?1",
-            params![sig.account_id],
-        )?;
-    }
+    conn.execute_batch("BEGIN IMMEDIATE;")?;
+    let res = (|| -> Result<(), rusqlite::Error> {
+        if sig.is_default {
+            conn.execute(
+                "UPDATE signatures SET is_default = 0 WHERE account_id = ?1 OR account_id = '*'",
+                params![sig.account_id],
+            )?;
+        }
 
-    conn.execute(
-        r#"INSERT INTO signatures (id, account_id, name, raw_html, plain_text, is_default, include_in_replies, created_at, updated_at)
-           VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
-           ON CONFLICT(id) DO UPDATE SET
-             account_id=excluded.account_id, name=excluded.name, raw_html=excluded.raw_html,
-             plain_text=excluded.plain_text, is_default=excluded.is_default,
-             include_in_replies=excluded.include_in_replies, updated_at=excluded.updated_at"#,
-        params![
-            sig.id,
-            sig.account_id,
-            sig.name,
-            sig.raw_html,
-            sig.plain_text,
-            if sig.is_default { 1 } else { 0 },
-            if sig.include_in_replies { 1 } else { 0 },
-            sig.created_at.timestamp(),
-            sig.updated_at.timestamp(),
-        ],
-    )?;
-    Ok(())
+        conn.execute(
+            r#"INSERT INTO signatures (id, account_id, name, raw_html, plain_text, is_default, include_in_replies, created_at, updated_at)
+               VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+               ON CONFLICT(id) DO UPDATE SET
+                 account_id=excluded.account_id, name=excluded.name, raw_html=excluded.raw_html,
+                 plain_text=excluded.plain_text, is_default=excluded.is_default,
+                 include_in_replies=excluded.include_in_replies, updated_at=excluded.updated_at"#,
+            params![
+                sig.id,
+                sig.account_id,
+                sig.name,
+                sig.raw_html,
+                sig.plain_text,
+                if sig.is_default { 1 } else { 0 },
+                if sig.include_in_replies { 1 } else { 0 },
+                sig.created_at.timestamp(),
+                sig.updated_at.timestamp(),
+            ],
+        )?;
+        Ok(())
+    })();
+    match res {
+        Ok(()) => {
+            conn.execute_batch("COMMIT;")?;
+            Ok(())
+        }
+        Err(e) => {
+            let _ = conn.execute_batch("ROLLBACK;");
+            Err(e.into())
+        }
+    }
 }
 
 pub fn list_signatures_for_account(
@@ -665,7 +707,13 @@ pub fn get_user_settings(conn: &Connection) -> StorageResult<vespetrel_core::Use
     let mut stmt = conn.prepare("SELECT value FROM user_settings WHERE key = 'global'")?;
     let opt_json: Option<String> = stmt.query_row([], |row| row.get(0)).optional()?;
     match opt_json {
-        Some(json) => Ok(serde_json::from_str(&json).unwrap_or_default()),
+        Some(json) => match serde_json::from_str(&json) {
+            Ok(settings) => Ok(settings),
+            Err(e) => {
+                warn!(error=%e, "corrupted user_settings JSON in DB, falling back to default");
+                Ok(vespetrel_core::UserSettings::default())
+            }
+        },
         None => Ok(vespetrel_core::UserSettings::default()),
     }
 }

@@ -120,6 +120,10 @@ fn rewrite_html(input: &str, opts: &RewriteOptions) -> anyhow::Result<String> {
     Ok(s.to_string())
 }
 
+static CSS_URL_REGEX: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
+    regex::Regex::new(r#"(?i)url\s*\(\s*['"]?https?://[^'")]*['"]?\s*\)"#).expect("valid regex")
+});
+
 fn ammonia_clean(html: &str) -> String {
     let mut builder = Builder::default();
     builder
@@ -133,11 +137,7 @@ fn ammonia_clean(html: &str) -> String {
         .add_url_schemes(["blob", "cid"]);
 
     let cleaned = builder.clean(html).to_string();
-    if let Ok(re) = regex::Regex::new(r#"(?i)url\s*\(\s*['"]?https?://[^'")]*['"]?\s*\)"#) {
-        re.replace_all(&cleaned, "none").to_string()
-    } else {
-        cleaned
-    }
+    CSS_URL_REGEX.replace_all(&cleaned, "none").to_string()
 }
 
 /// Wrap sanitized email HTML into a full sandboxed HTML document with Content Security Policy (CSP)

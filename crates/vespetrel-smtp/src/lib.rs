@@ -38,6 +38,7 @@ impl SmtpConfig {
             autocrypt_header: None,
         }
     }
+
     pub fn with_xoauth2(mut self) -> Self {
         self.use_xoauth2 = true;
         self
@@ -154,7 +155,16 @@ impl SmtpClient {
             );
 
             // RSA PKCS#1 v1.5 signing via ring
-            let der_bytes = if let Ok(decoded) =
+            let der_bytes = if key.contains("-----BEGIN") {
+                let stripped = key
+                    .lines()
+                    .filter(|l| !l.starts_with("-----"))
+                    .collect::<Vec<_>>()
+                    .concat();
+                base64::engine::general_purpose::STANDARD
+                    .decode(stripped.trim().as_bytes())
+                    .unwrap_or_else(|_| key.as_bytes().to_vec())
+            } else if let Ok(decoded) =
                 base64::engine::general_purpose::STANDARD.decode(key.trim().as_bytes())
             {
                 decoded
@@ -255,6 +265,11 @@ impl SmtpClient {
         if !self.config.auth_token.is_empty() {
             let creds =
                 Credentials::new(self.config.username.clone(), self.config.auth_token.clone());
+            if self.config.use_xoauth2 {
+                transport_builder = transport_builder.authentication(vec![
+                    lettre::transport::smtp::authentication::Mechanism::Xoauth2,
+                ]);
+            }
             transport_builder = transport_builder.credentials(creds);
         }
 

@@ -290,7 +290,7 @@ impl MailProvider for GraphProvider {
             };
 
             if let Some(items) = json.get("value").and_then(|v| v.as_array()) {
-                for (idx, item) in items.iter().enumerate() {
+                for item in items {
                     let mut flags = Vec::new();
                     if item
                         .get("isRead")
@@ -307,14 +307,33 @@ impl MailProvider for GraphProvider {
                     {
                         flags.push(Flag::Flagged);
                     }
-                    let remote_uid = (idx + 1) as u32;
+                    let id = item.get("id").and_then(|s| s.as_str()).unwrap_or_default();
+                    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+                    std::hash::Hash::hash(id, &mut hasher);
+                    let hash = std::hash::Hasher::finish(&hasher);
+                    let remote_uid = ((hash & 0x7FFF_FFFF) as u32).max(1);
+
                     let subject = item.get("subject").and_then(|s| s.as_str()).unwrap_or("");
                     let body_preview = item
                         .get("bodyPreview")
                         .and_then(|s| s.as_str())
                         .unwrap_or("");
+                    let sender = item
+                        .pointer("/from/emailAddress/address")
+                        .and_then(|s| s.as_str())
+                        .unwrap_or("graph@example.com");
+                    let date = item
+                        .get("receivedDateTime")
+                        .and_then(|s| s.as_str())
+                        .unwrap_or("");
+                    let date_hdr = if !date.is_empty() {
+                        format!("Date: {date}\r\n")
+                    } else {
+                        format!("Date: {}\r\n", chrono::Utc::now().to_rfc2822())
+                    };
+
                     let mime_data = format!(
-                        "From: graph@example.com\r\nSubject: {subject}\r\n\r\n{body_preview}"
+                        "From: {sender}\r\nTo: me@example.com\r\nSubject: {subject}\r\n{date_hdr}Message-ID: <{id}@graph.microsoft.com>\r\nMIME-Version: 1.0\r\nContent-Type: text/plain; charset=utf-8\r\n\r\n{body_preview}"
                     )
                     .into_bytes();
 

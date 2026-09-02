@@ -204,6 +204,8 @@ impl ImapConnection {
         Ok(())
     }
 
+    pub const MAX_IMAP_RESPONSE: usize = 16 * 1024 * 1024;
+
     pub async fn execute_cmd(&mut self, cmd: &str) -> anyhow::Result<Vec<String>> {
         let (tag_id, tag_str) = self.next_tag();
         let tagged_line = format!("{tag_str} {cmd}\r\n");
@@ -211,6 +213,7 @@ impl ImapConnection {
 
         if let Some(stream) = self.stream.as_mut() {
             if stream.write_all(tagged_line.as_bytes()).await.is_ok() {
+                let _ = stream.flush().await;
                 let mut accumulated = Vec::new();
                 let mut chunk = vec![0u8; 8192];
                 let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
@@ -223,6 +226,9 @@ impl ImapConnection {
                     .await
                     {
                         Ok(Ok(n)) if n > 0 => {
+                            if accumulated.len() + n > Self::MAX_IMAP_RESPONSE {
+                                anyhow::bail!("IMAP response exceeded 16MB limit: potential DoS");
+                            }
                             accumulated.extend_from_slice(&chunk[..n]);
 
                             // Literal {N}\r\n, ~{N}\r\n, {N+}\r\n boundary detection (RFC 3501 & RFC 7888 LITERAL+)
@@ -232,6 +238,11 @@ impl ImapConnection {
                                     let raw_size = &text[lit_pos + 1..lit_pos + close_brace];
                                     let size_str = raw_size.trim_matches(['+', '~']);
                                     if let Ok(expected_lit_len) = size_str.parse::<usize>() {
+                                        if expected_lit_len > Self::MAX_IMAP_RESPONSE {
+                                            anyhow::bail!(
+                                                "IMAP literal size {expected_lit_len} exceeds 16MB limit: potential DoS"
+                                            );
+                                        }
                                         let lit_start = lit_pos + close_brace + 3;
                                         let lit_read = accumulated.len().saturating_sub(lit_start);
                                         if lit_read < expected_lit_len {
@@ -354,14 +365,48 @@ impl ImapConnection {
         let fetch_cmd = self.cmd_uid_fetch_rfc822(uid);
         let lines = self.execute_cmd(&fetch_cmd).await?;
 
-        // If live stream returned literal MIME payload, extract it
+        // Extract full RFC822 payload from FETCH response
+        let mut in_body = false;
+        let mut body_lines = Vec::new();
+
         for line in &lines {
-            if line.contains("MIME-Version:")
+            if in_body {
+                if line.trim_end().ends_with(')') {
+                    let trimmed = line.trim_end();
+                    let content = &trimmed[..trimmed.len().saturating_sub(1)];
+                    if !content.is_empty() {
+                        body_lines.push(content.to_string());
+                    }
+                    break;
+                }
+                body_lines.push(line.clone());
+            } else if line.contains("FETCH") && (line.contains("BODY[") || line.contains("RFC822"))
+            {
+                if let Some(brace_pos) = line.find('}') {
+                    let rest = line[brace_pos + 1..]
+                        .trim_start_matches("\r\n")
+                        .trim_start_matches('\n');
+                    if !rest.is_empty() {
+                        if rest.ends_with(')') {
+                            let content = &rest[..rest.len().saturating_sub(1)];
+                            body_lines.push(content.to_string());
+                            break;
+                        }
+                        body_lines.push(rest.to_string());
+                    }
+                    in_body = true;
+                }
+            } else if line.contains("MIME-Version:")
                 || line.contains("From:")
                 || line.contains("Received:")
             {
-                return Ok(line.as_bytes().to_vec());
+                body_lines.push(line.clone());
+                in_body = true;
             }
+        }
+
+        if !body_lines.is_empty() {
+            return Ok(body_lines.join("\r\n").into_bytes());
         }
 
         #[cfg(any(test, feature = "mock"))]
@@ -571,6 +616,17 @@ pub fn parse_imap_list_line(line: &str) -> Option<vespetrel_core::RemoteFolder> 
     })
 }
 
+#[inline]
+fn find_ascii_case_insensitive(haystack: &str, needle: &str) -> Option<usize> {
+    if needle.is_empty() {
+        return Some(0);
+    }
+    haystack
+        .as_bytes()
+        .windows(needle.len())
+        .position(|w| w.eq_ignore_ascii_case(needle.as_bytes()))
+}
+
 /// Parse untagged `* <seq> FETCH (UID <uid> FLAGS (<flags>) MODSEQ <modseq> ...)` line
 pub fn parse_imap_fetch_line(
     line: &str,
@@ -580,12 +636,11 @@ pub fn parse_imap_fetch_line(
     Option<u64>,
     Option<usize>,
 )> {
-    if !line.starts_with("* ") || !line.contains("FETCH") {
+    if !line.starts_with("* ") || find_ascii_case_insensitive(line, "FETCH").is_none() {
         return None;
     }
 
-    let upper = line.to_uppercase();
-    let uid = if let Some(uid_pos) = upper.find("UID ") {
+    let uid = if let Some(uid_pos) = find_ascii_case_insensitive(line, "UID ") {
         let after_uid = line[uid_pos + 4..].trim_start();
         let end = after_uid
             .find(|c: char| !c.is_ascii_digit())
@@ -596,7 +651,7 @@ pub fn parse_imap_fetch_line(
     };
 
     let mut flags = Vec::new();
-    if let Some(flags_pos) = upper.find("FLAGS (") {
+    if let Some(flags_pos) = find_ascii_case_insensitive(line, "FLAGS (") {
         let after_flags = &line[flags_pos + 7..];
         if let Some(close) = after_flags.find(')') {
             let flags_str = &after_flags[..close];
@@ -616,13 +671,13 @@ pub fn parse_imap_fetch_line(
         }
     }
 
-    let mod_seq = if let Some(mod_pos) = upper.find("MODSEQ (") {
+    let mod_seq = if let Some(mod_pos) = find_ascii_case_insensitive(line, "MODSEQ (") {
         let after_mod = line[mod_pos + 8..].trim_start();
         let end = after_mod
             .find(|c: char| !c.is_ascii_digit())
             .unwrap_or(after_mod.len());
         after_mod[..end].parse::<u64>().ok()
-    } else if let Some(mod_pos) = upper.find("MODSEQ ") {
+    } else if let Some(mod_pos) = find_ascii_case_insensitive(line, "MODSEQ ") {
         let after_mod = line[mod_pos + 7..].trim_start();
         let end = after_mod
             .find(|c: char| !c.is_ascii_digit())
@@ -632,7 +687,7 @@ pub fn parse_imap_fetch_line(
         None
     };
 
-    let size = if let Some(size_pos) = upper.find("RFC822.SIZE ") {
+    let size = if let Some(size_pos) = find_ascii_case_insensitive(line, "RFC822.SIZE ") {
         let after_size = line[size_pos + 12..].trim_start();
         let end = after_size
             .find(|c: char| !c.is_ascii_digit())

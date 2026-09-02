@@ -25,6 +25,14 @@ InstallDirRegKey HKCU "Software\${PRODUCT_NAME}" "InstallDir"
 RequestExecutionLevel user
 SetCompressor /SOLID lzma
 
+VIProductVersion "${PRODUCT_VERSION}.0"
+VIAddVersionKey "ProductName" "${PRODUCT_NAME}"
+VIAddVersionKey "CompanyName" "${PRODUCT_PUBLISHER}"
+VIAddVersionKey "LegalCopyright" "Copyright (c) 2026 ${PRODUCT_PUBLISHER}"
+VIAddVersionKey "FileDescription" "Vespetrel Mail Client Installer"
+VIAddVersionKey "FileVersion" "${PRODUCT_VERSION}.0"
+VIAddVersionKey "ProductVersion" "${PRODUCT_VERSION}.0"
+
 ; UI Settings
 !define MUI_ABORTWARNING
 

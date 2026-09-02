@@ -15,7 +15,6 @@ oauth2 = { workspace = true }
 keyring = { workspace = true }
 rpgp = { workspace = true }
 x509-cert = { workspace = true }
-cms = { workspace = true }
 zeroize = { workspace = true }
 rustls = { workspace = true }
 reqwest = { workspace = true }

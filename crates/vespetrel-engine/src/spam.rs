@@ -120,7 +120,7 @@ impl BayesClassifier {
             };
         }
 
-        // Select top 15 most informative tokens by deviance from 0.5 using O(n) select_nth_unstable
+        // Select top 15 most informative tokens by deviance from 0.5 using O(n) select_nth_unstable + sort
         let top_count = 15.min(token_probs.len());
         let top_tokens: Vec<(String, f64)> = if token_probs.len() > top_count {
             token_probs.select_nth_unstable_by(top_count - 1, |a, b| {
@@ -130,9 +130,25 @@ impl BayesClassifier {
                     .partial_cmp(&dev_a)
                     .unwrap_or(std::cmp::Ordering::Equal)
             });
-            token_probs.into_iter().take(top_count).collect()
+            let mut top = token_probs.into_iter().take(top_count).collect::<Vec<_>>();
+            top.sort_by(|a, b| {
+                let dev_a = (a.1 - 0.5).abs();
+                let dev_b = (b.1 - 0.5).abs();
+                dev_b
+                    .partial_cmp(&dev_a)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            });
+            top
         } else {
-            token_probs
+            let mut top = token_probs;
+            top.sort_by(|a, b| {
+                let dev_a = (a.1 - 0.5).abs();
+                let dev_b = (b.1 - 0.5).abs();
+                dev_b
+                    .partial_cmp(&dev_a)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            });
+            top
         };
 
         // Combine probabilities using Graham-Robinson product formula

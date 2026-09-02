@@ -264,7 +264,7 @@ impl MailProvider for JmapProvider {
 
                 let count = if let Some(items) = list {
                     let len = items.len();
-                    for (idx, item) in items.iter().enumerate() {
+                    for item in items {
                         let id = item.get("id").and_then(|v| v.as_str()).unwrap_or_default();
                         let subject = item
                             .get("subject")
@@ -274,7 +274,8 @@ impl MailProvider for JmapProvider {
                             .pointer("/from/0/email")
                             .and_then(|v| v.as_str())
                             .unwrap_or("sender@jmap.example");
-                        let raw = format!("From: {from}\r\nSubject: {subject}\r\nMessage-ID: <{id}@jmap.example>\r\n\r\nJMAP Message Content").into_bytes();
+                        let date_str = chrono::Utc::now().to_rfc2822();
+                        let raw = format!("From: {from}\r\nTo: {}\r\nSubject: {subject}\r\nDate: {date_str}\r\nMessage-ID: <{id}@jmap.example>\r\nMIME-Version: 1.0\r\nContent-Type: text/plain; charset=utf-8\r\n\r\nJMAP Message Content", self.config.username).into_bytes();
                         let mut flags = Vec::new();
                         if let Some(keywords) = item.get("keywords").and_then(|k| k.as_object()) {
                             if keywords.contains_key("$seen") {
@@ -287,8 +288,13 @@ impl MailProvider for JmapProvider {
                                 flags.push(vespetrel_core::Flag::Draft);
                             }
                         }
+                        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+                        std::hash::Hash::hash(id, &mut hasher);
+                        let hash = std::hash::Hasher::finish(&hasher);
+                        let remote_uid = ((hash & 0x7FFF_FFFF) as u32).max(1);
+
                         delta.inserted.push(vespetrel_core::provider::SyncMessage {
-                            remote_uid: (position + idx + 1) as u32,
+                            remote_uid,
                             raw_rfc822: Some(raw),
                             flags,
                             mod_seq: None,

@@ -146,8 +146,16 @@ impl RichTextDocument {
 
     /// Render to clean, email-safe HTML for outbound RFC 5322 MIME multipart
     pub fn to_html(&self) -> String {
-        let mut html = String::from(
-            "<div style=\"font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; font-size: 14px; line-height: 1.6; color: #18181b;\">\n",
+        self.to_html_with_font(None)
+    }
+
+    /// Render HTML with an optional custom font family
+    pub fn to_html_with_font(&self, font_family: Option<&str>) -> String {
+        let font = font_family.unwrap_or(
+            "-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif",
+        );
+        let mut html = format!(
+            "<div style=\"font-family: {font}; font-size: 14px; line-height: 1.6; color: #18181b;\">\n"
         );
 
         if self.blocks.is_empty() {
@@ -424,7 +432,20 @@ fn sanitize_link_url(url: &str) -> String {
         || lower.starts_with("mailto:")
         || lower.starts_with("tel:")
     {
-        html_escape(trimmed)
+        let mut encoded = String::with_capacity(trimmed.len());
+        for b in trimmed.bytes() {
+            match b {
+                b'"' => encoded.push_str("%22"),
+                b'\'' => encoded.push_str("%27"),
+                b'<' => encoded.push_str("%3C"),
+                b'>' => encoded.push_str("%3E"),
+                b' ' => encoded.push_str("%20"),
+                b'`' => encoded.push_str("%60"),
+                0..=31 | 127 => {}
+                _ => encoded.push(b as char),
+            }
+        }
+        encoded
     } else {
         "#".into()
     }

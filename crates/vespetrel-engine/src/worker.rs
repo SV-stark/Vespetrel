@@ -161,12 +161,13 @@ impl AccountWorker {
             Some(pool) => match tokio::time::timeout(Duration::from_secs(5), pool.get()).await {
                 Ok(Ok(conn)) => Some(conn),
                 Ok(Err(e)) => {
-                    warn!(account_id=%self.account_id, error=%e, "failed to get connection from storage pool");
-                    None
+                    anyhow::bail!("Storage unavailable for account {}: {}", self.account_id, e);
                 }
                 Err(_) => {
-                    warn!(account_id=%self.account_id, "timed out acquiring connection from storage pool");
-                    None
+                    anyhow::bail!(
+                        "Timed out acquiring connection from storage pool for account {}",
+                        self.account_id
+                    );
                 }
             },
             None => None,
@@ -228,6 +229,7 @@ impl AccountWorker {
                 Ok(delta) => {
                     let mut summaries = Vec::new();
                     let mut msgs_to_store = Vec::new();
+                    let mut blobs_to_write = Vec::new();
 
                     for sync_msg in &delta.inserted {
                         let raw_bytes_opt = if let Some(ref raw_bytes) = sync_msg.raw_rfc822 {
@@ -253,17 +255,15 @@ impl AccountWorker {
                                     .and_then(|f| f.first())
                                     .and_then(|a| a.name.as_deref())
                                     .map(|s| s.to_string());
-                                let to_addrs: Vec<String> = parsed
+                                let to_addrs = parsed
                                     .to()
-                                    .map(|addrs| {
-                                        addrs
-                                            .iter()
-                                            .filter_map(|a| {
-                                                a.address.as_deref().map(|s| s.to_string())
-                                            })
-                                            .collect()
+                                    .map(|t| {
+                                        t.iter()
+                                            .filter_map(|a| a.address.as_deref())
+                                            .map(|s| s.to_string())
+                                            .collect::<Vec<_>>()
                                     })
-                                    .unwrap_or_else(|| vec![self.account_id.clone()]);
+                                    .unwrap_or_default();
 
                                 let mut m = vespetrel_core::Message::new(
                                     &self.account_id,
@@ -282,7 +282,7 @@ impl AccountWorker {
                                     .map(|t| t.chars().take(200).collect::<String>());
                                 m.body_text_preview = parsed.body_text(0).map(|t| t.to_string());
                                 m.size_bytes = raw_bytes.len() as i64;
-                                let shard = if m.id.len() >= 2 { &m.id[..2] } else { "00" };
+                                let shard = &m.id[..2.min(m.id.len())];
                                 m.blob_path = format!("{shard}/{}.lz4", m.id);
                                 m
                             } else {
@@ -311,25 +311,31 @@ impl AccountWorker {
                         msg.is_flagged = sync_msg.flags.contains(&vespetrel_core::Flag::Flagged);
                         msg.is_draft = sync_msg.flags.contains(&vespetrel_core::Flag::Draft);
 
-                        // Persist raw RFC822 bytes into BlobStore non-blockingly via spawn_blocking
-                        if let Some(store) = self.blob_store.clone() {
-                            if let Some(ref raw) = raw_bytes_opt {
-                                if !raw.is_empty() {
-                                    let msg_id = msg.id.clone();
-                                    let raw_to_write = raw.clone();
-                                    let res = tokio::task::spawn_blocking(move || {
-                                        store.write(&msg_id, &raw_to_write)
-                                    })
-                                    .await;
-                                    if let Ok(Err(e)) = res {
-                                        error!(msg_id=%msg.id, error=%e, "failed to write raw message to BlobStore");
-                                    }
-                                }
+                        if let Some(ref raw) = raw_bytes_opt {
+                            if !raw.is_empty() {
+                                blobs_to_write.push((msg.id.clone(), raw.clone()));
                             }
                         }
 
                         summaries.push(msg.summary());
                         msgs_to_store.push(msg);
+                    }
+
+                    // Batch write blobs concurrently in a single background task
+                    if let Some(store) = self.blob_store.clone() {
+                        if !blobs_to_write.is_empty() {
+                            let res = tokio::task::spawn_blocking(move || {
+                                for (id, raw) in blobs_to_write {
+                                    if let Err(e) = store.write(&id, &raw) {
+                                        error!(msg_id=%id, error=%e, "failed to write message to BlobStore");
+                                    }
+                                }
+                            })
+                            .await;
+                            if let Err(e) = res {
+                                error!(error=%e, "blob store batch write task panicked");
+                            }
+                        }
                     }
 
                     // Batch persist synced messages to storage in a single atomic transaction
@@ -357,10 +363,50 @@ impl AccountWorker {
                     }
 
                     if !delta.deleted_uids.is_empty() {
-                        let deleted_ids: Vec<String> =
-                            delta.deleted_uids.iter().map(|u| u.to_string()).collect();
+                        let mut deleted_message_ids = Vec::new();
+                        if let Some(conn) = &storage_conn {
+                            let uids = delta.deleted_uids.clone();
+                            let fid = folder_db_id.clone();
+                            let queried = conn
+                                .interact(move |c| -> anyhow::Result<Vec<String>> {
+                                    let mut ids = Vec::new();
+                                    for chunk in uids.chunks(500) {
+                                        let placeholders =
+                                            chunk.iter().map(|_| "?").collect::<Vec<_>>().join(",");
+                                        let sql = format!(
+                                            "SELECT id FROM messages WHERE folder_id = ? AND remote_uid IN ({placeholders})"
+                                        );
+                                        let mut stmt = c.prepare(&sql)?;
+                                        let mut params: Vec<&dyn rusqlite::ToSql> =
+                                            Vec::with_capacity(chunk.len() + 1);
+                                        params.push(&fid);
+                                        for u in chunk {
+                                            params.push(u);
+                                        }
+                                        let rows = stmt.query_map(
+                                            rusqlite::params_from_iter(params),
+                                            |r| r.get::<_, String>(0),
+                                        )?;
+                                        for id_res in rows {
+                                            ids.push(id_res?);
+                                        }
+                                    }
+                                    for id in &ids {
+                                        let _ = vespetrel_storage::repo::delete_message(c, id);
+                                    }
+                                    Ok(ids)
+                                })
+                                .await;
+                            if let Ok(Ok(ids)) = queried {
+                                deleted_message_ids = ids;
+                            }
+                        } else {
+                            deleted_message_ids =
+                                delta.deleted_uids.iter().map(|u| u.to_string()).collect();
+                        }
+
                         if let Some(store) = self.blob_store.clone() {
-                            let ids_to_delete = deleted_ids.clone();
+                            let ids_to_delete = deleted_message_ids.clone();
                             let _ = tokio::task::spawn_blocking(move || {
                                 for id in ids_to_delete {
                                     let _ = store.delete(&id);
@@ -368,7 +414,7 @@ impl AccountWorker {
                             })
                             .await;
                         }
-                        self.emit(SyncEvent::MessagesDeleted(deleted_ids));
+                        self.emit(SyncEvent::MessagesDeleted(deleted_message_ids));
                     }
 
                     // Persist updated delta tokens and folder modseqs back to accounts table only when changed

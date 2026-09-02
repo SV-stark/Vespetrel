@@ -185,26 +185,45 @@ impl Drop for SyncCoordinator {
 
 /// Factory function to instantiate the concrete MailProvider implementation for an account.
 pub fn make_provider(account: &vespetrel_core::Account) -> Arc<dyn MailProvider> {
+    let auth_token = if let Some(ref k) = account.auth_config.keyring_key {
+        keyring::Entry::new("vespetrel", k)
+            .and_then(|e| e.get_password())
+            .unwrap_or_default()
+    } else {
+        keyring::Entry::new("vespetrel", &account.id)
+            .and_then(|e| e.get_password())
+            .unwrap_or_default()
+    };
+
     match account.provider_type {
         vespetrel_core::ProviderType::Imap => {
             let domain = account.email.split('@').nth(1).unwrap_or("localhost");
-            let host = format!("imap.{domain}");
-            let config = vespetrel_imap::ImapConfig::new(host, 993, &account.email, "");
+            let host = match domain {
+                "outlook.com" | "hotmail.com" | "live.com" | "office365.com" => {
+                    "outlook.office365.com".to_string()
+                }
+                "gmail.com" => "imap.gmail.com".to_string(),
+                "yahoo.com" => "imap.mail.yahoo.com".to_string(),
+                "icloud.com" => "imap.mail.me.com".to_string(),
+                other => format!("imap.{other}"),
+            };
+            let config = vespetrel_imap::ImapConfig::new(host, 993, &account.email, auth_token);
             Arc::new(vespetrel_imap::ImapProvider::new(config))
         }
         vespetrel_core::ProviderType::Gmail => {
-            let config = vespetrel_imap::ImapConfig::new("imap.gmail.com", 993, &account.email, "")
-                .with_xoauth2();
+            let config =
+                vespetrel_imap::ImapConfig::new("imap.gmail.com", 993, &account.email, auth_token)
+                    .with_xoauth2();
             Arc::new(vespetrel_imap::ImapProvider::new(config))
         }
         vespetrel_core::ProviderType::Jmap => {
             let domain = account.email.split('@').nth(1).unwrap_or("localhost");
             let base_url = format!("https://{domain}/jmap");
-            let config = vespetrel_jmap::JmapConfig::new(base_url, &account.email, "");
+            let config = vespetrel_jmap::JmapConfig::new(base_url, &account.email, auth_token);
             Arc::new(vespetrel_jmap::JmapProvider::new(config))
         }
         vespetrel_core::ProviderType::Graph => {
-            let config = vespetrel_graph::GraphConfig::new("");
+            let config = vespetrel_graph::GraphConfig::new(auth_token);
             Arc::new(vespetrel_graph::GraphProvider::new(config))
         }
     }
