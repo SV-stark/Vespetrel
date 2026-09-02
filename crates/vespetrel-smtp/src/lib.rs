@@ -1,5 +1,4 @@
-//! Vespetrel SMTP - lettre + mail-send with DKIM & XOAUTH2 §5
-
+#[allow(unused_imports)]
 use tracing::{debug, info};
 use vespetrel_core::message::ComposedMessage;
 
@@ -207,13 +206,21 @@ impl SmtpClient {
             return self.send_live(msg).await;
         }
 
-        let raw = self.build_rfc822(msg)?;
-        debug!(size=%raw.len(), to=?msg.to, "simulated test SMTP delivery");
-        info!(subject=%msg.subject, host=%self.config.host, "SMTP test delivery passed");
-        if self.config.dkim_key.is_some() {
-            debug!("DKIM signing configured");
+        #[cfg(any(test, feature = "mock"))]
+        {
+            let raw = self.build_rfc822(msg)?;
+            debug!(size=%raw.len(), to=?msg.to, "simulated test SMTP delivery");
+            info!(subject=%msg.subject, host=%self.config.host, "SMTP test delivery passed");
+            if self.config.dkim_key.is_some() {
+                debug!("DKIM signing configured");
+            }
+            return Ok(());
         }
-        Ok(())
+
+        #[cfg(not(any(test, feature = "mock")))]
+        {
+            self.send_live(msg).await
+        }
     }
 
     /// Live SMTP transport delivery connecting to Gmail/custom SMTP

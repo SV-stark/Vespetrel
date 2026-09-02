@@ -5,6 +5,10 @@ edition.workspace = true
 license.workspace = true
 description = "SMTP submission with lettre + mail-send + DKIM + XOAUTH2"
 
+[features]
+default = []
+mock = []
+
 [dependencies]
 vespetrel-core = { path = "../vespetrel-core" }
 tokio = { workspace = true }

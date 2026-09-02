@@ -5,6 +5,10 @@ edition.workspace = true
 license.workspace = true
 description = "Stalwart JMAP client adapter RFC8620/8621"
 
+[features]
+default = []
+mock = []
+
 [dependencies]
 vespetrel-core = { path = "../vespetrel-core" }
 tokio = { workspace = true }

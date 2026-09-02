@@ -5,6 +5,10 @@ edition.workspace = true
 license.workspace = true
 description = "Microsoft Graph REST adapter for Exchange Online"
 
+[features]
+default = []
+mock = []
+
 [dependencies]
 vespetrel-core = { path = "../vespetrel-core" }
 tokio = { workspace = true }

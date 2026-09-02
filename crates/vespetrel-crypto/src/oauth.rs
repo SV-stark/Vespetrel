@@ -132,7 +132,8 @@ impl OAuth2Engine {
                 .and_then(|l| l.split_once(':').map(|(_, v)| v.trim()))
                 .unwrap_or("");
 
-            if !host_header.starts_with("127.0.0.1") && !host_header.starts_with("localhost") {
+            let host_only = host_header.split(':').next().unwrap_or("").trim();
+            if host_only != "127.0.0.1" && host_only != "localhost" {
                 anyhow::bail!("OAuth2 invalid Host header: security check failed");
             }
 
@@ -328,14 +329,25 @@ pub fn urldecode(input: &str) -> String {
     }
 }
 
-#[derive(
-    Debug, Clone, serde::Serialize, serde::Deserialize, zeroize::Zeroize, zeroize::ZeroizeOnDrop,
-)]
+#[derive(Clone, serde::Serialize, serde::Deserialize, zeroize::Zeroize, zeroize::ZeroizeOnDrop)]
 pub struct TokenBundle {
     pub access_token: String,
     pub refresh_token: Option<String>,
     #[zeroize(skip)]
     pub expires_in: u64,
+}
+
+impl std::fmt::Debug for TokenBundle {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("TokenBundle")
+            .field("access_token", &"[REDACTED]")
+            .field(
+                "refresh_token",
+                &self.refresh_token.as_ref().map(|_| "[REDACTED]"),
+            )
+            .field("expires_in", &self.expires_in)
+            .finish()
+    }
 }
 
 #[cfg(test)]

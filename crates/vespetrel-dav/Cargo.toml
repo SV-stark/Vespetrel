@@ -5,6 +5,10 @@ edition.workspace = true
 license.workspace = true
 description = "CalDAV & CardDAV sync via libdav, icalendar, vcard4"
 
+[features]
+default = []
+mock = []
+
 [dependencies]
 vespetrel-core = { path = "../vespetrel-core" }
 tokio = { workspace = true }

@@ -53,7 +53,7 @@ pub fn detect_system_theme() -> OsTheme {
                 let s = String::from_utf8_lossy(&output.stdout);
                 if s.trim().eq_ignore_ascii_case("Dark") {
                     return OsTheme::Dark;
-                } else {
+                } else if output.status.success() {
                     return OsTheme::Light;
                 }
             }
@@ -77,6 +77,13 @@ pub fn detect_system_theme() -> OsTheme {
         // Default to dark theme for modern desktop mail client aesthetic
         OsTheme::Dark
     })
+}
+
+/// Asynchronously detect system theme off-thread via tokio spawn_blocking
+pub async fn detect_system_theme_async() -> OsTheme {
+    tokio::task::spawn_blocking(detect_system_theme)
+        .await
+        .unwrap_or(OsTheme::Dark)
 }
 
 /// IME (Input Method Editor) state tracker for international typing (CJK, accents)

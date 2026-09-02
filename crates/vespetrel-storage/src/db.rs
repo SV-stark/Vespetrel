@@ -64,20 +64,15 @@ pub fn init_connection_with_key(
     encryption_key: Option<&str>,
 ) -> crate::StorageResult<()> {
     if let Some(key) = encryption_key {
-        // Validate key to prevent injection (disallow single quote, semicolon, null, control chars)
-        if key.contains('\'')
-            || key.contains(';')
-            || key.contains('\0')
-            || key.contains('\r')
-            || key.contains('\n')
-        {
-            return Err(crate::StorageError::Pool(
-                "Invalid encryption key: forbidden characters detected".into(),
-            ));
-        }
         let zero_key = Zeroizing::new(key.to_string());
-        // Safe PRAGMA execution
-        conn.execute_batch(&format!("PRAGMA key = '{}'", zero_key.as_str()))?;
+        let mut hex_key = String::with_capacity(zero_key.len() * 2);
+        for b in zero_key.as_bytes() {
+            use std::fmt::Write;
+            let _ = write!(&mut hex_key, "{:02x}", b);
+        }
+        let zero_hex = Zeroizing::new(hex_key);
+        // Safe hex-encoded SQLCipher key literal: PRAGMA key = "x'...'";
+        conn.execute_batch(&format!("PRAGMA key = \"x'{}'\";", zero_hex.as_str()))?;
     }
     for pragma in PRAGMAS {
         conn.execute_batch(pragma)?;

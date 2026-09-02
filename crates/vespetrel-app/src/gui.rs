@@ -1,6 +1,9 @@
 #[cfg(feature = "gpui")]
 pub mod gpui_app {
-    use crate::views::message_list::ListFilter;
+    use crate::views::{
+        calendar::CalendarView, contacts::ContactsView, message_list::ListFilter,
+        navigation::NavigationTree, tasks::TaskListView,
+    };
     use gpui::*;
     use vespetrel_core::{
         Account, CalendarEvent, Contact, Folder, FolderRole, MessageSummary, ProviderType,
@@ -55,6 +58,8 @@ pub mod gpui_app {
     }
 
     impl MainWindow {
+        /// Creates a mock `MainWindow` with in-memory sample fixtures (for tests or headless mock preview).
+        /// In production runtime, use [`MainWindow::from_storage`] with an initialized SQLite storage pool.
         pub fn new(
             cx: &mut Context<Self>,
             sync_rx: flume::Receiver<SyncEvent>,
@@ -63,48 +68,28 @@ pub mod gpui_app {
             Self::from_storage(cx, sync_rx, sync_tx, None)
         }
 
+        /// Production entry point: creates `MainWindow` and initializes asynchronous hydration from the storage pool.
         pub fn from_storage(
             cx: &mut Context<Self>,
             sync_rx: flume::Receiver<SyncEvent>,
             sync_tx: flume::Sender<SyncEvent>,
             storage_pool: Option<vespetrel_storage::db::StoragePool>,
         ) -> Self {
-            let default_account = Account::new(
-                "Primary Account",
-                "user@vespetrel.example",
-                ProviderType::Imap,
+            let (accounts, folders, messages, calendar_events, contacts, tasks): (
+                Vec<Account>,
+                Vec<Folder>,
+                Vec<MessageSummary>,
+                Vec<CalendarEvent>,
+                Vec<Contact>,
+                Vec<TaskItem>,
+            ) = (
+                Vec::new(),
+                Vec::new(),
+                Vec::new(),
+                Vec::new(),
+                Vec::new(),
+                Vec::new(),
             );
-
-            let folders = vec![
-                Folder::new(&default_account.id, "INBOX", "Inbox", "INBOX")
-                    .with_role(FolderRole::Inbox),
-                Folder::new(&default_account.id, "Drafts", "Drafts", "Drafts")
-                    .with_role(FolderRole::Drafts),
-                Folder::new(&default_account.id, "Sent", "Sent", "Sent")
-                    .with_role(FolderRole::Sent),
-                Folder::new(&default_account.id, "Archive", "Archive", "Archive")
-                    .with_role(FolderRole::Archive),
-                Folder::new(&default_account.id, "Junk", "Junk", "Junk")
-                    .with_role(FolderRole::Junk),
-                Folder::new(&default_account.id, "Trash", "Trash", "Trash")
-                    .with_role(FolderRole::Trash),
-            ];
-
-            let now = chrono::Utc::now();
-            let messages = vec![
-                MessageSummary {
-                    id: uuid::Uuid::new_v4().to_string(),
-                    thread_id: Some(uuid::Uuid::new_v4().to_string()),
-                    subject: Some("Welcome to Vespetrel — Pure Rust Desktop Mail".into()),
-                    from_address: "team@vespetrel.example".into(),
-                    from_name: Some("Vespetrel Core Team".into()),
-                    snippet: Some("Your GPU-accelerated, high-performance desktop mail client is now ready with IMAP, JMAP, CalDAV, and OpenPGP encryption.".into()),
-                    sent_at: now,
-                    is_read: false,
-                    is_flagged: true,
-                    has_attachments: true,
-                },
-            ];
 
             if let Some(pool) = &storage_pool {
                 let pool_clone = pool.clone();
@@ -122,23 +107,109 @@ pub mod gpui_app {
                                         all_folders.extend(f_list);
                                     }
                                 }
+
+                                let mut initial_messages = Vec::new();
+                                if let Some(inbox) = all_folders
+                                    .iter()
+                                    .find(|f| f.role == FolderRole::Inbox)
+                                    .or_else(|| all_folders.first())
+                                {
+                                    if let Ok(msgs) =
+                                        vespetrel_storage::repo::list_messages_in_folder(
+                                            c, &inbox.id, 100, 0,
+                                        )
+                                    {
+                                        initial_messages =
+                                            msgs.into_iter().map(|m| m.summary()).collect();
+                                    }
+                                }
+
+                                let mut all_contacts = Vec::new();
+                                for acc in &accounts {
+                                    if let Ok(contacts) =
+                                        vespetrel_storage::repo::list_contacts(c, &acc.id)
+                                    {
+                                        all_contacts.extend(contacts);
+                                    }
+                                }
+                                if all_contacts.is_empty() {
+                                    if let Ok(contacts) =
+                                        vespetrel_storage::repo::list_contacts(c, "addr-main")
+                                    {
+                                        all_contacts.extend(contacts);
+                                    }
+                                }
+
+                                let mut cal_events = Vec::new();
+                                if let Ok(mut stmt) =
+                                    c.prepare("SELECT DISTINCT calendar_id FROM calendar_events")
+                                {
+                                    if let Ok(rows) = stmt.query_map([], |r| r.get::<_, String>(0))
+                                    {
+                                        for cal_id in rows.flatten() {
+                                            if let Ok(events) =
+                                                vespetrel_storage::repo::list_calendar_events(
+                                                    c, &cal_id,
+                                                )
+                                            {
+                                                cal_events.extend(events);
+                                            }
+                                        }
+                                    }
+                                }
+                                if cal_events.is_empty() {
+                                    cal_events = vespetrel_storage::repo::list_calendar_events(
+                                        c, "cal-main",
+                                    )
+                                    .unwrap_or_default();
+                                }
+
+                                let mut task_items = Vec::new();
+                                if let Ok(mut stmt) =
+                                    c.prepare("SELECT DISTINCT calendar_id FROM tasks")
+                                {
+                                    if let Ok(rows) = stmt.query_map([], |r| r.get::<_, String>(0))
+                                    {
+                                        for cal_id in rows.flatten() {
+                                            if let Ok(tasks) =
+                                                vespetrel_storage::repo::list_tasks(c, &cal_id)
+                                            {
+                                                task_items.extend(tasks);
+                                            }
+                                        }
+                                    }
+                                }
+                                if task_items.is_empty() {
+                                    task_items = vespetrel_storage::repo::list_tasks(c, "cal-main")
+                                        .unwrap_or_default();
+                                }
+
                                 let settings = vespetrel_storage::repo::get_user_settings(c)
                                     .unwrap_or_default();
-                                (accounts, all_folders, settings)
+
+                                (
+                                    accounts,
+                                    all_folders,
+                                    initial_messages,
+                                    all_contacts,
+                                    cal_events,
+                                    task_items,
+                                    settings,
+                                )
                             })
                             .await;
 
-                        if let Ok((accs, flds, stgs)) = res {
+                        if let Ok((accs, flds, msgs, cnts, cals, tsks, stgs)) = res {
                             let _ = this.update(cx, |view, cx| {
-                                if !accs.is_empty() {
-                                    view.accounts = accs;
+                                view.accounts = accs;
+                                view.folders = flds;
+                                if let Some(first_fld) = view.folders.first() {
+                                    view.selected_folder_id = Some(first_fld.id.clone());
                                 }
-                                if !flds.is_empty() {
-                                    view.folders = flds;
-                                    if let Some(first_fld) = view.folders.first() {
-                                        view.selected_folder_id = Some(first_fld.id.clone());
-                                    }
-                                }
+                                view.messages = msgs;
+                                view.contacts = cnts;
+                                view.calendar_events = cals;
+                                view.tasks = tsks;
                                 view.settings = stgs;
                                 cx.notify();
                             });
@@ -147,67 +218,6 @@ pub mod gpui_app {
                 })
                 .detach();
             }
-
-            let calendar_events = vec![
-                CalendarEvent {
-                    id: "ev-1".into(),
-                    calendar_id: "cal-main".into(),
-                    title: "Weekly Engineering Standup".into(),
-                    description: Some("Architecture sync and release review".into()),
-                    start: now + chrono::Duration::hours(3),
-                    end: now + chrono::Duration::hours(4),
-                    location: Some("Virtual Conference".into()),
-                    ical_uid: Some("uid-101".into()),
-                    raw_ical: None,
-                },
-                CalendarEvent {
-                    id: "ev-2".into(),
-                    calendar_id: "cal-main".into(),
-                    title: "Security & Crypto Review".into(),
-                    description: Some("OpenPGP and S/MIME certificate chain verification".into()),
-                    start: now + chrono::Duration::days(1),
-                    end: now + chrono::Duration::days(1) + chrono::Duration::hours(1),
-                    location: Some("Security Room".into()),
-                    ical_uid: Some("uid-102".into()),
-                    raw_ical: None,
-                },
-            ];
-
-            let contacts = vec![
-                Contact {
-                    id: "c-1".into(),
-                    remote_id: None,
-                    display_name: Some("Alice Vance".into()),
-                    email: "alice.vance@vespetrel.example".into(),
-                    vcard_data: None,
-                },
-                Contact {
-                    id: "c-2".into(),
-                    remote_id: None,
-                    display_name: Some("Bob Martinez".into()),
-                    email: "bob.martinez@vespetrel.example".into(),
-                    vcard_data: None,
-                },
-                Contact {
-                    id: "c-3".into(),
-                    remote_id: None,
-                    display_name: Some("Carol King".into()),
-                    email: "carol.king@vespetrel.example".into(),
-                    vcard_data: None,
-                },
-            ];
-
-            let tasks = vec![
-                TaskItem::new(
-                    "cal-main",
-                    "Review IMAP IDLE connection heartbeat parameters",
-                ),
-                TaskItem::new("cal-main", "Configure S/MIME corporate trust anchors"),
-                TaskItem::new(
-                    "cal-main",
-                    "Export backup address book via CardDAV vCard 4.0",
-                ),
-            ];
 
             // Spawn Tokio Bridge Listener bound to GPUI Context
             let bridge_rx = sync_rx;
@@ -223,10 +233,10 @@ pub mod gpui_app {
             Self {
                 active_tab: ActiveViewTab::Mail,
                 active_modal: ActiveModal::None,
-                accounts: vec![default_account],
+                accounts,
+                selected_folder_id: folders.first().map(|f: &Folder| f.id.clone()),
+                selected_message_id: messages.first().map(|m: &MessageSummary| m.id.clone()),
                 folders,
-                selected_folder_id: Some("INBOX".into()),
-                selected_message_id: messages.first().map(|m| m.id.clone()),
                 messages,
                 list_filter: ListFilter::All,
                 search_query: String::new(),
@@ -673,7 +683,7 @@ pub mod gpui_app {
                                 .child("+ Add"),
                         ),
                 )
-                .child(
+                .child(if let Some(acc) = self.accounts.first() {
                     div()
                         .flex()
                         .flex_col()
@@ -685,88 +695,109 @@ pub mod gpui_app {
                                 .text_xs()
                                 .font_weight(FontWeight::SEMIBOLD)
                                 .text_color(rgb(0xf8fafc))
-                                .child("user@vespetrel.example"),
+                                .child(acc.email.clone()),
                         )
                         .child(
                             div()
                                 .text_xs()
                                 .text_color(rgb(0x38bdf8))
-                                .child("IMAP / SMTP • XOAUTH2 Ready"),
-                        ),
-                )
-                .child(
+                                .child(format!("{:?} • Active", acc.provider_type)),
+                        )
+                } else {
                     div()
                         .flex()
                         .flex_col()
-                        .gap(px(4.0))
-                        .children(self.folders.iter().map(|f| {
-                            let is_selected =
-                                self.selected_folder_id.as_deref() == Some(&f.remote_id);
-                            let icon = match f.role {
-                                FolderRole::Inbox => "📥",
-                                FolderRole::Drafts => "📝",
-                                FolderRole::Sent => "📤",
-                                FolderRole::Archive => "📦",
-                                FolderRole::Junk => "🚫",
-                                FolderRole::Trash => "🗑️",
-                                FolderRole::Custom => "📁",
-                            };
-                            let count = if f.role == FolderRole::Inbox {
-                                self.messages.len()
-                            } else {
-                                0
-                            };
-
+                        .p(px(8.0))
+                        .rounded_md()
+                        .bg(rgb(0x181f2f))
+                        .child(
                             div()
-                                .flex()
-                                .flex_row()
-                                .items_center()
-                                .justify_between()
-                                .px(px(10.0))
-                                .py(px(6.0))
-                                .rounded_md()
-                                .bg(if is_selected {
-                                    rgb(0x1e293b)
+                                .text_xs()
+                                .font_weight(FontWeight::SEMIBOLD)
+                                .text_color(rgb(0x94a3b8))
+                                .child("No accounts configured"),
+                        )
+                        .child(
+                            div()
+                                .text_xs()
+                                .text_color(rgb(0x60a5fa))
+                                .child("Click '+ Add' to connect email"),
+                        )
+                })
+                .child(
+                    div().flex().flex_col().gap(px(4.0)).children(
+                        NavigationTree::new(self.folders.clone())
+                            .sorted_folders()
+                            .into_iter()
+                            .map(|f| {
+                                let is_selected =
+                                    self.selected_folder_id.as_deref() == Some(&f.remote_id);
+                                let icon = match f.role {
+                                    FolderRole::Inbox => "📥",
+                                    FolderRole::Drafts => "📝",
+                                    FolderRole::Sent => "📤",
+                                    FolderRole::Archive => "📦",
+                                    FolderRole::Junk => "🚫",
+                                    FolderRole::Trash => "🗑️",
+                                    FolderRole::Custom => "📁",
+                                };
+                                let count = if f.role == FolderRole::Inbox {
+                                    self.messages.len()
                                 } else {
-                                    rgb(0x00000000)
-                                })
-                                .text_color(if is_selected {
-                                    rgb(0x60a5fa)
-                                } else {
-                                    rgb(0xcbd5e1)
-                                })
-                                .cursor_pointer()
-                                .child(
-                                    div()
-                                        .flex()
-                                        .flex_row()
-                                        .items_center()
-                                        .gap(px(8.0))
-                                        .child(div().text_xs().child(icon))
-                                        .child(
-                                            div()
-                                                .text_xs()
-                                                .font_weight(if is_selected {
-                                                    FontWeight::BOLD
-                                                } else {
-                                                    FontWeight::NORMAL
-                                                })
-                                                .child(f.name.clone()),
-                                        ),
-                                )
-                                .child(if count > 0 {
-                                    div()
-                                        .px(px(6.0))
-                                        .py(px(1.0))
-                                        .rounded_full()
-                                        .bg(rgb(0x2563eb))
-                                        .text_color(rgb(0xffffff))
-                                        .text_xs()
-                                        .child(format!("{count}"))
-                                } else {
-                                    div()
-                                })
-                        })),
+                                    0
+                                };
+
+                                div()
+                                    .flex()
+                                    .flex_row()
+                                    .items_center()
+                                    .justify_between()
+                                    .px(px(10.0))
+                                    .py(px(6.0))
+                                    .rounded_md()
+                                    .bg(if is_selected {
+                                        rgb(0x1e293b)
+                                    } else {
+                                        rgb(0x00000000)
+                                    })
+                                    .text_color(if is_selected {
+                                        rgb(0x60a5fa)
+                                    } else {
+                                        rgb(0xcbd5e1)
+                                    })
+                                    .cursor_pointer()
+                                    .child(
+                                        div()
+                                            .flex()
+                                            .flex_row()
+                                            .items_center()
+                                            .gap(px(8.0))
+                                            .child(div().text_xs().child(icon))
+                                            .child(
+                                                div()
+                                                    .text_xs()
+                                                    .font_weight(if is_selected {
+                                                        FontWeight::BOLD
+                                                    } else {
+                                                        FontWeight::NORMAL
+                                                    })
+                                                    .child(f.name.clone()),
+                                            ),
+                                    )
+                                    .child(if count > 0 {
+                                        div()
+                                            .px(px(6.0))
+                                            .py(px(1.0))
+                                            .rounded_full()
+                                            .bg(rgb(0x2563eb))
+                                            .text_color(rgb(0xffffff))
+                                            .text_xs()
+                                            .child(format!("{count}"))
+                                    } else {
+                                        div()
+                                    })
+                            }),
+                    ),
                 )
         }
 
@@ -1022,14 +1053,14 @@ pub mod gpui_app {
                                                         .text_color(rgb(0xffffff))
                                                         .font_weight(FontWeight::BOLD)
                                                         .text_sm()
-                                                        .child(from_name.chars().next().unwrap_or('U').to_string())
+                                                        .child(from_name.chars().next().unwrap_or('U').to_string()),
                                                 )
                                                 .child(
                                                     div()
                                                         .flex()
                                                         .flex_col()
                                                         .child(div().text_xs().font_weight(FontWeight::BOLD).text_color(rgb(0xf1f5f9)).child(if from_name.is_empty() { from_addr.clone() } else { format!("{from_name} <{from_addr}>") }))
-                                                        .child(div().text_xs().text_color(rgb(0x94a3b8)).child("To: user@vespetrel.example"))
+                                                        .child(div().text_xs().text_color(rgb(0x94a3b8)).child(format!("To: {}", self.accounts.first().map(|a| a.email.as_str()).unwrap_or("me"))))
                                                 )
                                         )
                                         .child(div().text_xs().text_color(rgb(0x64748b)).child(date_full))
@@ -1071,6 +1102,9 @@ pub mod gpui_app {
         }
 
         fn render_calendar_view(&self) -> Div {
+            let mut cal_view = CalendarView::new();
+            cal_view.events = self.calendar_events.clone();
+
             div()
                 .flex()
                 .flex_col()
@@ -1102,39 +1136,49 @@ pub mod gpui_app {
                                 .child("+ New Event"),
                         ),
                 )
-                .child(div().flex().flex_col().gap(px(10.0)).children(
-                    self.calendar_events.iter().map(|ev| {
-                        div()
-                            .flex()
-                            .flex_col()
-                            .p(px(12.0))
-                            .rounded_lg()
-                            .bg(rgb(0x171c2a))
-                            .border_1()
-                            .border_color(rgb(0x232c40))
-                            .child(
-                                div()
-                                    .text_sm()
-                                    .font_weight(FontWeight::BOLD)
-                                    .text_color(rgb(0x60a5fa))
-                                    .child(ev.title.clone()),
-                            )
-                            .child(div().text_xs().text_color(rgb(0x94a3b8)).child(format!(
-                                "Time: {} - {}",
-                                ev.start.format("%Y-%m-%d %H:%M"),
-                                ev.end.format("%H:%M")
-                            )))
-                            .child(
-                                div()
-                                    .text_xs()
-                                    .text_color(rgb(0xcbd5e1))
-                                    .child(ev.description.clone().unwrap_or_default()),
-                            )
-                    }),
-                ))
+                .child(
+                    div()
+                        .flex()
+                        .flex_col()
+                        .gap(px(10.0))
+                        .children(cal_view.events.iter().map(|ev| {
+                            div()
+                                .flex()
+                                .flex_col()
+                                .p(px(12.0))
+                                .rounded_lg()
+                                .bg(rgb(0x171c2a))
+                                .border_1()
+                                .border_color(rgb(0x232c40))
+                                .child(
+                                    div()
+                                        .text_sm()
+                                        .font_weight(FontWeight::BOLD)
+                                        .text_color(rgb(0x60a5fa))
+                                        .child(ev.title.clone()),
+                                )
+                                .child(div().text_xs().text_color(rgb(0x94a3b8)).child(format!(
+                                    "Time: {} - {}",
+                                    ev.start.format("%Y-%m-%d %H:%M"),
+                                    ev.end.format("%H:%M")
+                                )))
+                                .child(
+                                    div()
+                                        .text_xs()
+                                        .text_color(rgb(0xcbd5e1))
+                                        .child(ev.description.clone().unwrap_or_default()),
+                                )
+                        })),
+                )
         }
 
         fn render_contacts_view(&self) -> Div {
+            let mut contacts_view = ContactsView::new(self.contacts.clone());
+            if !self.search_query.is_empty() {
+                contacts_view.set_search(&self.search_query);
+            }
+            let filtered = contacts_view.filtered_contacts();
+
             div()
                 .flex()
                 .flex_col()
@@ -1171,7 +1215,7 @@ pub mod gpui_app {
                         .flex()
                         .flex_col()
                         .gap(px(8.0))
-                        .children(self.contacts.iter().map(|c| {
+                        .children(filtered.into_iter().map(|c| {
                             let name = c.display_name.as_deref().unwrap_or("Contact");
                             div()
                                 .flex()
@@ -1239,6 +1283,8 @@ pub mod gpui_app {
         }
 
         fn render_tasks_view(&self) -> Div {
+            let task_list_view = TaskListView::new(self.tasks.clone());
+
             div()
                 .flex()
                 .flex_col()
@@ -1270,47 +1316,43 @@ pub mod gpui_app {
                                 .child("+ Add Task"),
                         ),
                 )
-                .child(
-                    div()
-                        .flex()
-                        .flex_col()
-                        .gap(px(8.0))
-                        .children(self.tasks.iter().map(|t| {
-                            let is_done = t.is_completed;
-                            div()
-                                .flex()
-                                .flex_row()
-                                .items_center()
-                                .justify_between()
-                                .p(px(12.0))
-                                .rounded_lg()
-                                .bg(rgb(0x171c2a))
-                                .border_1()
-                                .border_color(rgb(0x232c40))
-                                .child(
-                                    div()
-                                        .flex()
-                                        .flex_row()
-                                        .items_center()
-                                        .gap(px(10.0))
-                                        .child(div().text_sm().child(if is_done {
-                                            "☑️"
-                                        } else {
-                                            "⬜"
-                                        }))
-                                        .child(
-                                            div()
-                                                .text_xs()
-                                                .text_color(if is_done {
-                                                    rgb(0x64748b)
-                                                } else {
-                                                    rgb(0xf1f5f9)
-                                                })
-                                                .child(t.title.clone()),
-                                        ),
-                                )
-                        })),
-                )
+                .child(div().flex().flex_col().gap(px(8.0)).children(
+                    task_list_view.filtered_tasks().into_iter().map(|t| {
+                        let is_done = t.is_completed;
+                        div()
+                            .flex()
+                            .flex_row()
+                            .items_center()
+                            .justify_between()
+                            .p(px(12.0))
+                            .rounded_lg()
+                            .bg(rgb(0x171c2a))
+                            .border_1()
+                            .border_color(rgb(0x232c40))
+                            .child(
+                                div()
+                                    .flex()
+                                    .flex_row()
+                                    .items_center()
+                                    .gap(px(10.0))
+                                    .child(div().text_sm().child(if is_done {
+                                        "☑️"
+                                    } else {
+                                        "⬜"
+                                    }))
+                                    .child(
+                                        div()
+                                            .text_xs()
+                                            .text_color(if is_done {
+                                                rgb(0x64748b)
+                                            } else {
+                                                rgb(0xf1f5f9)
+                                            })
+                                            .child(t.title.clone()),
+                                    ),
+                            )
+                    }),
+                ))
         }
 
         fn render_settings_view(&self) -> Div {
@@ -1774,10 +1816,15 @@ pub mod gpui_app {
     }
 
     /// Launch the GPUI Desktop Application
-    pub fn run_gpui_app(sync_rx: flume::Receiver<SyncEvent>, sync_tx: flume::Sender<SyncEvent>) {
+    pub fn run_gpui_app(
+        sync_rx: flume::Receiver<SyncEvent>,
+        sync_tx: flume::Sender<SyncEvent>,
+        storage_pool: Option<vespetrel_storage::db::StoragePool>,
+    ) {
         Application::new().run(move |cx: &mut App| {
             let rx = sync_rx.clone();
             let tx = sync_tx.clone();
+            let pool = storage_pool.clone();
             let _ = cx.open_window(
                 WindowOptions {
                     titlebar: Some(TitlebarOptions {
@@ -1788,7 +1835,7 @@ pub mod gpui_app {
                     window_min_size: Some(size(px(900.0), px(600.0))),
                     ..Default::default()
                 },
-                move |_window, cx| cx.new(|cx| MainWindow::new(cx, rx, tx)),
+                move |_window, cx| cx.new(|cx| MainWindow::from_storage(cx, rx, tx, pool)),
             );
         });
     }

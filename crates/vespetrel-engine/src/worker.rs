@@ -3,7 +3,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use tokio::sync::mpsc;
-use tracing::{error, info, warn};
+use tracing::{debug, error, info, warn};
 
 use vespetrel_core::provider::{MailProvider, SyncEvent};
 
@@ -47,6 +47,7 @@ pub struct AccountWorker {
     pub cmd_rx: mpsc::UnboundedReceiver<WorkerCommand>,
     pub poll_interval: Duration,
     pub storage_pool: Option<deadpool_sqlite::Pool>,
+    pub blob_store: Option<Arc<vespetrel_storage::blob::BlobStore>>,
 }
 
 impl AccountWorker {
@@ -63,6 +64,7 @@ impl AccountWorker {
             cmd_rx,
             poll_interval: Duration::from_secs(60),
             storage_pool: None,
+            blob_store: None,
         }
     }
 
@@ -79,11 +81,17 @@ impl AccountWorker {
             cmd_rx,
             poll_interval: Duration::from_secs(60),
             storage_pool: None,
+            blob_store: None,
         }
     }
 
     pub fn with_storage_pool(mut self, pool: deadpool_sqlite::Pool) -> Self {
         self.storage_pool = Some(pool);
+        self
+    }
+
+    pub fn with_blob_store(mut self, blob_store: Arc<vespetrel_storage::blob::BlobStore>) -> Self {
+        self.blob_store = Some(blob_store);
         self
     }
 
@@ -96,33 +104,38 @@ impl AccountWorker {
         loop {
             tokio::select! {
                 _ = interval.tick() => {
-                    // Introduce random jitter to prevent thundering herd
-                    let jitter_ms = rand::random::<u64>() % 2000;
-                    tokio::time::sleep(Duration::from_millis(jitter_ms)).await;
-
                     match self.sync_once().await {
                         Ok(_) => {
                             backoff = Duration::from_secs(1);
+                            let jitter_ms = rand::random::<u64>() % 2000;
+                            interval.reset_after(self.poll_interval + Duration::from_millis(jitter_ms));
                         }
                         Err(e) => {
                             warn!(account_id=%self.account_id, error=%e, backoff_secs=backoff.as_secs(), "periodic sync failed, backing off");
                             self.emit(SyncEvent::SyncError{ folder: "all".into(), error: e.to_string() });
-                            tokio::time::sleep(backoff).await;
+                            interval.reset_after(backoff);
                             backoff = (backoff * 2).min(max_backoff);
                         }
                     }
                 }
                 cmd = self.cmd_rx.recv() => {
                     match cmd {
-                        Some(WorkerCommand::SyncNow) | Some(WorkerCommand::IdlePush) => {
+                        Some(WorkerCommand::SyncNow) => {
+                            info!(account_id=%self.account_id, "manual full sync requested");
                             match self.sync_once().await {
                                 Ok(_) => {
                                     backoff = Duration::from_secs(1);
                                 }
                                 Err(e) => {
-                                    error!(error=%e, "triggered sync failed");
+                                    error!(error=%e, "manual sync failed");
                                     self.emit(SyncEvent::SyncError{ folder: "all".into(), error: e.to_string() });
                                 }
+                            }
+                        }
+                        Some(WorkerCommand::IdlePush) => {
+                            debug!(account_id=%self.account_id, "realtime IDLE push received, running incremental delta sync");
+                            if let Err(e) = self.sync_once().await {
+                                debug!(error=%e, "incremental IDLE sync failed");
                             }
                         }
                         Some(WorkerCommand::UpdateFlags{ folder_remote_id: _, uids, add, remove }) => {
@@ -144,9 +157,19 @@ impl AccountWorker {
         let folders = self.provider.sync_folder_list().await?;
         self.emit(SyncEvent::FolderListUpdated(folders.clone()));
 
-        // Acquire connection from storage pool if available
+        // Acquire connection from storage pool if available with 5s timeout
         let storage_conn = match &self.storage_pool {
-            Some(pool) => pool.get().await.ok(),
+            Some(pool) => match tokio::time::timeout(Duration::from_secs(5), pool.get()).await {
+                Ok(Ok(conn)) => Some(conn),
+                Ok(Err(e)) => {
+                    warn!(account_id=%self.account_id, error=%e, "failed to get connection from storage pool");
+                    None
+                }
+                Err(_) => {
+                    warn!(account_id=%self.account_id, "timed out acquiring connection from storage pool");
+                    None
+                }
+            },
             None => None,
         };
 
@@ -203,7 +226,16 @@ impl AccountWorker {
                     let mut summaries = Vec::new();
 
                     for sync_msg in &delta.inserted {
-                        let mut msg = if let Some(ref raw_bytes) = sync_msg.raw_rfc822 {
+                        let raw_bytes_opt = if let Some(ref raw_bytes) = sync_msg.raw_rfc822 {
+                            Some(raw_bytes.clone())
+                        } else {
+                            self.provider
+                                .fetch_raw_message(&sync_msg.remote_uid.to_string())
+                                .await
+                                .ok()
+                        };
+
+                        let mut msg = if let Some(ref raw_bytes) = raw_bytes_opt {
                             if let Some(parsed) = MessageParser::default().parse(raw_bytes) {
                                 let subject = parsed.subject().unwrap_or("No Subject").to_string();
                                 let from_addr = parsed
@@ -255,7 +287,7 @@ impl AccountWorker {
                                     &folder_db_id,
                                     sync_msg.remote_uid,
                                     format!("Message {}", sync_msg.remote_uid),
-                                    "sender@example.com",
+                                    "unknown@sender.com",
                                     vec![self.account_id.clone()],
                                 )
                             }
@@ -265,7 +297,7 @@ impl AccountWorker {
                                 &folder_db_id,
                                 sync_msg.remote_uid,
                                 format!("Message {}", sync_msg.remote_uid),
-                                "sender@example.com",
+                                "unknown@sender.com",
                                 vec![self.account_id.clone()],
                             )
                         };
@@ -274,6 +306,22 @@ impl AccountWorker {
                         msg.is_read = sync_msg.flags.contains(&vespetrel_core::Flag::Seen);
                         msg.is_flagged = sync_msg.flags.contains(&vespetrel_core::Flag::Flagged);
                         msg.is_draft = sync_msg.flags.contains(&vespetrel_core::Flag::Draft);
+
+                        // Persist raw RFC822 bytes into BlobStore non-blockingly via spawn_blocking
+                        if let Some(store) = self.blob_store.clone() {
+                            if let Some(raw) = sync_msg.raw_rfc822.clone() {
+                                if !raw.is_empty() {
+                                    let msg_id = msg.id.clone();
+                                    let res = tokio::task::spawn_blocking(move || {
+                                        store.write(&msg_id, &raw)
+                                    })
+                                    .await;
+                                    if let Ok(Err(e)) = res {
+                                        error!(msg_id=%msg.id, error=%e, "failed to write raw message to BlobStore");
+                                    }
+                                }
+                            }
+                        }
 
                         summaries.push(msg.summary());
 
@@ -314,16 +362,21 @@ impl AccountWorker {
                     if let Some(conn) = &storage_conn {
                         let acct_id = self.account_id.clone();
                         let sync_state_to_save = account_sync_state.clone();
-                        let _ = conn
+                        let res = conn
                             .interact(move |c| {
                                 if let Ok(Some(mut acct)) =
                                     vespetrel_storage::repo::get_account(c, &acct_id)
                                 {
                                     acct.sync_state = sync_state_to_save;
-                                    let _ = vespetrel_storage::repo::upsert_account(c, &acct);
+                                    if let Err(e) = vespetrel_storage::repo::upsert_account(c, &acct) {
+                                        error!(account_id=%acct.id, error=%e, "failed to update account sync state in DB");
+                                    }
                                 }
                             })
                             .await;
+                        if let Err(e) = res {
+                            error!(account_id=%self.account_id, error=%e, "storage interact error saving sync state");
+                        }
                     }
                 }
                 Err(e) => {

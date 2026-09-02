@@ -121,8 +121,20 @@ async fn main() -> anyhow::Result<()> {
         return Err(e);
     }
 
+    // Initialize storage pool and BlobStore
+    let storage_pool = app.create_storage_pool().ok();
+    let blob_dir = std::path::Path::new(&db_path)
+        .parent()
+        .unwrap_or_else(|| std::path::Path::new("."))
+        .join("blobs");
+    let blob_store = std::sync::Arc::new(vespetrel_storage::blob::BlobStore::new(blob_dir));
+
     // Initialize sync coordinator
-    let (coordinator, mut rx) = vespetrel_engine::SyncCoordinator::create();
+    let (mut coordinator, mut rx) = vespetrel_engine::SyncCoordinator::create();
+    if let Some(ref pool) = storage_pool {
+        coordinator = coordinator.with_storage_pool(pool.clone());
+    }
+    coordinator = coordinator.with_blob_store(blob_store);
 
     // In-memory / CI verification mode
     if is_headless {
@@ -191,7 +203,12 @@ async fn main() -> anyhow::Result<()> {
                 }
             });
 
-            vespetrel_app::gui::gpui_app::run_gpui_app(engine_to_gui_rx, gui_to_engine_tx);
+            let storage_pool = app.create_storage_pool().ok();
+            vespetrel_app::gui::gpui_app::run_gpui_app(
+                engine_to_gui_rx,
+                gui_to_engine_tx,
+                storage_pool,
+            );
             return Ok(());
         }
     }

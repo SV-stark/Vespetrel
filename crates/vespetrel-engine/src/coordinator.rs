@@ -11,14 +11,18 @@ use crate::worker::{AccountWorker, WorkerCommand};
 pub struct SyncCoordinator {
     /// account_id -> command sender
     workers: HashMap<String, mpsc::UnboundedSender<WorkerCommand>>,
-    /// worker join handles for supervision and graceful shutdown
-    worker_handles: Vec<tokio::task::JoinHandle<()>>,
+    /// worker join handles for supervision and graceful shutdown (account_id -> handle)
+    worker_handles: HashMap<String, tokio::task::JoinHandle<()>>,
+    /// IDLE task handles per account
+    idle_handles: HashMap<String, tokio::task::JoinHandle<()>>,
     /// UI event sender (Tokio mpsc -> GPUI)
     event_tx: mpsc::UnboundedSender<SyncEvent>,
     /// Bounded event sender for backpressure control
     flume_tx: Option<flume::Sender<SyncEvent>>,
     /// Optional shared SQLite storage pool
     storage_pool: Option<deadpool_sqlite::Pool>,
+    /// Optional shared BlobStore for persisting message RFC822 bodies
+    blob_store: Option<Arc<vespetrel_storage::blob::BlobStore>>,
 }
 
 impl SyncCoordinator {
@@ -28,10 +32,12 @@ impl SyncCoordinator {
         let (tx, rx) = mpsc::unbounded_channel();
         let coord = Self {
             workers: HashMap::new(),
-            worker_handles: Vec::new(),
+            worker_handles: HashMap::new(),
+            idle_handles: HashMap::new(),
             event_tx: tx,
             flume_tx: None,
             storage_pool: None,
+            blob_store: None,
         };
         (coord, rx)
     }
@@ -42,10 +48,12 @@ impl SyncCoordinator {
         let (tx, _rx) = mpsc::unbounded_channel();
         let coord = Self {
             workers: HashMap::new(),
-            worker_handles: Vec::new(),
+            worker_handles: HashMap::new(),
+            idle_handles: HashMap::new(),
             event_tx: tx,
             flume_tx: Some(flume_tx),
             storage_pool: None,
+            blob_store: None,
         };
         (coord, flume_rx)
     }
@@ -67,6 +75,11 @@ impl SyncCoordinator {
         self
     }
 
+    pub fn with_blob_store(mut self, blob_store: Arc<vespetrel_storage::blob::BlobStore>) -> Self {
+        self.blob_store = Some(blob_store);
+        self
+    }
+
     pub fn event_sender(&self) -> mpsc::UnboundedSender<SyncEvent> {
         self.event_tx.clone()
     }
@@ -77,6 +90,10 @@ impl SyncCoordinator {
 
     pub fn spawn_worker(&mut self, account_id: impl Into<String>, provider: Arc<dyn MailProvider>) {
         let account_id = account_id.into();
+        if self.workers.contains_key(&account_id) {
+            info!(account_id=%account_id, "worker already active for account, skipping duplicate spawn");
+            return;
+        }
         let (cmd_tx, cmd_rx) = mpsc::unbounded_channel();
         let mut worker = if let Some(flume_tx) = &self.flume_tx {
             AccountWorker::new_with_flume(account_id.clone(), provider, flume_tx.clone(), cmd_rx)
@@ -86,8 +103,11 @@ impl SyncCoordinator {
         if let Some(pool) = &self.storage_pool {
             worker = worker.with_storage_pool(pool.clone());
         }
+        if let Some(store) = &self.blob_store {
+            worker = worker.with_blob_store(store.clone());
+        }
         let handle = tokio::spawn(worker.run());
-        self.worker_handles.push(handle);
+        self.worker_handles.insert(account_id.clone(), handle);
         self.workers.insert(account_id.clone(), cmd_tx);
         info!(account_id=%account_id, "spawned worker with storage wiring");
     }
@@ -112,14 +132,35 @@ impl SyncCoordinator {
         let account_id_owned = account_id.to_string();
         if let Some(tx) = self.workers.get(account_id).cloned() {
             let handle = tokio::spawn(idle_runner(tx));
-            self.worker_handles.push(handle);
+            self.idle_handles.insert(account_id_owned.clone(), handle);
             info!(account_id=%account_id_owned, "spawned IDLE background task");
         }
+    }
+
+    /// Spawns an account worker and automatically wires a background IDLE task using the provided idle runner.
+    pub fn spawn_worker_with_idle<F, Fut>(
+        &mut self,
+        account_id: impl Into<String>,
+        provider: Arc<dyn MailProvider>,
+        idle_runner: F,
+    ) where
+        F: FnOnce(mpsc::UnboundedSender<WorkerCommand>) -> Fut + Send + 'static,
+        Fut: std::future::Future<Output = ()> + Send + 'static,
+    {
+        let account_id = account_id.into();
+        self.spawn_worker(account_id.clone(), provider);
+        self.spawn_idle_task(&account_id, idle_runner);
     }
 
     pub fn stop_worker(&mut self, account_id: &str) {
         if let Some(tx) = self.workers.remove(account_id) {
             let _ = tx.send(WorkerCommand::Stop);
+        }
+        if let Some(handle) = self.worker_handles.remove(account_id) {
+            handle.abort();
+        }
+        if let Some(handle) = self.idle_handles.remove(account_id) {
+            handle.abort();
         }
     }
 
@@ -127,7 +168,10 @@ impl SyncCoordinator {
         for (_, tx) in self.workers.drain() {
             let _ = tx.send(WorkerCommand::Stop);
         }
-        for handle in self.worker_handles.drain(..) {
+        for (_, handle) in self.worker_handles.drain() {
+            handle.abort();
+        }
+        for (_, handle) in self.idle_handles.drain() {
             handle.abort();
         }
     }

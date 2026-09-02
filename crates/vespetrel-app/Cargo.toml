@@ -34,8 +34,6 @@ simdutf8 = { workspace = true }
 mimalloc = { workspace = true }
 arc-swap = { workspace = true }
 flume = { workspace = true }
-parking_lot = { workspace = true }
-compact_str = { workspace = true }
 smallvec = { workspace = true }
 regex = { workspace = true }
 gpui = { workspace = true, optional = true }

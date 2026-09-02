@@ -145,8 +145,22 @@ impl BlobStore {
     pub fn read_path(&self, path: &Path) -> std::io::Result<Vec<u8>> {
         let compressed = std::fs::read(path)?;
         if path.extension().and_then(|e| e.to_str()) == Some("zst") {
-            return zstd::decode_all(&compressed[..])
-                .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string()));
+            use std::io::Read;
+            let mut decoder = zstd::Decoder::new(&compressed[..])
+                .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string()))?;
+            let mut decompressed = Vec::new();
+            // Max 100MB decompression limit guard
+            decoder
+                .by_ref()
+                .take(100 * 1024 * 1024 + 1)
+                .read_to_end(&mut decompressed)?;
+            if decompressed.len() > 100 * 1024 * 1024 {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "Zstd blob uncompressed size exceeds 100MB limit",
+                ));
+            }
+            return Ok(decompressed);
         }
 
         if compressed.len() >= 4 {

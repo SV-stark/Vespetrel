@@ -94,11 +94,19 @@ impl DavClient {
             }
         }
 
-        Ok(vec![RemoteCalendar {
-            id: "personal".into(),
-            name: "Personal".into(),
-            color: Some("#3b82f6".into()),
-        }])
+        #[cfg(any(test, feature = "mock"))]
+        {
+            return Ok(vec![RemoteCalendar {
+                id: "personal".into(),
+                name: "Personal".into(),
+                color: Some("#3b82f6".into()),
+            }]);
+        }
+
+        #[cfg(not(any(test, feature = "mock")))]
+        {
+            anyhow::bail!("CalDAV server returned no calendars or authentication failed");
+        }
     }
 
     pub async fn sync_calendar(
@@ -155,10 +163,18 @@ impl DavClient {
             });
         }
 
-        Ok(CalendarSyncResult {
-            events: vec![],
-            new_sync_token: Some("sync-token-1".into()),
-        })
+        #[cfg(any(test, feature = "mock"))]
+        {
+            return Ok(CalendarSyncResult {
+                events: vec![],
+                new_sync_token: Some("sync-token-1".into()),
+            });
+        }
+
+        #[cfg(not(any(test, feature = "mock")))]
+        {
+            anyhow::bail!("CalDAV sync failed: server unreachable or invalid credentials");
+        }
     }
 
     pub async fn list_contacts(&self) -> anyhow::Result<Vec<RemoteContact>> {

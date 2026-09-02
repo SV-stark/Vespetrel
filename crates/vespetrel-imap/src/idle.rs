@@ -62,20 +62,10 @@ pub enum IdleEvent {
 /// Async idle runner handling connection heartbeats, RFC 2177 renewals, and pushes
 pub async fn run_idle_loop<F>(on_event: F) -> anyhow::Result<()>
 where
-    F: Fn(IdleEvent) + Send + 'static,
+    F: Fn(IdleEvent) + Send + Sync + 'static,
 {
-    // RFC 2177 IDLE state machine:
-    // 1. Issue IDLE command and wait for "+ idling" response
-    // 2. Stream server untagged push notifications (EXISTS, EXPUNGE, FETCH FLAGS)
-    // 3. Renew every 25 minutes to prevent NAT/firewall disconnection
-    // 4. Send DONE prior to any outgoing mailbox modifications
-    info!("IMAP IDLE state machine initialized and listening for mailbox events");
-    debug!("IDLE push notification channel active");
-    let loop_state = IdleLoop::new();
-    if let Some(event) = loop_state.handle_untagged("* 1 EXISTS") {
-        on_event(event);
-    }
-    Ok(())
+    let config = crate::client::ImapConfig::new("imap.example.com", 993, "user", "pass");
+    run_idle_loop_with_config(config, on_event).await
 }
 
 /// Run a full live IMAP IDLE connection loop with automated 25-minute RFC 2177 DONE/IDLE renewal and reconnection
@@ -101,8 +91,7 @@ where
                 debug!(cmd=%idle_cmd, "issuing IDLE command");
                 let _ = conn.execute_cmd(idle_cmd).await;
 
-                if let Some(stream) = conn.stream.as_mut() {
-                    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+                if let Some(mut stream) = conn.stream.take() {
                     let mut buf = [0u8; 4096];
                     loop {
                         tokio::select! {
@@ -124,19 +113,35 @@ where
                             }
                             _ = renew_ticker.tick() => {
                                 debug!("25-minute IDLE renewal interval elapsed, cycling IDLE/DONE");
+                                let (_, next_tag_str) = conn.next_tag();
+                                let idle_renewal = format!("{next_tag_str} IDLE\r\n");
                                 let _ = stream.write_all(b"DONE\r\n").await;
-                                let _ = stream.write_all(b"A0001 IDLE\r\n").await;
+                                let _ = stream.write_all(idle_renewal.as_bytes()).await;
                             }
                         }
                     }
+                    conn.stream = Some(stream);
                 } else {
-                    // Fallback for mock/test environments
-                    tokio::select! {
-                        _ = renew_ticker.tick() => {
-                            debug!("25-minute IDLE renewal interval elapsed, cycling IDLE/DONE");
-                            let _ = conn.execute_cmd("DONE").await;
-                            let _ = conn.execute_cmd(conn.cmd_idle()).await;
+                    #[cfg(any(test, feature = "mock"))]
+                    {
+                        if let Some(ev) = idle_loop.handle_untagged("* 1 EXISTS") {
+                            on_event(ev);
                         }
+                        tokio::select! {
+                            _ = renew_ticker.tick() => {
+                                debug!("25-minute IDLE renewal interval elapsed, cycling IDLE/DONE");
+                                let _ = conn.execute_cmd("DONE").await;
+                                let _ = conn.execute_cmd(conn.cmd_idle()).await;
+                            }
+                            _ = tokio::time::sleep(Duration::from_millis(50)) => {
+                                return Ok(());
+                            }
+                        }
+                    }
+
+                    #[cfg(not(any(test, feature = "mock")))]
+                    {
+                        anyhow::bail!("cannot run IDLE without an active server stream");
                     }
                 }
             }

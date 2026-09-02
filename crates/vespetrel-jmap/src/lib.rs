@@ -189,25 +189,35 @@ impl MailProvider for JmapProvider {
             }
         }
 
-        // Test/Offline simulated folders
-        Ok(vec![
-            RemoteFolder {
-                remote_id: "inbox".into(),
-                name: "Inbox".into(),
-                path: "Inbox".into(),
-                role_hint: Some("inbox".into()),
-                uid_validity: None,
-                highest_mod_seq: None,
-            },
-            RemoteFolder {
-                remote_id: "sent".into(),
-                name: "Sent".into(),
-                path: "Sent".into(),
-                role_hint: Some("sent".into()),
-                uid_validity: None,
-                highest_mod_seq: None,
-            },
-        ])
+        #[cfg(any(test, feature = "mock"))]
+        {
+            // Test/Offline simulated folders
+            return Ok(vec![
+                RemoteFolder {
+                    remote_id: "inbox".into(),
+                    name: "Inbox".into(),
+                    path: "Inbox".into(),
+                    role_hint: Some("inbox".into()),
+                    uid_validity: None,
+                    highest_mod_seq: None,
+                },
+                RemoteFolder {
+                    remote_id: "sent".into(),
+                    name: "Sent".into(),
+                    path: "Sent".into(),
+                    role_hint: Some("sent".into()),
+                    uid_validity: None,
+                    highest_mod_seq: None,
+                },
+            ]);
+        }
+
+        #[cfg(not(any(test, feature = "mock")))]
+        {
+            Err(vespetrel_core::provider::ProviderError::Protocol(
+                "JMAP server returned no mailboxes or endpoint unreachable".into(),
+            ))
+        }
     }
 
     async fn sync_messages(
@@ -216,10 +226,7 @@ impl MailProvider for JmapProvider {
         state: SyncState,
     ) -> Result<SyncDelta, vespetrel_core::provider::ProviderError> {
         debug!(folder=%folder.name, state=?state.jmap_state, "JMAP sync_messages");
-        if self.config.base_url.starts_with("http")
-            && !self.config.access_token.is_empty()
-            && !self.config.access_token.starts_with("mock_")
-        {
+        if self.config.base_url.starts_with("http") && !self.config.access_token.is_empty() {
             let req = self.build_email_query_request(&folder.remote_id, 50);
             let resp = self
                 .http
@@ -270,10 +277,7 @@ impl MailProvider for JmapProvider {
         remote_id: &str,
     ) -> Result<Vec<u8>, vespetrel_core::provider::ProviderError> {
         debug!(remote_id, "JMAP fetch_raw_message");
-        if self.config.base_url.starts_with("http")
-            && !self.config.access_token.is_empty()
-            && !self.config.access_token.starts_with("mock_")
-        {
+        if self.config.base_url.starts_with("http") && !self.config.access_token.is_empty() {
             let download_url = format!(
                 "{}/download/{}/{}",
                 self.config.base_url.trim_end_matches('/'),
@@ -295,11 +299,22 @@ impl MailProvider for JmapProvider {
                 .map_err(|e| vespetrel_core::provider::ProviderError::Protocol(e.to_string()))?;
             return Ok(bytes.to_vec());
         }
-        Ok(format!(
-            "From: jmap@example.com\r\nSubject: JMAP {}\r\n\r\nJMAP Message Body",
-            remote_id
-        )
-        .into_bytes())
+
+        #[cfg(any(test, feature = "mock"))]
+        {
+            return Ok(format!(
+                "From: jmap@example.com\r\nSubject: JMAP {}\r\n\r\nJMAP Message Body",
+                remote_id
+            )
+            .into_bytes());
+        }
+
+        #[cfg(not(any(test, feature = "mock")))]
+        {
+            Err(vespetrel_core::provider::ProviderError::Protocol(format!(
+                "unable to fetch raw JMAP message for {remote_id}: invalid server connection"
+            )))
+        }
     }
 
     async fn send_message(

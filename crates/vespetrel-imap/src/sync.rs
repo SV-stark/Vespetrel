@@ -46,14 +46,22 @@ impl MailProvider for ImapProvider {
         }
 
         if folders.is_empty() {
-            folders.push(RemoteFolder {
-                remote_id: "INBOX".into(),
-                name: "INBOX".into(),
-                path: "INBOX".into(),
-                role_hint: Some("\\Inbox".into()),
-                uid_validity: Some(1),
-                highest_mod_seq: Some(100),
-            });
+            #[cfg(any(test, feature = "mock"))]
+            if conn.stream.is_none() {
+                folders.push(RemoteFolder {
+                    remote_id: "INBOX".into(),
+                    name: "INBOX".into(),
+                    path: "INBOX".into(),
+                    role_hint: Some("\\Inbox".into()),
+                    uid_validity: Some(1),
+                    highest_mod_seq: Some(100),
+                });
+                return Ok(folders);
+            }
+
+            return Err(ProviderError::Protocol(
+                "server returned no mailboxes from LIST command".into(),
+            ));
         }
         Ok(folders)
     }
@@ -70,10 +78,25 @@ impl MailProvider for ImapProvider {
 
         // 1. SELECT mailbox
         let select_cmd = conn.cmd_select(&folder.remote_id);
-        let _ = conn
+        let select_lines = conn
             .execute_cmd(&select_cmd)
             .await
             .map_err(|e| ProviderError::Protocol(e.to_string()))?;
+
+        let mut highest_mod_seq_found = None;
+        for sl in &select_lines {
+            if let Some(pos) = sl.to_uppercase().find("HIGHESTMODSEQ") {
+                let rest = &sl[pos + "HIGHESTMODSEQ".len()..];
+                if let Some(num_str) = rest
+                    .split(|c: char| !c.is_ascii_digit())
+                    .find(|s| !s.is_empty())
+                {
+                    if let Ok(seq) = num_str.parse::<u64>() {
+                        highest_mod_seq_found = Some(seq);
+                    }
+                }
+            }
+        }
 
         // 2. Validate UIDVALIDITY
         let cached_validity = state
@@ -112,20 +135,30 @@ impl MailProvider for ImapProvider {
             .map_err(|e| ProviderError::Protocol(e.to_string()))?;
 
         let mut delta = SyncDelta::default();
-        let next_mod_seq = current_mod_seq + 1;
 
         for line in &lines {
             if let Some((uid, flags, mod_seq, _size)) = parse_imap_fetch_line(line) {
+                if let Some(m) = mod_seq {
+                    highest_mod_seq_found =
+                        Some(highest_mod_seq_found.map_or(m, |curr| curr.max(m)));
+                }
+                let raw_rfc822 = if conn.stream.is_some() {
+                    conn.execute_fetch_raw(uid).await.ok()
+                } else {
+                    None
+                };
                 delta.inserted.push(SyncMessage {
                     remote_uid: uid,
                     flags,
-                    raw_rfc822: None,
+                    raw_rfc822,
                     mod_seq,
                 });
             }
             let vanished = crate::client::parse_vanished_line(line);
             delta.deleted_uids.extend(vanished);
         }
+
+        let next_mod_seq = highest_mod_seq_found.unwrap_or(current_mod_seq + 1);
 
         let mut folder_states = state.folder_states.clone();
         folder_states.insert(

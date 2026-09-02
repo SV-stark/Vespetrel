@@ -33,15 +33,53 @@ impl ImapConfig {
         self
     }
 }
+/// Supported transport streams for IMAP client (plain TCP or TLS)
+pub enum ImapStream {
+    Plain(tokio::net::TcpStream),
+    Tls(tokio_rustls::client::TlsStream<tokio::net::TcpStream>),
+}
 
-/// Thin async IMAP connection wrapper - negotiates capabilities and handles auth
+impl ImapStream {
+    pub async fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        use tokio::io::AsyncReadExt;
+        match self {
+            Self::Plain(s) => s.read(buf).await,
+            Self::Tls(s) => s.read(buf).await,
+        }
+    }
+
+    pub async fn write_all(&mut self, src: &[u8]) -> std::io::Result<()> {
+        use tokio::io::AsyncWriteExt;
+        match self {
+            Self::Plain(s) => s.write_all(src).await,
+            Self::Tls(s) => s.write_all(src).await,
+        }
+    }
+
+    pub async fn flush(&mut self) -> std::io::Result<()> {
+        use tokio::io::AsyncWriteExt;
+        match self {
+            Self::Plain(s) => s.flush().await,
+            Self::Tls(s) => s.flush().await,
+        }
+    }
+}
+
+/// Async IMAP connection wrapper - negotiates capabilities, performs TLS/AUTH, and handles commands
 pub struct ImapConnection {
     config: ImapConfig,
-    // In a full implementation this wraps tokio::net::TcpStream + tokio-rustls + imap-codec codec
-    // For now we provide the state machine and command builders
     pub capabilities: Vec<String>,
     pub tag_counter: u32,
-    pub stream: Option<tokio::net::TcpStream>,
+    pub stream: Option<ImapStream>,
+}
+
+impl Drop for ImapConnection {
+    fn drop(&mut self) {
+        if self.stream.is_some() {
+            debug!("closing IMAP connection stream via RAII drop");
+            self.stream = None;
+        }
+    }
 }
 
 impl ImapConnection {
@@ -68,28 +106,98 @@ impl ImapConnection {
             && self.config.port > 0
         {
             let addr = format!("{}:{}", self.config.host, self.config.port);
-            if let Ok(stream) = tokio::time::timeout(
+            match tokio::time::timeout(
                 std::time::Duration::from_secs(5),
                 tokio::net::TcpStream::connect(&addr),
             )
-            .await?
+            .await
             {
-                debug!(addr=%addr, "live persistent TCP stream established to IMAP endpoint");
-                self.stream = Some(stream);
+                Ok(Ok(tcp_stream)) => {
+                    let mut stream = if self.config.use_tls || self.config.port == 993 {
+                        debug!(addr=%addr, "performing TLS handshake for IMAP connection");
+                        let root_store = rustls::RootCertStore::empty();
+                        let client_config = rustls::ClientConfig::builder()
+                            .with_root_certificates(root_store)
+                            .with_no_client_auth();
+                        let connector =
+                            tokio_rustls::TlsConnector::from(std::sync::Arc::new(client_config));
+                        let server_name =
+                            rustls::pki_types::ServerName::try_from(self.config.host.clone())
+                                .map_err(|e| anyhow::anyhow!("invalid TLS server name: {e}"))?;
+                        let tls_stream = connector.connect(server_name, tcp_stream).await?;
+                        ImapStream::Tls(tls_stream)
+                    } else {
+                        ImapStream::Plain(tcp_stream)
+                    };
+
+                    let mut banner_buf = vec![0u8; 4096];
+                    if let Ok(Ok(n)) = tokio::time::timeout(
+                        std::time::Duration::from_secs(2),
+                        stream.read(&mut banner_buf),
+                    )
+                    .await
+                    {
+                        let banner = String::from_utf8_lossy(&banner_buf[..n]);
+                        debug!(banner=%banner.trim(), "received IMAP server greeting");
+                    }
+                    self.stream = Some(stream);
+
+                    // Query server capabilities dynamically
+                    if let Ok(cap_lines) = self.execute_cmd("CAPABILITY").await {
+                        for line in cap_lines {
+                            if line.starts_with("* CAPABILITY") {
+                                self.capabilities = line["* CAPABILITY".len()..]
+                                    .split_whitespace()
+                                    .map(|s| s.to_string())
+                                    .collect();
+                            }
+                        }
+                    }
+
+                    // Perform authentication if credentials are provided and propagate error
+                    if self.config.use_xoauth2 && !self.config.auth_token.is_empty() {
+                        let auth_cmd = self.cmd_authenticate_xoauth2();
+                        let auth_resp = self.execute_cmd(&auth_cmd).await?;
+                        if auth_resp
+                            .iter()
+                            .any(|l| l.contains(" NO ") || l.contains(" BAD "))
+                        {
+                            anyhow::bail!("IMAP XOAUTH2 authentication failed");
+                        }
+                    } else if !self.config.username.is_empty() && !self.config.auth_token.is_empty()
+                    {
+                        let login_cmd = self.cmd_login();
+                        let login_resp = self.execute_cmd(&login_cmd).await?;
+                        if login_resp
+                            .iter()
+                            .any(|l| l.contains(" NO ") || l.contains(" BAD "))
+                        {
+                            anyhow::bail!("IMAP LOGIN authentication failed");
+                        }
+                    }
+                }
+                Ok(Err(e)) => {
+                    debug!(addr=%addr, error=%e, "failed to establish TCP stream, using mock endpoint");
+                }
+                Err(_) => {
+                    debug!(addr=%addr, "TCP stream connect timed out, using mock endpoint");
+                }
             }
         }
 
-        self.capabilities = vec![
-            "IMAP4rev1".into(),
-            "ENABLE".into(),
-            "CONDSTORE".into(),
-            "QRESYNC".into(),
-            "IDLE".into(),
-            "SPECIAL-USE".into(),
-            "MOVE".into(),
-        ];
-        if self.config.use_xoauth2 {
-            self.capabilities.push("AUTH=XOAUTH2".into());
+        if self.capabilities.is_empty() {
+            self.capabilities = vec![
+                "IMAP4rev1".into(),
+                "ENABLE".into(),
+                "CONDSTORE".into(),
+                "QRESYNC".into(),
+                "IDLE".into(),
+                "SPECIAL-USE".into(),
+                "MOVE".into(),
+            ];
+            if self.config.use_xoauth2 {
+                self.capabilities.push("AUTH=XOAUTH2".into());
+            }
         }
         debug!(caps=?self.capabilities, "negotiated capabilities");
         Ok(())
@@ -101,56 +209,143 @@ impl ImapConnection {
         debug!(tag=%tag_str, cmd=%cmd, "executing IMAP command");
 
         if let Some(stream) = self.stream.as_mut() {
-            use tokio::io::{AsyncReadExt, AsyncWriteExt};
-            let _ = stream.write_all(tagged_line.as_bytes()).await;
-            let mut buf = vec![0u8; 16384];
-            if let Ok(n) = stream.read(&mut buf).await
-                && n > 0
-            {
-                let resp = String::from_utf8_lossy(&buf[..n]);
-                let lines: Vec<String> = resp
-                    .lines()
-                    .map(|l| l.trim().to_string())
-                    .filter(|l| !l.is_empty())
-                    .collect();
-                if !lines.is_empty() {
-                    return Ok(lines);
+            if stream.write_all(tagged_line.as_bytes()).await.is_ok() {
+                let mut accumulated = Vec::new();
+                let mut chunk = vec![0u8; 8192];
+                let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+
+                while std::time::Instant::now() < deadline {
+                    match tokio::time::timeout(
+                        std::time::Duration::from_millis(500),
+                        stream.read(&mut chunk),
+                    )
+                    .await
+                    {
+                        Ok(Ok(n)) if n > 0 => {
+                            accumulated.extend_from_slice(&chunk[..n]);
+
+                            // Literal {N}\r\n boundary detection
+                            let text = String::from_utf8_lossy(&accumulated);
+                            if let Some(lit_pos) = text.find('{') {
+                                if let Some(close_brace) = text[lit_pos..].find("}\r\n") {
+                                    let size_str = &text[lit_pos + 1..lit_pos + close_brace];
+                                    if let Ok(expected_lit_len) = size_str.parse::<usize>() {
+                                        let lit_start = lit_pos + close_brace + 3;
+                                        let lit_read = accumulated.len().saturating_sub(lit_start);
+                                        if lit_read < expected_lit_len {
+                                            let mut remaining = expected_lit_len - lit_read;
+                                            let mut lit_buf = vec![0u8; remaining.min(65536)];
+                                            while remaining > 0 {
+                                                if let Ok(Ok(rn)) = tokio::time::timeout(
+                                                    std::time::Duration::from_secs(3),
+                                                    stream.read(&mut lit_buf),
+                                                )
+                                                .await
+                                                {
+                                                    if rn == 0 {
+                                                        break;
+                                                    }
+                                                    accumulated.extend_from_slice(&lit_buf[..rn]);
+                                                    remaining = remaining.saturating_sub(rn);
+                                                } else {
+                                                    break;
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+
+                            let text = String::from_utf8_lossy(&accumulated);
+                            // Check if tagged terminal line or continuation received
+                            if text.contains(&format!("{tag_str} OK"))
+                                || text.contains(&format!("{tag_str} NO"))
+                                || text.contains(&format!("{tag_str} BAD"))
+                                || text.starts_with('+')
+                            {
+                                let lines: Vec<String> = text
+                                    .lines()
+                                    .map(|l| l.trim().to_string())
+                                    .filter(|l| !l.is_empty())
+                                    .collect();
+                                return Ok(lines);
+                            }
+                        }
+                        _ => break,
+                    }
+                }
+
+                if !accumulated.is_empty() {
+                    let text = String::from_utf8_lossy(&accumulated);
+                    let lines: Vec<String> = text
+                        .lines()
+                        .map(|l| l.trim().to_string())
+                        .filter(|l| !l.is_empty())
+                        .collect();
+                    if !lines.is_empty() {
+                        return Ok(lines);
+                    }
                 }
             }
         }
 
-        // Format compliant untagged server stream according to command type for test/mock endpoints
-        let mut lines = Vec::new();
-        let upper = cmd.trim().to_uppercase();
+        // Mock test fallback strictly gated behind test/mock
+        #[cfg(any(test, feature = "mock"))]
+        {
+            let mut lines = Vec::new();
+            let upper = cmd.trim().to_uppercase();
 
-        if upper.starts_with("LIST") {
-            lines.push(r#"* LIST (\HasNoChildren \Inbox) "/" "INBOX""#.into());
-            lines.push(r#"* LIST (\HasNoChildren \Sent) "/" "Sent""#.into());
-            lines.push(r#"* LIST (\HasNoChildren \Drafts) "/" "Drafts""#.into());
-            lines.push(r#"* LIST (\HasNoChildren \Trash) "/" "Trash""#.into());
-            lines.push(r#"* LIST (\HasNoChildren \Junk) "/" "Junk""#.into());
-            lines.push(r#"* LIST (\HasNoChildren \Archive) "/" "Archive""#.into());
-        } else if upper.starts_with("SELECT") {
-            lines.push("* 1 EXISTS".into());
-            lines.push("* 0 RECENT".into());
-            lines.push("* OK [UIDVALIDITY 1] UIDs valid".into());
-            lines.push("* OK [HIGHESTMODSEQ 100] Highest".into());
-        } else if upper.starts_with("UID FETCH") {
-            if upper.contains("CHANGEDSINCE") {
-                lines.push("* 1 FETCH (UID 101 FLAGS (\\Seen) MODSEQ 101 RFC822.SIZE 1024)".into());
-            } else {
-                lines.push("* 1 FETCH (UID 101 FLAGS (\\Seen) MODSEQ 101 RFC822.SIZE 1024)".into());
-                lines.push(
-                    "* 2 FETCH (UID 102 FLAGS (\\Flagged) MODSEQ 102 RFC822.SIZE 2048)".into(),
-                );
+            if upper.starts_with("LIST") {
+                lines.push(r#"* LIST (\HasNoChildren \Inbox) "/" "INBOX""#.into());
+                lines.push(r#"* LIST (\HasNoChildren \Sent) "/" "Sent""#.into());
+                lines.push(r#"* LIST (\HasNoChildren \Drafts) "/" "Drafts""#.into());
+                lines.push(r#"* LIST (\HasNoChildren \Trash) "/" "Trash""#.into());
+                lines.push(r#"* LIST (\HasNoChildren \Junk) "/" "Junk""#.into());
+                lines.push(r#"* LIST (\HasNoChildren \Archive) "/" "Archive""#.into());
+            } else if upper.starts_with("SELECT") {
+                lines.push("* 1 EXISTS".into());
+                lines.push("* 0 RECENT".into());
+                lines.push("* OK [UIDVALIDITY 1] UIDs valid".into());
+                lines.push("* OK [HIGHESTMODSEQ 100] Highest".into());
+            } else if upper.starts_with("UID FETCH") {
+                if upper.contains("CHANGEDSINCE") {
+                    lines.push(
+                        "* 1 FETCH (UID 101 FLAGS (\\Seen) MODSEQ 101 RFC822.SIZE 1024)".into(),
+                    );
+                } else {
+                    lines.push(
+                        "* 1 FETCH (UID 101 FLAGS (\\Seen) MODSEQ 101 RFC822.SIZE 1024)".into(),
+                    );
+                    lines.push(
+                        "* 2 FETCH (UID 102 FLAGS (\\Flagged) MODSEQ 102 RFC822.SIZE 2048)".into(),
+                    );
+                }
+            } else if upper.starts_with("UID STORE") {
+                lines.push("* 1 FETCH (UID 101 FLAGS (\\Seen \\Flagged))".into());
             }
-        } else if upper.starts_with("UID STORE") {
-            lines.push("* 1 FETCH (UID 101 FLAGS (\\Seen \\Flagged))".into());
+
+            lines.push(format!("{tag_str} OK {cmd} completed"));
+            let _ = tag_id;
+            return Ok(lines);
         }
 
-        lines.push(format!("{tag_str} OK {cmd} completed"));
-        let _ = tag_id;
-        Ok(lines)
+        #[cfg(not(any(test, feature = "mock")))]
+        {
+            let _ = tag_id;
+            let _ = tag_str;
+            anyhow::bail!(
+                "IMAP connection not connected to live server and mock fallback is disabled in release mode"
+            );
+        }
+    }
+
+    pub async fn logout(&mut self) -> anyhow::Result<()> {
+        if self.stream.is_some() {
+            let logout_cmd = self.cmd_logout();
+            let _ = self.execute_cmd(logout_cmd).await;
+            self.stream = None;
+        }
+        Ok(())
     }
 
     pub async fn execute_fetch_raw(&mut self, uid: u32) -> anyhow::Result<Vec<u8>> {
@@ -167,22 +362,33 @@ impl ImapConnection {
             }
         }
 
-        let formatted = format!(
-            "MIME-Version: 1.0\r\n\
-             From: postmaster@{}\r\n\
-             To: user@{}\r\n\
-             Subject: Message {}\r\n\
-             Date: {}\r\n\
-             Content-Type: text/plain; charset=utf-8\r\n\
-             \r\n\
-             Synchronized message content for UID {}.\r\n",
-            self.config.host,
-            self.config.host,
-            uid,
-            chrono::Utc::now().to_rfc2822(),
-            uid
-        );
-        Ok(formatted.into_bytes())
+        #[cfg(any(test, feature = "mock"))]
+        {
+            let formatted = format!(
+                "MIME-Version: 1.0\r\n\
+                 From: postmaster@{}\r\n\
+                 To: user@{}\r\n\
+                 Subject: Message {}\r\n\
+                 Date: {}\r\n\
+                 Content-Type: text/plain; charset=utf-8\r\n\
+                 \r\n\
+                 Synchronized message content for UID {}.\r\n",
+                self.config.host,
+                self.config.host,
+                uid,
+                chrono::Utc::now().to_rfc2822(),
+                uid
+            );
+            return Ok(formatted.into_bytes());
+        }
+
+        #[cfg(not(any(test, feature = "mock")))]
+        {
+            anyhow::bail!(
+                "no literal MIME payload returned from IMAP server for UID {}",
+                uid
+            );
+        }
     }
 
     pub async fn execute_store_flags(
@@ -254,6 +460,16 @@ impl ImapConnection {
 
     pub fn cmd_authenticate_xoauth2(&self) -> String {
         format!("AUTHENTICATE XOAUTH2 {}", self.build_xoauth2_payload())
+    }
+
+    pub fn cmd_login(&self) -> String {
+        let clean_user = self.config.username.replace(['\r', '\n', '"'], "");
+        let clean_pass = self.config.auth_token.replace(['\r', '\n', '"'], "");
+        format!("LOGIN \"{clean_user}\" \"{clean_pass}\"")
+    }
+
+    pub fn cmd_logout(&self) -> &'static str {
+        "LOGOUT"
     }
 
     pub fn cmd_list(&self) -> &'static str {

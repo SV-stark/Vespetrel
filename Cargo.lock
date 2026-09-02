@@ -979,15 +979,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "castaway"
-version = "0.2.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "dec551ab6e7578819132c713a93c022a05d60159dc86e7a7050223577484c55a"
-dependencies = [
- "rustversion",
-]
-
-[[package]]
 name = "cbc"
 version = "0.1.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1254,20 +1245,6 @@ checksum = "1b60b5124979fccd9addd89d8b97a1d6eebb4950694520c75ddd722535ea443f"
 dependencies = [
  "nix 0.31.3",
  "thiserror 2.0.20",
-]
-
-[[package]]
-name = "compact_str"
-version = "0.10.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "79fcda08c33bb58b97008b2cdada6622500e949e060f5913361763121abd2416"
-dependencies = [
- "castaway",
- "cfg-if",
- "itoa",
- "serde",
- "static_assertions",
- "zmij",
 ]
 
 [[package]]
@@ -8195,12 +8172,10 @@ dependencies = [
  "anyhow",
  "arc-swap",
  "chrono",
- "compact_str",
  "flume 0.12.0",
  "gpui",
  "memchr",
  "mimalloc",
- "parking_lot",
  "regex",
  "rusqlite",
  "serde",
@@ -8298,7 +8273,6 @@ dependencies = [
  "futures",
  "mail-parser",
  "memchr",
- "parking_lot",
  "rand 0.8.8",
  "serde",
  "serde_json",
@@ -8335,15 +8309,14 @@ dependencies = [
  "async-trait",
  "base64 0.22.1",
  "chrono",
- "futures",
  "imap-codec",
  "imap-types",
  "mail-parser",
  "memchr",
  "rustls",
- "serde",
  "thiserror 2.0.20",
  "tokio",
+ "tokio-rustls",
  "tracing",
  "vespetrel-core",
 ]
@@ -8405,7 +8378,6 @@ dependencies = [
  "keyring",
  "lz4_flex",
  "moka",
- "parking_lot",
  "rusqlite",
  "serde",
  "serde_json",

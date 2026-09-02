@@ -207,25 +207,35 @@ impl MailProvider for GraphProvider {
             }
         }
 
-        // Test/Offline simulated folders
-        Ok(vec![
-            RemoteFolder {
-                remote_id: "inbox".into(),
-                name: "Inbox".into(),
-                path: "Inbox".into(),
-                role_hint: Some("inbox".into()),
-                uid_validity: None,
-                highest_mod_seq: None,
-            },
-            RemoteFolder {
-                remote_id: "sentitems".into(),
-                name: "Sent Items".into(),
-                path: "Sent Items".into(),
-                role_hint: Some("sent".into()),
-                uid_validity: None,
-                highest_mod_seq: None,
-            },
-        ])
+        #[cfg(any(test, feature = "mock"))]
+        {
+            // Test/Offline simulated folders
+            return Ok(vec![
+                RemoteFolder {
+                    remote_id: "inbox".into(),
+                    name: "Inbox".into(),
+                    path: "Inbox".into(),
+                    role_hint: Some("inbox".into()),
+                    uid_validity: None,
+                    highest_mod_seq: None,
+                },
+                RemoteFolder {
+                    remote_id: "sentitems".into(),
+                    name: "Sent Items".into(),
+                    path: "Sent Items".into(),
+                    role_hint: Some("sent".into()),
+                    uid_validity: None,
+                    highest_mod_seq: None,
+                },
+            ]);
+        }
+
+        #[cfg(not(any(test, feature = "mock")))]
+        {
+            Err(vespetrel_core::provider::ProviderError::Protocol(
+                "Microsoft Graph returned no mailboxes or token is invalid".into(),
+            ))
+        }
     }
 
     async fn sync_messages(
@@ -238,7 +248,7 @@ impl MailProvider for GraphProvider {
             .delta_url(&folder.remote_id, state.graph_delta_token.as_deref());
         debug!(folder=%folder.name, url=%url, "Graph delta query");
 
-        if !self.config.access_token.is_empty() && !self.config.access_token.starts_with("mock_") {
+        if !self.config.access_token.is_empty() {
             let resp = self
                 .http
                 .get(&url)
@@ -292,7 +302,7 @@ impl MailProvider for GraphProvider {
                         .get("bodyPreview")
                         .and_then(|s| s.as_str())
                         .unwrap_or("");
-                    let mock_rfc822 = format!(
+                    let mime_data = format!(
                         "From: graph@example.com\r\nSubject: {subject}\r\n\r\n{body_preview}"
                     )
                     .into_bytes();
@@ -300,7 +310,7 @@ impl MailProvider for GraphProvider {
                     delta.inserted.push(vespetrel_core::provider::SyncMessage {
                         remote_uid,
                         flags,
-                        raw_rfc822: Some(mock_rfc822),
+                        raw_rfc822: Some(mime_data),
                         mod_seq: None,
                     });
                 }
@@ -308,15 +318,25 @@ impl MailProvider for GraphProvider {
             return Ok(delta);
         }
 
-        // Offline / simulated delta response
-        let new_sync_state = SyncState {
-            graph_delta_token: Some("delta-token-active".into()),
-            ..Default::default()
-        };
-        Ok(SyncDelta {
-            new_sync_state,
-            ..Default::default()
-        })
+        #[cfg(any(test, feature = "mock"))]
+        {
+            // Offline / simulated delta response
+            let new_sync_state = SyncState {
+                graph_delta_token: Some("delta-token-active".into()),
+                ..Default::default()
+            };
+            return Ok(SyncDelta {
+                new_sync_state,
+                ..Default::default()
+            });
+        }
+
+        #[cfg(not(any(test, feature = "mock")))]
+        {
+            Err(vespetrel_core::provider::ProviderError::Protocol(
+                "Microsoft Graph sync failed: invalid access token".into(),
+            ))
+        }
     }
 
     async fn fetch_raw_message(
@@ -324,7 +344,7 @@ impl MailProvider for GraphProvider {
         remote_id: &str,
     ) -> Result<Vec<u8>, vespetrel_core::provider::ProviderError> {
         debug!(remote_id, "Graph fetch MIME");
-        if !self.config.access_token.is_empty() && !self.config.access_token.starts_with("mock_") {
+        if !self.config.access_token.is_empty() {
             let mime_url = self.config.message_mime_url(remote_id);
             let resp = self
                 .http
@@ -341,11 +361,22 @@ impl MailProvider for GraphProvider {
                 .map_err(|e| vespetrel_core::provider::ProviderError::Protocol(e.to_string()))?;
             return Ok(bytes.to_vec());
         }
-        Ok(format!(
-            "From: graph@example.com\r\nSubject: Graph {}\r\n\r\nGraph Message Content",
-            remote_id
-        )
-        .into_bytes())
+
+        #[cfg(any(test, feature = "mock"))]
+        {
+            return Ok(format!(
+                "From: graph@example.com\r\nSubject: Graph {}\r\n\r\nGraph Message Content",
+                remote_id
+            )
+            .into_bytes());
+        }
+
+        #[cfg(not(any(test, feature = "mock")))]
+        {
+            Err(vespetrel_core::provider::ProviderError::Protocol(format!(
+                "unable to fetch MIME for Graph message {remote_id}: invalid access token"
+            )))
+        }
     }
 
     async fn send_message(
