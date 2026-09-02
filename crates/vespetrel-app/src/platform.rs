@@ -1,5 +1,6 @@
-//! Platform-specific hardening (High-DPI, OS theme detection, IME) §7 Phase 4
-use tracing::{debug, info};
+#[cfg(windows)]
+use tracing::debug;
+use tracing::info;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OsTheme {
