@@ -186,9 +186,32 @@ pub struct ComposedAttachment {
     pub data: Vec<u8>,
 }
 
+/// Computes a deterministic, non-zero 31-bit positive UID from an arbitrary string ID (e.g. JMAP or Graph ID).
+/// Uses FNV-1a to guarantee permanent stability across restarts and platforms.
+#[inline]
+pub fn stable_uid_from_id(id: &str) -> u32 {
+    let mut hash: u32 = 0x811c9dc5;
+    for byte in id.as_bytes() {
+        hash ^= *byte as u32;
+        hash = hash.wrapping_mul(0x01000193);
+    }
+    (hash & 0x7FFF_FFFF).max(1)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_stable_uid_deterministic() {
+        let uid1 = stable_uid_from_id("M12345abcdef");
+        let uid2 = stable_uid_from_id("M12345abcdef");
+        let uid3 = stable_uid_from_id("M67890ghijkl");
+        assert_eq!(uid1, uid2);
+        assert_ne!(uid1, uid3);
+        assert!(uid1 > 0);
+        assert!(uid1 <= 0x7FFF_FFFF);
+    }
 
     #[test]
     fn test_message_creation_and_summary() {

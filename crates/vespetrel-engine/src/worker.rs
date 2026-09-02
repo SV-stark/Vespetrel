@@ -48,6 +48,7 @@ pub struct AccountWorker {
     pub poll_interval: Duration,
     pub storage_pool: Option<deadpool_sqlite::Pool>,
     pub blob_store: Option<Arc<vespetrel_storage::blob::BlobStore>>,
+    pub classifier: Option<Arc<crate::spam::BayesClassifier>>,
 }
 
 impl AccountWorker {
@@ -65,6 +66,7 @@ impl AccountWorker {
             poll_interval: Duration::from_secs(60),
             storage_pool: None,
             blob_store: None,
+            classifier: None,
         }
     }
 
@@ -82,6 +84,7 @@ impl AccountWorker {
             poll_interval: Duration::from_secs(60),
             storage_pool: None,
             blob_store: None,
+            classifier: None,
         }
     }
 
@@ -92,6 +95,11 @@ impl AccountWorker {
 
     pub fn with_blob_store(mut self, blob_store: Arc<vespetrel_storage::blob::BlobStore>) -> Self {
         self.blob_store = Some(blob_store);
+        self
+    }
+
+    pub fn with_classifier(mut self, classifier: Arc<crate::spam::BayesClassifier>) -> Self {
+        self.classifier = Some(classifier);
         self
     }
 
@@ -284,6 +292,18 @@ impl AccountWorker {
                                 m.size_bytes = raw_bytes.len() as i64;
                                 let shard = &m.id[..2.min(m.id.len())];
                                 m.blob_path = format!("{shard}/{}.lz4", m.id);
+
+                                if let Some(ref classifier) = self.classifier {
+                                    let check_text = format!(
+                                        "{} {}",
+                                        m.subject.as_deref().unwrap_or(""),
+                                        m.body_text_preview.as_deref().unwrap_or("")
+                                    );
+                                    let score = classifier.classify(&check_text);
+                                    if score.is_spam {
+                                        tracing::warn!(id = %m.id, prob = score.probability, "incoming message classified as spam/junk");
+                                    }
+                                }
                                 m
                             } else {
                                 vespetrel_core::Message::new(

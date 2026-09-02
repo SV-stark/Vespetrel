@@ -21,7 +21,7 @@ license = "MIT OR Apache-2.0"
 
 [workspace.dependencies]
 # Async & Runtime
-tokio = { version = "1.38", features = ["full"] }
+tokio = { version = "1.53", features = ["full"] }
 async-trait = "0.1"
 futures = "0.3"
 anyhow = "1.0"
@@ -58,6 +58,7 @@ cms = "0.2"
 webpki-roots = "1.0"
 zeroize = { version = "1.8", features = ["zeroize_derive"] }
 ring = "0.17"
+aws-lc-rs = "1.18"
 
 
 # HTML Sanitization

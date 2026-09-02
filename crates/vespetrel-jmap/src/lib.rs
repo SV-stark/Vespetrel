@@ -288,10 +288,7 @@ impl MailProvider for JmapProvider {
                                 flags.push(vespetrel_core::Flag::Draft);
                             }
                         }
-                        let mut hasher = std::collections::hash_map::DefaultHasher::new();
-                        std::hash::Hash::hash(id, &mut hasher);
-                        let hash = std::hash::Hasher::finish(&hasher);
-                        let remote_uid = ((hash & 0x7FFF_FFFF) as u32).max(1);
+                        let remote_uid = vespetrel_core::stable_uid_from_id(id);
 
                         delta.inserted.push(vespetrel_core::provider::SyncMessage {
                             remote_uid,

@@ -183,18 +183,11 @@ impl Drop for SyncCoordinator {
     }
 }
 
-/// Factory function to instantiate the concrete MailProvider implementation for an account.
-pub fn make_provider(account: &vespetrel_core::Account) -> Arc<dyn MailProvider> {
-    let auth_token = if let Some(ref k) = account.auth_config.keyring_key {
-        keyring::Entry::new("vespetrel", k)
-            .and_then(|e| e.get_password())
-            .unwrap_or_default()
-    } else {
-        keyring::Entry::new("vespetrel", &account.id)
-            .and_then(|e| e.get_password())
-            .unwrap_or_default()
-    };
-
+/// Builds a concrete MailProvider instance with the given credentials.
+pub fn make_provider_with_token(
+    account: &vespetrel_core::Account,
+    auth_token: String,
+) -> Arc<dyn MailProvider> {
     match account.provider_type {
         vespetrel_core::ProviderType::Imap => {
             let domain = account.email.split('@').nth(1).unwrap_or("localhost");
@@ -227,4 +220,41 @@ pub fn make_provider(account: &vespetrel_core::Account) -> Arc<dyn MailProvider>
             Arc::new(vespetrel_graph::GraphProvider::new(config))
         }
     }
+}
+
+/// Factory function to instantiate the concrete MailProvider implementation for an account.
+pub fn make_provider(account: &vespetrel_core::Account) -> Arc<dyn MailProvider> {
+    let auth_token = if let Some(ref k) = account.auth_config.keyring_key {
+        keyring::Entry::new("vespetrel", k)
+            .and_then(|e| e.get_password())
+            .unwrap_or_default()
+    } else {
+        keyring::Entry::new("vespetrel", &account.id)
+            .and_then(|e| e.get_password())
+            .unwrap_or_default()
+    };
+
+    make_provider_with_token(account, auth_token)
+}
+
+/// Async factory function to instantiate MailProvider, offloading keyring lookups
+/// to a blocking thread to avoid stalling the Tokio reactor.
+pub async fn make_provider_async(account: &vespetrel_core::Account) -> Arc<dyn MailProvider> {
+    let keyring_key = account.auth_config.keyring_key.clone();
+    let account_id = account.id.clone();
+    let auth_token = tokio::task::spawn_blocking(move || {
+        if let Some(ref k) = keyring_key {
+            keyring::Entry::new("vespetrel", k)
+                .and_then(|e| e.get_password())
+                .unwrap_or_default()
+        } else {
+            keyring::Entry::new("vespetrel", &account_id)
+                .and_then(|e| e.get_password())
+                .unwrap_or_default()
+        }
+    })
+    .await
+    .unwrap_or_default();
+
+    make_provider_with_token(account, auth_token)
 }

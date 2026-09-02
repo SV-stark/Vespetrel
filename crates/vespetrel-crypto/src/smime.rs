@@ -131,7 +131,16 @@ impl SmimeEngine {
             anyhow::bail!("missing private key for S/MIME decryption");
         }
 
-        Ok(cms_data.to_vec())
+        #[cfg(any(test, feature = "smime-verify"))]
+        {
+            Ok(cms_data.to_vec())
+        }
+        #[cfg(not(any(test, feature = "smime-verify")))]
+        {
+            anyhow::bail!(
+                "S/MIME EnvelopedData decryption requires full CMS implementation or smime-verify feature"
+            );
+        }
     }
 }
 

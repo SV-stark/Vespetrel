@@ -56,3 +56,12 @@ jobs:
       - name: Verify In-Memory Headless Startup
         run: cargo run --release -p vespetrel-app --bin vespetrel -- --memory
 
+  security-audit:
+    name: Dependency & License Audit (cargo-deny)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          command: check
+

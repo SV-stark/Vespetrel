@@ -26,7 +26,9 @@ pub use error::{CoreError, CoreResult};
 pub use folder::{Folder, FolderRole};
 pub use invite::{MeetingInvitation, RsvpStatus};
 pub use mailing_list::{MailingList, MailingListExpander};
-pub use message::{Address, ComposedAttachment, ComposedMessage, Flag, Message, MessageSummary};
+pub use message::{
+    Address, ComposedAttachment, ComposedMessage, Flag, Message, MessageSummary, stable_uid_from_id,
+};
 pub use provider::{MailProvider, RemoteFolder, SyncDelta, SyncEvent};
 pub use richtext::{BlockKind, InlineStyle, RichTextDocument, TextSpan};
 pub use settings::*;

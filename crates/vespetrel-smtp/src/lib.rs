@@ -139,9 +139,18 @@ impl SmtpClient {
             }
             use base64::Engine;
             use sha2::Digest;
+
+            let date_str = chrono::Utc::now().to_rfc2822();
+            let date_hdr_name = lettre::message::header::HeaderName::new_from_ascii_str("Date");
+            builder = builder.raw_header(lettre::message::header::HeaderValue::new(
+                date_hdr_name,
+                date_str.clone(),
+            ));
+
             let body_content = msg.body_html.as_deref().unwrap_or(&msg.body_text);
+            let canon_body = canonicalize_relaxed_body(body_content);
             let mut hasher = <sha2::Sha256 as sha2::Digest>::new();
-            hasher.update(body_content.as_bytes());
+            hasher.update(&canon_body);
             let bh = base64::engine::general_purpose::STANDARD.encode(hasher.finalize());
 
             let signed_headers = if msg.cc.is_empty() {
@@ -154,7 +163,30 @@ impl SmtpClient {
                 "v=1; a=rsa-sha256; d={domain}; s={selector}; c=relaxed/relaxed; q=dns/txt; h={signed_headers}; bh={bh}; b="
             );
 
-            // RSA PKCS#1 v1.5 signing via ring
+            // Canonicalize headers in order of h= followed by DKIM-Signature up to b=
+            let mut headers_to_sign = String::new();
+            headers_to_sign.push_str(&canonicalize_relaxed_header("from", &msg.from.to_string()));
+            let to_str = msg
+                .to
+                .iter()
+                .map(|a| a.to_string())
+                .collect::<Vec<_>>()
+                .join(", ");
+            headers_to_sign.push_str(&canonicalize_relaxed_header("to", &to_str));
+            if !msg.cc.is_empty() {
+                let cc_str = msg
+                    .cc
+                    .iter()
+                    .map(|a| a.to_string())
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                headers_to_sign.push_str(&canonicalize_relaxed_header("cc", &cc_str));
+            }
+            headers_to_sign.push_str(&canonicalize_relaxed_header("subject", &msg.subject));
+            headers_to_sign.push_str(&canonicalize_relaxed_header("date", &date_str));
+            headers_to_sign.push_str(&canonicalize_relaxed_header("dkim-signature", &sig_input));
+
+            // RSA PKCS#1 v1.5 signing via aws-lc-rs
             let der_bytes = if key.contains("-----BEGIN") {
                 let stripped = key
                     .lines()
@@ -172,19 +204,20 @@ impl SmtpClient {
                 key.as_bytes().to_vec()
             };
 
-            let key_pair = ring::signature::RsaKeyPair::from_pkcs8(&der_bytes)
-                .or_else(|_| ring::signature::RsaKeyPair::from_der(&der_bytes))
+            let key_pair = aws_lc_rs::signature::RsaKeyPair::from_pkcs8(&der_bytes)
+                .or_else(|_| aws_lc_rs::signature::RsaKeyPair::from_der(&der_bytes))
                 .map_err(|_| {
                     anyhow::anyhow!("invalid RSA private key for DKIM: expected PKCS#8 or DER key")
                 })?;
 
-            let rng = ring::rand::SystemRandom::new();
-            let mut sig = vec![0; key_pair.public().modulus_len()];
+            use aws_lc_rs::signature::KeyPair;
+            let rng = aws_lc_rs::rand::SystemRandom::new();
+            let mut sig = vec![0; key_pair.public_key().modulus_len()];
             key_pair
                 .sign(
-                    &ring::signature::RSA_PKCS1_SHA256,
+                    &aws_lc_rs::signature::RSA_PKCS1_SHA256,
                     &rng,
-                    sig_input.as_bytes(),
+                    headers_to_sign.as_bytes(),
                     &mut sig,
                 )
                 .map_err(|_| {
@@ -279,6 +312,58 @@ impl SmtpClient {
         info!(subject=%msg.subject, "SMTP message delivered successfully");
         Ok(())
     }
+}
+
+/// Canonicalizes an email body using the RFC 6376 §3.4.4 relaxed body canonicalization algorithm.
+pub fn canonicalize_relaxed_body(body: &str) -> Vec<u8> {
+    if body.is_empty() {
+        return Vec::new();
+    }
+    let mut lines = Vec::new();
+    for line in body.lines() {
+        let mut canon_line = String::with_capacity(line.len());
+        let mut in_wsp = false;
+        for c in line.trim_end().chars() {
+            if c == ' ' || c == '\t' {
+                if !in_wsp {
+                    canon_line.push(' ');
+                    in_wsp = true;
+                }
+            } else {
+                canon_line.push(c);
+                in_wsp = false;
+            }
+        }
+        lines.push(canon_line);
+    }
+    while lines.last().map(|l| l.is_empty()).unwrap_or(false) {
+        lines.pop();
+    }
+    if lines.is_empty() {
+        return Vec::new();
+    }
+    let mut result = lines.join("\r\n");
+    result.push_str("\r\n");
+    result.into_bytes()
+}
+
+/// Canonicalizes a single header field using RFC 6376 §3.4.2 relaxed header canonicalization.
+pub fn canonicalize_relaxed_header(name: &str, value: &str) -> String {
+    let lower_name = name.trim().to_ascii_lowercase();
+    let mut canon_val = String::with_capacity(value.len());
+    let mut in_wsp = false;
+    for c in value.trim().chars() {
+        if c == ' ' || c == '\t' || c == '\r' || c == '\n' {
+            if !in_wsp {
+                canon_val.push(' ');
+                in_wsp = true;
+            }
+        } else {
+            canon_val.push(c);
+            in_wsp = false;
+        }
+    }
+    format!("{lower_name}:{canon_val}\r\n")
 }
 
 #[cfg(test)]

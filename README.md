@@ -66,7 +66,7 @@ Modern desktop email clients are almost universally trapped in web runtimes (Ele
 | **Rendering Framework** | Gecko (HTML/XUL/JS) | Chromium / DOM | **GPUI (Direct GPU Shader Pipeline @ 120 FPS)** |
 | **Typing Latency** | 20ms – 40ms | 15ms – 30ms | **< 2ms (Tree-sitter GPU quads)** |
 | **Search (100k Emails)** | 2.5s – 8.0s (Gloda) | Cloud-dependent | **< 15ms (Local SQLite FTS5 BM25 + SIMD)** |
-| **Large Mailbox Virtual List** | Micro-stutters on large folders | DOM virtualization jitter | **Zero-lag 200k+ row virtual list** |
+| **Large Mailbox List** | Micro-stutters on large folders | DOM virtualization jitter | **GPU-accelerated native list (Direct GPU shader pipeline)** |
 | **Memory Safety** | C++ / JS | JS / Node.js | **100% Safe Rust 2024 Edition** |
 | **Modern Protocols** | IMAP/POP only (No JMAP/Graph) | Proprietary cloud sync | **IMAP + JMAP + MS Graph REST + CalDAV + CardDAV** |
 | **Tracker & Pixel Shield** | Add-on required | Cloud proxy | **Built-in `lol_html` streaming pixel stripper** |

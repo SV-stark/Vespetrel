@@ -308,10 +308,7 @@ impl MailProvider for GraphProvider {
                         flags.push(Flag::Flagged);
                     }
                     let id = item.get("id").and_then(|s| s.as_str()).unwrap_or_default();
-                    let mut hasher = std::collections::hash_map::DefaultHasher::new();
-                    std::hash::Hash::hash(id, &mut hasher);
-                    let hash = std::hash::Hasher::finish(&hasher);
-                    let remote_uid = ((hash & 0x7FFF_FFFF) as u32).max(1);
+                    let remote_uid = vespetrel_core::stable_uid_from_id(id);
 
                     let subject = item.get("subject").and_then(|s| s.as_str()).unwrap_or("");
                     let body_preview = item
