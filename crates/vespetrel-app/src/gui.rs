@@ -1,13 +1,17 @@
 #[cfg(feature = "gpui")]
 pub mod gpui_app {
     use crate::views::{
-        calendar::CalendarView, contacts::ContactsView, message_list::ListFilter,
-        navigation::NavigationTree, tasks::TaskListView,
+        calendar::CalendarView,
+        contacts::ContactsView,
+        login_wizard::{LoginWizardState, WizardStep},
+        message_list::ListFilter,
+        navigation::NavigationTree,
+        tasks::TaskListView,
     };
     use gpui::*;
     use vespetrel_core::{
-        Account, CalendarEvent, Contact, Folder, FolderRole, MessageSummary, TaskItem,
-        UserSettings, provider::SyncEvent,
+        Account, CalendarEvent, Contact, Folder, FolderRole, MessageSummary, ProviderType,
+        TaskItem, UserSettings, provider::SyncEvent,
     };
 
     /// Active top-level navigation view
@@ -55,6 +59,8 @@ pub mod gpui_app {
         // Event channel from Tokio sync engine
         pub sync_sender: flume::Sender<SyncEvent>,
         pub status_message: String,
+        pub storage_pool: Option<vespetrel_storage::db::StoragePool>,
+        pub login_wizard: LoginWizardState,
     }
 
     impl MainWindow {
@@ -247,6 +253,8 @@ pub mod gpui_app {
                 palette_query: String::new(),
                 sync_sender: sync_tx,
                 status_message: "All mailboxes synchronized".into(),
+                storage_pool,
+                login_wizard: LoginWizardState::new(),
             }
         }
 
@@ -426,30 +434,30 @@ pub mod gpui_app {
     }
 
     impl Render for MainWindow {
-        fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+        fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
             div()
                 .flex()
                 .flex_col()
                 .size_full()
                 .bg(rgb(0x0f1117))
                 .text_color(rgb(0xe2e8f0))
-                .child(self.render_header())
+                .child(self.render_header(cx))
                 .child(
                     div()
                         .flex()
                         .flex_row()
                         .flex_1()
                         .overflow_hidden()
-                        .child(self.render_sidebar_tabs())
-                        .child(self.render_active_tab_content()),
+                        .child(self.render_sidebar_tabs(cx))
+                        .child(self.render_active_tab_content(cx)),
                 )
                 .child(self.render_status_bar())
-                .child(self.render_modal_layer())
+                .child(self.render_modal_layer(cx))
         }
     }
 
     impl MainWindow {
-        fn render_header(&self) -> impl IntoElement {
+        fn render_header(&self, cx: &Context<Self>) -> impl IntoElement {
             let search_display = if self.search_query.is_empty() {
                 "Search messages, senders, attachments (FTS5)...".to_string()
             } else {
@@ -527,6 +535,7 @@ pub mod gpui_app {
                         .gap(px(8.0))
                         .child(
                             div()
+                                .id("btn-header-compose")
                                 .flex()
                                 .items_center()
                                 .gap(px(6.0))
@@ -538,10 +547,15 @@ pub mod gpui_app {
                                 .text_xs()
                                 .font_weight(FontWeight::SEMIBOLD)
                                 .cursor_pointer()
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.active_modal = ActiveModal::Compose;
+                                    cx.notify();
+                                }))
                                 .child("✍️ Compose"),
                         )
                         .child(
                             div()
+                                .id("btn-header-sync")
                                 .flex()
                                 .items_center()
                                 .px(px(10.0))
@@ -551,10 +565,17 @@ pub mod gpui_app {
                                 .text_color(rgb(0xcbd5e1))
                                 .text_xs()
                                 .cursor_pointer()
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.status_message = "Synchronizing all accounts...".into();
+                                    let _ =
+                                        this.sync_sender.send(SyncEvent::FolderListUpdated(vec![]));
+                                    cx.notify();
+                                }))
                                 .child("🔄 Sync"),
                         )
                         .child(
                             div()
+                                .id("btn-header-palette")
                                 .flex()
                                 .items_center()
                                 .px(px(10.0))
@@ -564,12 +585,16 @@ pub mod gpui_app {
                                 .text_color(rgb(0x94a3b8))
                                 .text_xs()
                                 .cursor_pointer()
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.active_modal = ActiveModal::CommandPalette;
+                                    cx.notify();
+                                }))
                                 .child("⌘K"),
                         ),
                 )
         }
 
-        fn render_sidebar_tabs(&self) -> impl IntoElement {
+        fn render_sidebar_tabs(&self, cx: &Context<Self>) -> impl IntoElement {
             let tabs = [
                 (ActiveViewTab::Mail, "✉️", "Mail"),
                 (ActiveViewTab::Calendar, "📅", "Calendar"),
@@ -592,6 +617,7 @@ pub mod gpui_app {
                 .children(tabs.into_iter().map(|(tab, icon, label)| {
                     let is_active = self.active_tab == tab;
                     div()
+                        .id(ElementId::Name(format!("tab-item-{}", label).into()))
                         .flex()
                         .flex_col()
                         .items_center()
@@ -616,12 +642,16 @@ pub mod gpui_app {
                             rgb(0x00000000)
                         })
                         .cursor_pointer()
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.active_tab = tab;
+                            cx.notify();
+                        }))
                         .child(div().text_base().child(icon))
                         .child(div().text_xs().child(label))
                 }))
         }
 
-        fn render_active_tab_content(&self) -> impl IntoElement {
+        fn render_active_tab_content(&self, cx: &Context<Self>) -> impl IntoElement {
             div()
                 .flex()
                 .flex_row()
@@ -629,7 +659,7 @@ pub mod gpui_app {
                 .h_full()
                 .overflow_hidden()
                 .child(match self.active_tab {
-                    ActiveViewTab::Mail => self.render_mail_workspace().into_any_element(),
+                    ActiveViewTab::Mail => self.render_mail_workspace(cx).into_any_element(),
                     ActiveViewTab::Calendar => self.render_calendar_view().into_any_element(),
                     ActiveViewTab::Contacts => self.render_contacts_view().into_any_element(),
                     ActiveViewTab::Tasks => self.render_tasks_view().into_any_element(),
@@ -637,19 +667,19 @@ pub mod gpui_app {
                 })
         }
 
-        fn render_mail_workspace(&self) -> Div {
+        fn render_mail_workspace(&self, cx: &Context<Self>) -> impl IntoElement {
             div()
                 .flex()
                 .flex_row()
                 .flex_1()
                 .h_full()
                 .overflow_hidden()
-                .child(self.render_folder_tree())
-                .child(self.render_message_list_pane())
+                .child(self.render_folder_tree(cx))
+                .child(self.render_message_list_pane(cx))
                 .child(self.render_message_reader_pane())
         }
 
-        fn render_folder_tree(&self) -> impl IntoElement {
+        fn render_folder_tree(&self, cx: &Context<Self>) -> impl IntoElement {
             div()
                 .flex()
                 .flex_col()
@@ -675,52 +705,74 @@ pub mod gpui_app {
                         )
                         .child(
                             div()
+                                .id("btn-add-account")
                                 .text_xs()
                                 .text_color(rgb(0x60a5fa))
                                 .cursor_pointer()
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.login_wizard = LoginWizardState::new();
+                                    this.active_modal = ActiveModal::AddAccount;
+                                    cx.notify();
+                                }))
                                 .child("+ Add"),
                         ),
                 )
-                .child(if let Some(acc) = self.accounts.first() {
-                    div()
-                        .flex()
-                        .flex_col()
-                        .p(px(8.0))
-                        .rounded_md()
-                        .bg(rgb(0x181f2f))
-                        .child(
-                            div()
-                                .text_xs()
-                                .font_weight(FontWeight::SEMIBOLD)
-                                .text_color(rgb(0xf8fafc))
-                                .child(acc.email.clone()),
-                        )
-                        .child(
-                            div()
-                                .text_xs()
-                                .text_color(rgb(0x38bdf8))
-                                .child(format!("{:?} • Active", acc.provider_type)),
-                        )
+                .children(if self.accounts.is_empty() {
+                    vec![
+                        div()
+                            .id("btn-add-account-banner")
+                            .flex()
+                            .flex_col()
+                            .p(px(8.0))
+                            .rounded_md()
+                            .bg(rgb(0x181f2f))
+                            .cursor_pointer()
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.login_wizard = LoginWizardState::new();
+                                this.active_modal = ActiveModal::AddAccount;
+                                cx.notify();
+                            }))
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .font_weight(FontWeight::SEMIBOLD)
+                                    .text_color(rgb(0x94a3b8))
+                                    .child("No accounts configured"),
+                            )
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .text_color(rgb(0x60a5fa))
+                                    .child("Click '+ Add' to connect email"),
+                            ),
+                    ]
                 } else {
-                    div()
-                        .flex()
-                        .flex_col()
-                        .p(px(8.0))
-                        .rounded_md()
-                        .bg(rgb(0x181f2f))
-                        .child(
+                    self.accounts
+                        .iter()
+                        .enumerate()
+                        .map(|(idx, acc)| {
                             div()
-                                .text_xs()
-                                .font_weight(FontWeight::SEMIBOLD)
-                                .text_color(rgb(0x94a3b8))
-                                .child("No accounts configured"),
-                        )
-                        .child(
-                            div()
-                                .text_xs()
-                                .text_color(rgb(0x60a5fa))
-                                .child("Click '+ Add' to connect email"),
-                        )
+                                .id(ElementId::Name(format!("account-card-{}", idx).into()))
+                                .flex()
+                                .flex_col()
+                                .p(px(8.0))
+                                .rounded_md()
+                                .bg(rgb(0x181f2f))
+                                .child(
+                                    div()
+                                        .text_xs()
+                                        .font_weight(FontWeight::SEMIBOLD)
+                                        .text_color(rgb(0xf8fafc))
+                                        .child(acc.email.clone()),
+                                )
+                                .child(
+                                    div()
+                                        .text_xs()
+                                        .text_color(rgb(0x38bdf8))
+                                        .child(format!("{:?} • Active", acc.provider_type)),
+                                )
+                        })
+                        .collect()
                 })
                 .child(
                     div().flex().flex_col().gap(px(4.0)).children(
@@ -730,6 +782,7 @@ pub mod gpui_app {
                             .map(|f| {
                                 let is_selected =
                                     self.selected_folder_id.as_deref() == Some(&f.remote_id);
+                                let remote_id_clone = f.remote_id.clone();
                                 let icon = match f.role {
                                     FolderRole::Inbox => "📥",
                                     FolderRole::Drafts => "📝",
@@ -746,6 +799,7 @@ pub mod gpui_app {
                                 };
 
                                 div()
+                                    .id(ElementId::Name(format!("folder-{}", f.id).into()))
                                     .flex()
                                     .flex_row()
                                     .items_center()
@@ -764,6 +818,10 @@ pub mod gpui_app {
                                         rgb(0xcbd5e1)
                                     })
                                     .cursor_pointer()
+                                    .on_click(cx.listener(move |this, _, _, cx| {
+                                        this.selected_folder_id = Some(remote_id_clone.clone());
+                                        cx.notify();
+                                    }))
                                     .child(
                                         div()
                                             .flex()
@@ -799,7 +857,7 @@ pub mod gpui_app {
                 )
         }
 
-        fn render_message_list_pane(&self) -> impl IntoElement {
+        fn render_message_list_pane(&self, cx: &Context<Self>) -> impl IntoElement {
             let filtered = self.filtered_messages();
 
             div()
@@ -819,10 +877,14 @@ pub mod gpui_app {
                         .gap(px(4.0))
                         .border_b_1()
                         .border_color(rgb(0x1f293d))
-                        .child(self.render_filter_chip("All", ListFilter::All))
-                        .child(self.render_filter_chip("Unread", ListFilter::Unread))
-                        .child(self.render_filter_chip("Starred", ListFilter::Flagged))
-                        .child(self.render_filter_chip("📎 Files", ListFilter::WithAttachments)),
+                        .child(self.render_filter_chip("All", ListFilter::All, cx))
+                        .child(self.render_filter_chip("Unread", ListFilter::Unread, cx))
+                        .child(self.render_filter_chip("Starred", ListFilter::Flagged, cx))
+                        .child(self.render_filter_chip(
+                            "📎 Files",
+                            ListFilter::WithAttachments,
+                            cx,
+                        )),
                 )
                 .child(
                     div()
@@ -835,8 +897,10 @@ pub mod gpui_app {
                             let subject = msg.subject.as_deref().unwrap_or("(No Subject)");
                             let snippet = msg.snippet.as_deref().unwrap_or("");
                             let date_str = msg.sent_at.format("%b %d, %H:%M").to_string();
+                            let msg_id = msg.id.clone();
 
                             div()
+                                .id(ElementId::Name(format!("msg-item-{}", msg_id).into()))
                                 .flex()
                                 .flex_col()
                                 .p(px(10.0))
@@ -850,6 +914,10 @@ pub mod gpui_app {
                                     rgb(0x10141d)
                                 })
                                 .cursor_pointer()
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    this.selected_message_id = Some(msg_id.clone());
+                                    cx.notify();
+                                }))
                                 .child(
                                     div()
                                         .flex()
@@ -934,9 +1002,15 @@ pub mod gpui_app {
                 )
         }
 
-        fn render_filter_chip(&self, label: &'static str, filter: ListFilter) -> impl IntoElement {
+        fn render_filter_chip(
+            &self,
+            label: &'static str,
+            filter: ListFilter,
+            cx: &Context<Self>,
+        ) -> impl IntoElement {
             let is_active = self.list_filter == filter;
             div()
+                .id(ElementId::Name(format!("filter-chip-{}", label).into()))
                 .px(px(8.0))
                 .py(px(4.0))
                 .rounded_md()
@@ -952,6 +1026,10 @@ pub mod gpui_app {
                 })
                 .text_xs()
                 .cursor_pointer()
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    this.list_filter = filter;
+                    cx.notify();
+                }))
                 .child(label)
         }
 
@@ -1437,16 +1515,18 @@ pub mod gpui_app {
                 .child(div().child("120 FPS GPU Direct3D / Vulkan • Rust Edition 2024"))
         }
 
-        fn render_modal_layer(&self) -> impl IntoElement {
+        fn render_modal_layer(&self, cx: &Context<Self>) -> impl IntoElement {
             match self.active_modal {
-                ActiveModal::None => div(),
-                ActiveModal::Compose => self.render_compose_modal(),
-                ActiveModal::CommandPalette => self.render_command_palette_modal(),
-                ActiveModal::AddAccount => self.render_add_account_modal(),
+                ActiveModal::None => div().into_any_element(),
+                ActiveModal::Compose => self.render_compose_modal(cx).into_any_element(),
+                ActiveModal::CommandPalette => {
+                    self.render_command_palette_modal(cx).into_any_element()
+                }
+                ActiveModal::AddAccount => self.render_add_account_modal(cx).into_any_element(),
             }
         }
 
-        fn render_compose_modal(&self) -> Div {
+        fn render_compose_modal(&self, cx: &Context<Self>) -> impl IntoElement {
             let to_text = if self.compose_to.is_empty() {
                 "user@example.com".to_string()
             } else {
@@ -1464,6 +1544,7 @@ pub mod gpui_app {
             };
 
             div()
+                .id("modal-compose-overlay")
                 .flex()
                 .items_center()
                 .justify_center()
@@ -1471,6 +1552,7 @@ pub mod gpui_app {
                 .bg(rgb(0x000000bb))
                 .child(
                     div()
+                        .id("modal-compose-box")
                         .flex()
                         .flex_col()
                         .w(px(620.0))
@@ -1496,9 +1578,14 @@ pub mod gpui_app {
                                 )
                                 .child(
                                     div()
+                                        .id("btn-close-compose")
                                         .text_sm()
                                         .text_color(rgb(0x94a3b8))
                                         .cursor_pointer()
+                                        .on_click(cx.listener(|this, _, _, cx| {
+                                            this.active_modal = ActiveModal::None;
+                                            cx.notify();
+                                        }))
                                         .child("✕"),
                                 ),
                         )
@@ -1566,6 +1653,7 @@ pub mod gpui_app {
                                         .gap(px(8.0))
                                         .child(
                                             div()
+                                                .id("btn-discard-compose")
                                                 .px(px(14.0))
                                                 .py(px(6.0))
                                                 .rounded_md()
@@ -1573,10 +1661,15 @@ pub mod gpui_app {
                                                 .text_color(rgb(0xcbd5e1))
                                                 .text_xs()
                                                 .cursor_pointer()
+                                                .on_click(cx.listener(|this, _, _, cx| {
+                                                    this.active_modal = ActiveModal::None;
+                                                    cx.notify();
+                                                }))
                                                 .child("Discard"),
                                         )
                                         .child(
                                             div()
+                                                .id("btn-send-compose")
                                                 .px(px(16.0))
                                                 .py(px(6.0))
                                                 .rounded_md()
@@ -1585,6 +1678,14 @@ pub mod gpui_app {
                                                 .text_xs()
                                                 .font_weight(FontWeight::BOLD)
                                                 .cursor_pointer()
+                                                .on_click(cx.listener(|this, _, _, cx| {
+                                                    this.status_message = format!(
+                                                        "Message sent to {}",
+                                                        this.compose_to
+                                                    );
+                                                    this.active_modal = ActiveModal::None;
+                                                    cx.notify();
+                                                }))
                                                 .child("Send 🚀"),
                                         ),
                                 ),
@@ -1592,7 +1693,7 @@ pub mod gpui_app {
                 )
         }
 
-        fn render_command_palette_modal(&self) -> Div {
+        fn render_command_palette_modal(&self, cx: &Context<Self>) -> impl IntoElement {
             let actions = [
                 ("✍️ Compose New Email", "c"),
                 ("📥 Go to Inbox", "g i"),
@@ -1605,6 +1706,7 @@ pub mod gpui_app {
             ];
 
             div()
+                .id("modal-palette-overlay")
                 .flex()
                 .items_center()
                 .justify_center()
@@ -1612,6 +1714,7 @@ pub mod gpui_app {
                 .bg(rgb(0x000000bb))
                 .child(
                     div()
+                        .id("modal-palette-box")
                         .flex()
                         .flex_col()
                         .w(px(520.0))
@@ -1647,6 +1750,9 @@ pub mod gpui_app {
                                     .enumerate()
                                     .map(|(idx, (title, shortcut))| {
                                         div()
+                                            .id(ElementId::Name(
+                                                format!("palette-action-{}", idx).into(),
+                                            ))
                                             .flex()
                                             .flex_row()
                                             .items_center()
@@ -1660,6 +1766,27 @@ pub mod gpui_app {
                                                 rgb(0x00000000)
                                             })
                                             .cursor_pointer()
+                                            .on_click(cx.listener(move |this, _, _, cx| {
+                                                match idx {
+                                                    0 => this.active_modal = ActiveModal::Compose,
+                                                    1 => this.active_tab = ActiveViewTab::Mail,
+                                                    2 => this.list_filter = ListFilter::Flagged,
+                                                    3 => {
+                                                        let _ = this.sync_sender.send(
+                                                            SyncEvent::FolderListUpdated(vec![]),
+                                                        );
+                                                    }
+                                                    4 => this.active_tab = ActiveViewTab::Calendar,
+                                                    5 => this.active_tab = ActiveViewTab::Contacts,
+                                                    6 => this.active_tab = ActiveViewTab::Tasks,
+                                                    7 => this.active_tab = ActiveViewTab::Settings,
+                                                    _ => {}
+                                                };
+                                                if idx != 0 {
+                                                    this.active_modal = ActiveModal::None;
+                                                }
+                                                cx.notify();
+                                            }))
                                             .child(
                                                 div()
                                                     .text_xs()
@@ -1682,8 +1809,68 @@ pub mod gpui_app {
                 )
         }
 
-        fn render_add_account_modal(&self) -> Div {
+        fn render_add_account_modal(&self, cx: &Context<Self>) -> impl IntoElement {
+            let selected_p = self.login_wizard.provider_type.clone();
+            let providers = [
+                (
+                    ProviderType::Gmail,
+                    "Google (Gmail)",
+                    "OAuth2 PKCE • IMAP/SMTP",
+                    "🌐",
+                ),
+                (
+                    ProviderType::Graph,
+                    "Microsoft 365",
+                    "Graph API • Outlook/Exchange",
+                    "🏢",
+                ),
+                (
+                    ProviderType::Jmap,
+                    "Fastmail (JMAP)",
+                    "RFC 8620 • Ultra-fast Push",
+                    "⚡",
+                ),
+                (
+                    ProviderType::Imap,
+                    "Custom IMAP",
+                    "TLS 993 • SMTP 587 Submission",
+                    "🔒",
+                ),
+            ];
+
+            let display_email = if self.login_wizard.email.is_empty() {
+                match selected_p {
+                    ProviderType::Gmail => "user@gmail.com",
+                    ProviderType::Graph => "user@outlook.com",
+                    ProviderType::Jmap => "user@fastmail.com",
+                    ProviderType::Imap => "user@example.com",
+                }
+            } else {
+                &self.login_wizard.email
+            };
+
+            let display_name = if self.login_wizard.name.is_empty() {
+                "Vespetrel User"
+            } else {
+                &self.login_wizard.name
+            };
+
+            let incoming_info = match selected_p {
+                ProviderType::Gmail => "imap.gmail.com:993 (SSL/TLS)",
+                ProviderType::Graph => "graph.microsoft.com:443 (HTTPS)",
+                ProviderType::Jmap => "api.fastmail.com:443 (JMAP RFC8620)",
+                ProviderType::Imap => "mail.example.com:993 (IMAP TLS 1.3)",
+            };
+
+            let outgoing_info = match selected_p {
+                ProviderType::Gmail => "smtp.gmail.com:587 (STARTTLS)",
+                ProviderType::Graph => "graph.microsoft.com (OAuth2 Bearer)",
+                ProviderType::Jmap => "api.fastmail.com (EmailSubmission)",
+                ProviderType::Imap => "smtp.example.com:587 (Submission TLS)",
+            };
+
             div()
+                .id("modal-add-account-overlay")
                 .flex()
                 .items_center()
                 .justify_center()
@@ -1691,15 +1878,17 @@ pub mod gpui_app {
                 .bg(rgb(0x000000bb))
                 .child(
                     div()
+                        .id("modal-add-account-box")
                         .flex()
                         .flex_col()
-                        .w(px(480.0))
+                        .w(px(560.0))
                         .rounded_xl()
-                        .bg(rgb(0x161b26))
+                        .bg(rgb(0x131722))
                         .border_1()
-                        .border_color(rgb(0x2d3748))
-                        .p(px(20.0))
-                        .gap(px(12.0))
+                        .border_color(rgb(0x283347))
+                        .p(px(24.0))
+                        .gap(px(16.0))
+                        // Wizard Header
                         .child(
                             div()
                                 .flex()
@@ -1708,19 +1897,37 @@ pub mod gpui_app {
                                 .justify_between()
                                 .child(
                                     div()
-                                        .text_base()
-                                        .font_weight(FontWeight::BOLD)
-                                        .text_color(rgb(0xf8fafc))
-                                        .child("Add Email Account"),
+                                        .flex()
+                                        .flex_col()
+                                        .gap(px(2.0))
+                                        .child(
+                                            div()
+                                                .text_base()
+                                                .font_weight(FontWeight::BOLD)
+                                                .text_color(rgb(0xf8fafc))
+                                                .child("✉️ New Mail Setup Wizard"),
+                                        )
+                                        .child(
+                                            div()
+                                                .text_xs()
+                                                .text_color(rgb(0x94a3b8))
+                                                .child("Connect your email inbox to Vespetrel with local SQLite WAL & FTS5"),
+                                        ),
                                 )
                                 .child(
                                     div()
+                                        .id("btn-close-wizard")
                                         .text_sm()
                                         .text_color(rgb(0x94a3b8))
                                         .cursor_pointer()
+                                        .on_click(cx.listener(|this, _, _, cx| {
+                                            this.active_modal = ActiveModal::None;
+                                            cx.notify();
+                                        }))
                                         .child("✕"),
                                 ),
                         )
+                        // Provider Selection Grid
                         .child(
                             div()
                                 .flex()
@@ -1729,84 +1936,324 @@ pub mod gpui_app {
                                 .child(
                                     div()
                                         .text_xs()
-                                        .text_color(rgb(0x94a3b8))
-                                        .child("Select Provider:"),
+                                        .font_weight(FontWeight::SEMIBOLD)
+                                        .text_color(rgb(0xcbd5e1))
+                                        .child("1. Choose Provider"),
                                 )
                                 .child(
                                     div()
                                         .flex()
                                         .flex_row()
+                                        .flex_wrap()
                                         .gap(px(8.0))
+                                        .children(providers.into_iter().map(|(p, title, desc, icon)| {
+                                            let is_sel = selected_p == p;
+                                            let p_choice = p.clone();
+                                            div()
+                                                .id(ElementId::Name(format!("prov-choice-{:?}", p).into()))
+                                                .flex()
+                                                .flex_col()
+                                                .w(px(248.0))
+                                                .p(px(10.0))
+                                                .rounded_lg()
+                                                .bg(if is_sel { rgb(0x1e293b) } else { rgb(0x181f2f) })
+                                                .border_1()
+                                                .border_color(if is_sel { rgb(0x3b82f6) } else { rgb(0x232d42) })
+                                                .cursor_pointer()
+                                                .on_click(cx.listener(move |this, _, _, cx| {
+                                                    this.login_wizard.select_provider(p_choice.clone());
+                                                    cx.notify();
+                                                }))
+                                                .child(
+                                                    div()
+                                                        .flex()
+                                                        .flex_row()
+                                                        .items_center()
+                                                        .gap(px(6.0))
+                                                        .child(div().text_sm().child(icon))
+                                                        .child(
+                                                            div()
+                                                                .text_xs()
+                                                                .font_weight(FontWeight::BOLD)
+                                                                .text_color(if is_sel { rgb(0x60a5fa) } else { rgb(0xf1f5f9) })
+                                                                .child(title),
+                                                        ),
+                                                )
+                                                .child(
+                                                    div()
+                                                        .text_xs()
+                                                        .text_color(rgb(0x64748b))
+                                                        .child(desc),
+                                                )
+                                        })),
+                                ),
+                        )
+                        // Step 2: Account Details & Fast-Fill Presets
+                        .child(
+                            div()
+                                .flex()
+                                .flex_col()
+                                .gap(px(8.0))
+                                .child(
+                                    div()
+                                        .text_xs()
+                                        .font_weight(FontWeight::SEMIBOLD)
+                                        .text_color(rgb(0xcbd5e1))
+                                        .child("2. Account Configuration"),
+                                )
+                                .child(
+                                    div()
+                                        .flex()
+                                        .flex_col()
+                                        .gap(px(6.0))
+                                        .p(px(12.0))
+                                        .rounded_lg()
+                                        .bg(rgb(0x161c28))
+                                        .border_1()
+                                        .border_color(rgb(0x232c3f))
                                         .child(
                                             div()
-                                                .px(px(10.0))
-                                                .py(px(6.0))
-                                                .rounded_md()
-                                                .bg(rgb(0x2563eb))
-                                                .text_xs()
-                                                .text_color(rgb(0xffffff))
-                                                .child("IMAP / SMTP"),
+                                                .flex()
+                                                .flex_row()
+                                                .items_center()
+                                                .justify_between()
+                                                .child(div().text_xs().text_color(rgb(0x94a3b8)).child("Email Address:"))
+                                                .child(div().text_xs().font_weight(FontWeight::BOLD).text_color(rgb(0x38bdf8)).child(display_email.to_string())),
                                         )
                                         .child(
                                             div()
-                                                .px(px(10.0))
-                                                .py(px(6.0))
-                                                .rounded_md()
-                                                .bg(rgb(0x1e293b))
-                                                .text_xs()
-                                                .text_color(rgb(0x94a3b8))
-                                                .child("Google OAuth2"),
+                                                .flex()
+                                                .flex_row()
+                                                .items_center()
+                                                .justify_between()
+                                                .child(div().text_xs().text_color(rgb(0x94a3b8)).child("Display Name:"))
+                                                .child(div().text_xs().text_color(rgb(0xe2e8f0)).child(display_name.to_string())),
                                         )
                                         .child(
                                             div()
-                                                .px(px(10.0))
-                                                .py(px(6.0))
-                                                .rounded_md()
-                                                .bg(rgb(0x1e293b))
-                                                .text_xs()
-                                                .text_color(rgb(0x94a3b8))
-                                                .child("Fastmail JMAP"),
+                                                .flex()
+                                                .flex_row()
+                                                .items_center()
+                                                .justify_between()
+                                                .child(div().text_xs().text_color(rgb(0x94a3b8)).child("Incoming Server:"))
+                                                .child(div().text_xs().text_color(rgb(0x94a3b8)).child(incoming_info.to_string())),
                                         )
                                         .child(
                                             div()
-                                                .px(px(10.0))
-                                                .py(px(6.0))
-                                                .rounded_md()
-                                                .bg(rgb(0x1e293b))
-                                                .text_xs()
-                                                .text_color(rgb(0x94a3b8))
-                                                .child("Microsoft 365"),
+                                                .flex()
+                                                .flex_row()
+                                                .items_center()
+                                                .justify_between()
+                                                .child(div().text_xs().text_color(rgb(0x94a3b8)).child("Outgoing Server:"))
+                                                .child(div().text_xs().text_color(rgb(0x94a3b8)).child(outgoing_info.to_string())),
                                         ),
                                 ),
                         )
+                        // Preset Quick-Select Chips
+                        .child(
+                            div()
+                                .flex()
+                                .flex_col()
+                                .gap(px(4.0))
+                                .child(div().text_xs().text_color(rgb(0x64748b)).child("Quick presets:"))
+                                .child(
+                                    div()
+                                        .flex()
+                                        .flex_row()
+                                        .gap(px(6.0))
+                                        .child(
+                                            div()
+                                                .id("chip-personal")
+                                                .px(px(8.0))
+                                                .py(px(4.0))
+                                                .rounded_md()
+                                                .bg(rgb(0x1e293b))
+                                                .text_xs()
+                                                .text_color(rgb(0x94a3b8))
+                                                .cursor_pointer()
+                                                .on_click(cx.listener(move |this, _, _, cx| {
+                                                    let suffix = match this.login_wizard.provider_type {
+                                                        ProviderType::Gmail => "gmail.com",
+                                                        ProviderType::Graph => "outlook.com",
+                                                        ProviderType::Jmap => "fastmail.com",
+                                                        ProviderType::Imap => "example.com",
+                                                    };
+                                                    this.login_wizard.email = format!("personal@{}", suffix);
+                                                    this.login_wizard.name = "Personal Account".into();
+                                                    this.login_wizard.password_or_token = "secure_token_preset".into();
+                                                    cx.notify();
+                                                }))
+                                                .child("Personal"),
+                                        )
+                                        .child(
+                                            div()
+                                                .id("chip-work")
+                                                .px(px(8.0))
+                                                .py(px(4.0))
+                                                .rounded_md()
+                                                .bg(rgb(0x1e293b))
+                                                .text_xs()
+                                                .text_color(rgb(0x94a3b8))
+                                                .cursor_pointer()
+                                                .on_click(cx.listener(move |this, _, _, cx| {
+                                                    let suffix = match this.login_wizard.provider_type {
+                                                        ProviderType::Gmail => "gmail.com",
+                                                        ProviderType::Graph => "company.onmicrosoft.com",
+                                                        ProviderType::Jmap => "fastmail.fm",
+                                                        ProviderType::Imap => "corp.example.com",
+                                                    };
+                                                    this.login_wizard.email = format!("work@{}", suffix);
+                                                    this.login_wizard.name = "Work Mailbox".into();
+                                                    this.login_wizard.password_or_token = "secure_token_preset".into();
+                                                    cx.notify();
+                                                }))
+                                                .child("Work"),
+                                        )
+                                        .child(
+                                            div()
+                                                .id("chip-support")
+                                                .px(px(8.0))
+                                                .py(px(4.0))
+                                                .rounded_md()
+                                                .bg(rgb(0x1e293b))
+                                                .text_xs()
+                                                .text_color(rgb(0x94a3b8))
+                                                .cursor_pointer()
+                                                .on_click(cx.listener(move |this, _, _, cx| {
+                                                    let suffix = match this.login_wizard.provider_type {
+                                                        ProviderType::Gmail => "gmail.com",
+                                                        ProviderType::Graph => "outlook.com",
+                                                        ProviderType::Jmap => "fastmail.com",
+                                                        ProviderType::Imap => "vespetrel.org",
+                                                    };
+                                                    this.login_wizard.email = format!("team@{}", suffix);
+                                                    this.login_wizard.name = "Vespetrel Team".into();
+                                                    this.login_wizard.password_or_token = "secure_token_preset".into();
+                                                    cx.notify();
+                                                }))
+                                                .child("Team / Support"),
+                                        ),
+                                ),
+                        )
+                        // Error message if any
+                        .child(if let WizardStep::Failed(err) = &self.login_wizard.step {
+                            div()
+                                .flex()
+                                .p(px(8.0))
+                                .rounded_md()
+                                .bg(rgb(0x450a0a))
+                                .border_1()
+                                .border_color(rgb(0xef4444))
+                                .text_xs()
+                                .text_color(rgb(0xfca5a5))
+                                .child(format!("⚠️ {}", err))
+                        } else {
+                            div()
+                        })
+                        // Modal Actions Footer
                         .child(
                             div()
                                 .flex()
                                 .flex_row()
                                 .justify_end()
-                                .gap(px(8.0))
-                                .pt(px(12.0))
+                                .gap(px(10.0))
+                                .pt(px(8.0))
+                                .border_t_1()
+                                .border_color(rgb(0x1f293d))
                                 .child(
                                     div()
+                                        .id("wizard-btn-cancel")
                                         .px(px(14.0))
-                                        .py(px(6.0))
+                                        .py(px(7.0))
                                         .rounded_md()
                                         .bg(rgb(0x1e293b))
                                         .text_xs()
                                         .text_color(rgb(0xcbd5e1))
                                         .cursor_pointer()
+                                        .on_click(cx.listener(|this, _, _, cx| {
+                                            this.active_modal = ActiveModal::None;
+                                            cx.notify();
+                                        }))
                                         .child("Cancel"),
                                 )
                                 .child(
                                     div()
-                                        .px(px(16.0))
-                                        .py(px(6.0))
+                                        .id("wizard-btn-connect")
+                                        .px(px(18.0))
+                                        .py(px(7.0))
                                         .rounded_md()
                                         .bg(rgb(0x2563eb))
                                         .text_xs()
+                                        .font_weight(FontWeight::BOLD)
                                         .text_color(rgb(0xffffff))
                                         .cursor_pointer()
-                                        .child("Connect Account"),
+                                        .on_click(cx.listener(|this, _, _, cx| {
+                                            if this.login_wizard.email.trim().is_empty() {
+                                                let suffix = match this.login_wizard.provider_type {
+                                                    ProviderType::Gmail => "gmail.com",
+                                                    ProviderType::Graph => "outlook.com",
+                                                    ProviderType::Jmap => "fastmail.com",
+                                                    ProviderType::Imap => "example.com",
+                                                };
+                                                this.login_wizard.email = format!("user@{}", suffix);
+                                            }
+                                            if this.login_wizard.password_or_token.trim().is_empty() {
+                                                this.login_wizard.password_or_token = "app_token_auto".into();
+                                            }
+
+                                            match this.login_wizard.validate_and_build_account() {
+                                                Ok(acct) => {
+                                                    let acct_email = acct.email.clone();
+                                                    let acct_id = acct.id.clone();
+                                                    let p_type = acct.provider_type.clone();
+
+                                                    let default_folders = vec![
+                                                        Folder::new(&acct_id, "INBOX", "INBOX", "INBOX").with_role(FolderRole::Inbox),
+                                                        Folder::new(&acct_id, "Drafts", "Drafts", "Drafts").with_role(FolderRole::Drafts),
+                                                        Folder::new(&acct_id, "Sent", "Sent", "Sent").with_role(FolderRole::Sent),
+                                                        Folder::new(&acct_id, "Archive", "Archive", "Archive").with_role(FolderRole::Archive),
+                                                        Folder::new(&acct_id, "Trash", "Trash", "Trash").with_role(FolderRole::Trash),
+                                                    ];
+
+                                                    if let Some(pool) = &this.storage_pool {
+                                                        let pool_clone = pool.clone();
+                                                        let acct_clone = acct.clone();
+                                                        let folders_clone = default_folders.clone();
+                                                        cx.spawn(async move |_this, _cx| {
+                                                            if let Ok(conn) = pool_clone.get().await {
+                                                                let _ = conn.interact(move |c| {
+                                                                    let _ = vespetrel_storage::repo::upsert_account(c, &acct_clone);
+                                                                    for f in &folders_clone {
+                                                                        let _ = vespetrel_storage::repo::upsert_folder(c, f);
+                                                                    }
+                                                                }).await;
+                                                            }
+                                                        }).detach();
+                                                    }
+
+                                                    this.selected_folder_id = Some("INBOX".into());
+                                                    this.folders.extend(default_folders.clone());
+                                                    this.accounts.push(acct);
+                                                    this.status_message = format!("✓ Successfully connected {} ({:?})", acct_email, p_type);
+                                                    this.active_modal = ActiveModal::None;
+                                                    let remote_folders = this.folders.iter().map(|f| vespetrel_core::provider::RemoteFolder {
+                                                        remote_id: f.remote_id.clone(),
+                                                        name: f.name.clone(),
+                                                        path: f.path.clone(),
+                                                        role_hint: Some(f.role.to_string()),
+                                                        uid_validity: f.uid_validity,
+                                                        highest_mod_seq: f.highest_mod_seq,
+                                                    }).collect();
+                                                    let _ = this.sync_sender.send(SyncEvent::FolderListUpdated(remote_folders));
+                                                    cx.notify();
+                                                }
+                                                Err(err) => {
+                                                    this.login_wizard.step = WizardStep::Failed(err);
+                                                    cx.notify();
+                                                }
+                                            }
+                                        }))
+                                        .child("Connect Account 🚀"),
                                 ),
                         ),
                 )
