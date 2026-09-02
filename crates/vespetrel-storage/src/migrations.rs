@@ -296,7 +296,9 @@ pub fn run_migrations(conn: &mut Connection) -> StorageResult<()> {
                 DELETE FROM messages_fts WHERE message_id = old.id;
             END;
 
-            CREATE TRIGGER IF NOT EXISTS messages_au AFTER UPDATE ON messages BEGIN
+            CREATE TRIGGER IF NOT EXISTS messages_au AFTER UPDATE ON messages
+            WHEN old.subject != new.subject OR old.from_address != new.from_address OR old.from_name != new.from_name OR old.to_addresses != new.to_addresses OR old.body_text_preview != new.body_text_preview OR old.body_snippet != new.body_snippet
+            BEGIN
                 DELETE FROM messages_fts WHERE message_id = old.id;
                 INSERT INTO messages_fts(message_id, account_id, subject, from_address, from_name, to_addresses, body_content)
                 VALUES (new.id, new.account_id, new.subject, new.from_address, new.from_name, new.to_addresses, COALESCE(new.body_text_preview, new.body_snippet, ''));

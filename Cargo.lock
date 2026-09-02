@@ -8282,6 +8282,9 @@ dependencies = [
  "tracing",
  "uuid",
  "vespetrel-core",
+ "vespetrel-graph",
+ "vespetrel-imap",
+ "vespetrel-jmap",
  "vespetrel-storage",
 ]
 
@@ -8297,6 +8300,7 @@ dependencies = [
  "serde_json",
  "tokio",
  "tracing",
+ "url",
  "urlencoding",
  "vespetrel-core",
 ]
@@ -8319,6 +8323,7 @@ dependencies = [
  "tokio-rustls",
  "tracing",
  "vespetrel-core",
+ "webpki-roots",
 ]
 
 [[package]]
@@ -8345,6 +8350,7 @@ dependencies = [
  "lol_html",
  "mail-parser",
  "memchr",
+ "regex",
  "serde",
  "simdutf8",
  "tracing",

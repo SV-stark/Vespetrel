@@ -155,7 +155,6 @@ impl AccountWorker {
 
     async fn sync_once(&self) -> anyhow::Result<()> {
         let folders = self.provider.sync_folder_list().await?;
-        self.emit(SyncEvent::FolderListUpdated(folders.clone()));
 
         // Acquire connection from storage pool if available with 5s timeout
         let storage_conn = match &self.storage_pool {
@@ -180,24 +179,28 @@ impl AccountWorker {
             let folder_record =
                 vespetrel_core::Folder::new(&self.account_id, &rf.remote_id, &rf.name, &rf.path);
             folder_records.insert(rf.remote_id.clone(), folder_record.clone());
+        }
 
-            // Persist folder metadata to storage
-            if let Some(conn) = &storage_conn {
-                let rec = folder_record.clone();
-                let res = conn
-                    .interact(move |c| vespetrel_storage::repo::upsert_folder(c, &rec))
-                    .await;
-                match res {
-                    Ok(Ok(_)) => {}
-                    Ok(Err(db_err)) => {
-                        warn!(folder=%rf.name, error=%db_err, "failed to upsert folder in storage");
+        // Persist folder metadata to storage in a single atomic transaction
+        if let Some(conn) = &storage_conn {
+            let recs: Vec<vespetrel_core::Folder> = folder_records.values().cloned().collect();
+            let res = conn
+                .interact(move |c| -> anyhow::Result<()> {
+                    let tx = c.transaction()?;
+                    for rec in &recs {
+                        vespetrel_storage::repo::upsert_folder(&tx, rec)?;
                     }
-                    Err(interact_err) => {
-                        warn!(folder=%rf.name, error=%interact_err, "storage interact error");
-                    }
-                }
+                    tx.commit()?;
+                    Ok(())
+                })
+                .await;
+            if let Err(e) = res {
+                warn!(error=%e, "storage interact error batch upserting folders");
             }
         }
+
+        // Emit updated folder list after persisting to database
+        self.emit(SyncEvent::FolderListUpdated(folders.clone()));
 
         // Load persistent sync state for account from storage
         let mut account_sync_state = vespetrel_core::account::SyncState::default();
@@ -224,6 +227,7 @@ impl AccountWorker {
             match self.provider.sync_messages(&folder_record, state).await {
                 Ok(delta) => {
                     let mut summaries = Vec::new();
+                    let mut msgs_to_store = Vec::new();
 
                     for sync_msg in &delta.inserted {
                         let raw_bytes_opt = if let Some(ref raw_bytes) = sync_msg.raw_rfc822 {
@@ -309,11 +313,12 @@ impl AccountWorker {
 
                         // Persist raw RFC822 bytes into BlobStore non-blockingly via spawn_blocking
                         if let Some(store) = self.blob_store.clone() {
-                            if let Some(raw) = sync_msg.raw_rfc822.clone() {
+                            if let Some(ref raw) = raw_bytes_opt {
                                 if !raw.is_empty() {
                                     let msg_id = msg.id.clone();
+                                    let raw_to_write = raw.clone();
                                     let res = tokio::task::spawn_blocking(move || {
-                                        store.write(&msg_id, &raw)
+                                        store.write(&msg_id, &raw_to_write)
                                     })
                                     .await;
                                     if let Ok(Err(e)) = res {
@@ -324,23 +329,25 @@ impl AccountWorker {
                         }
 
                         summaries.push(msg.summary());
+                        msgs_to_store.push(msg);
+                    }
 
-                        // Persist synced message to storage
-                        if let Some(conn) = &storage_conn {
-                            let msg_to_store = msg.clone();
+                    // Batch persist synced messages to storage in a single atomic transaction
+                    if let Some(conn) = &storage_conn {
+                        if !msgs_to_store.is_empty() {
+                            let msgs_batch = msgs_to_store.clone();
                             let res = conn
-                                .interact(move |c| {
-                                    vespetrel_storage::repo::insert_message(c, &msg_to_store)
+                                .interact(move |c| -> anyhow::Result<()> {
+                                    let tx = c.transaction()?;
+                                    for m in &msgs_batch {
+                                        vespetrel_storage::repo::insert_message(&tx, m)?;
+                                    }
+                                    tx.commit()?;
+                                    Ok(())
                                 })
                                 .await;
-                            match res {
-                                Ok(Ok(_)) => {}
-                                Ok(Err(db_err)) => {
-                                    error!(msg_id=%msg.id, error=%db_err, "failed to store message in DB");
-                                }
-                                Err(interact_err) => {
-                                    error!(msg_id=%msg.id, error=%interact_err, "storage interact error");
-                                }
+                            if let Err(e) = res {
+                                error!(error=%e, "storage interact error batch inserting messages");
                             }
                         }
                     }
@@ -350,32 +357,43 @@ impl AccountWorker {
                     }
 
                     if !delta.deleted_uids.is_empty() {
-                        let deleted_ids =
+                        let deleted_ids: Vec<String> =
                             delta.deleted_uids.iter().map(|u| u.to_string()).collect();
-                        self.emit(SyncEvent::MessagesDeleted(deleted_ids));
-                    }
-
-                    // Persist updated delta tokens and folder modseqs back to accounts table
-                    if delta.new_sync_state != vespetrel_core::account::SyncState::default() {
-                        account_sync_state = delta.new_sync_state.clone();
-                    }
-                    if let Some(conn) = &storage_conn {
-                        let acct_id = self.account_id.clone();
-                        let sync_state_to_save = account_sync_state.clone();
-                        let res = conn
-                            .interact(move |c| {
-                                if let Ok(Some(mut acct)) =
-                                    vespetrel_storage::repo::get_account(c, &acct_id)
-                                {
-                                    acct.sync_state = sync_state_to_save;
-                                    if let Err(e) = vespetrel_storage::repo::upsert_account(c, &acct) {
-                                        error!(account_id=%acct.id, error=%e, "failed to update account sync state in DB");
-                                    }
+                        if let Some(store) = self.blob_store.clone() {
+                            let ids_to_delete = deleted_ids.clone();
+                            let _ = tokio::task::spawn_blocking(move || {
+                                for id in ids_to_delete {
+                                    let _ = store.delete(&id);
                                 }
                             })
                             .await;
-                        if let Err(e) = res {
-                            error!(account_id=%self.account_id, error=%e, "storage interact error saving sync state");
+                        }
+                        self.emit(SyncEvent::MessagesDeleted(deleted_ids));
+                    }
+
+                    // Persist updated delta tokens and folder modseqs back to accounts table only when changed
+                    if delta.new_sync_state != vespetrel_core::account::SyncState::default()
+                        && delta.new_sync_state != account_sync_state
+                    {
+                        account_sync_state = delta.new_sync_state.clone();
+                        if let Some(conn) = &storage_conn {
+                            let acct_id = self.account_id.clone();
+                            let sync_state_to_save = account_sync_state.clone();
+                            let res = conn
+                                .interact(move |c| {
+                                    if let Ok(Some(mut acct)) =
+                                        vespetrel_storage::repo::get_account(c, &acct_id)
+                                    {
+                                        acct.sync_state = sync_state_to_save;
+                                        if let Err(e) = vespetrel_storage::repo::upsert_account(c, &acct) {
+                                            error!(account_id=%acct.id, error=%e, "failed to update account sync state in DB");
+                                        }
+                                    }
+                                })
+                                .await;
+                            if let Err(e) = res {
+                                error!(account_id=%self.account_id, error=%e, "storage interact error saving sync state");
+                            }
                         }
                     }
                 }

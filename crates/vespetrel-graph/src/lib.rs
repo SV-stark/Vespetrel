@@ -266,8 +266,19 @@ impl MailProvider for GraphProvider {
             let next_token = json
                 .get("@odata.deltaLink")
                 .and_then(|v| v.as_str())
-                .and_then(|link| link.split("$deltatoken=").nth(1))
-                .map(|s| s.to_string())
+                .and_then(|link| {
+                    if let Ok(parsed_url) = url::Url::parse(link) {
+                        parsed_url
+                            .query_pairs()
+                            .find(|(k, _)| k == "$deltatoken" || k == "deltatoken")
+                            .map(|(_, v)| v.into_owned())
+                    } else {
+                        link.split("$deltatoken=")
+                            .nth(1)
+                            .and_then(|s| s.split('&').next())
+                            .map(|s| s.to_string())
+                    }
+                })
                 .or(state.graph_delta_token.clone());
 
             let mut delta = SyncDelta {
@@ -417,11 +428,26 @@ impl MailProvider for GraphProvider {
             } else {
                 None
             };
+            let flag_status = if add.contains(&Flag::Flagged) {
+                Some("flagged")
+            } else if remove.contains(&Flag::Flagged) {
+                Some("notFlagged")
+            } else {
+                None
+            };
 
+            let mut patch_map = serde_json::Map::new();
             if let Some(read_val) = is_read {
+                patch_map.insert("isRead".into(), serde_json::Value::Bool(read_val));
+            }
+            if let Some(status) = flag_status {
+                patch_map.insert("flag".into(), serde_json::json!({ "flagStatus": status }));
+            }
+
+            if !patch_map.is_empty() {
+                let body = serde_json::Value::Object(patch_map);
                 for uid in remote_ids {
                     let url = format!("https://graph.microsoft.com/v1.0/me/messages/{uid}");
-                    let body = serde_json::json!({ "isRead": read_val });
                     let resp = self
                         .http
                         .patch(&url)

@@ -128,6 +128,14 @@ impl SmtpClient {
             &self.config.dkim_selector,
             &self.config.dkim_key,
         ) {
+            if domain.is_empty()
+                || selector.is_empty()
+                || selector
+                    .chars()
+                    .any(|c| !c.is_alphanumeric() && c != '-' && c != '_')
+            {
+                anyhow::bail!("invalid DKIM selector or domain: syntax check failed");
+            }
             use base64::Engine;
             use sha2::Digest;
             let body_content = msg.body_html.as_deref().unwrap_or(&msg.body_text);
@@ -135,8 +143,14 @@ impl SmtpClient {
             hasher.update(body_content.as_bytes());
             let bh = base64::engine::general_purpose::STANDARD.encode(hasher.finalize());
 
+            let signed_headers = if msg.cc.is_empty() {
+                "from:to:subject:date"
+            } else {
+                "from:to:cc:subject:date"
+            };
+
             let sig_input = format!(
-                "v=1; a=rsa-sha256; d={domain}; s={selector}; c=relaxed/relaxed; q=dns/txt; h=from:to:subject:date; bh={bh}; b="
+                "v=1; a=rsa-sha256; d={domain}; s={selector}; c=relaxed/relaxed; q=dns/txt; h={signed_headers}; bh={bh}; b="
             );
 
             // RSA PKCS#1 v1.5 signing via ring

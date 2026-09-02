@@ -125,12 +125,20 @@ impl OAuth2Engine {
 
             let request_str = String::from_utf8_lossy(&request_bytes);
 
-            // Validate Host header to prevent DNS rebinding / host injection
+            // Validate Host header strictly to prevent DNS rebinding / host injection
             let host_header = request_str
                 .lines()
-                .find(|l| l.to_lowercase().starts_with("host:"))
+                .find(|l| l.to_ascii_lowercase().starts_with("host:"))
                 .and_then(|l| l.split_once(':').map(|(_, v)| v.trim()))
                 .unwrap_or("");
+
+            if host_header.is_empty()
+                || host_header.chars().any(|c| {
+                    c.is_whitespace() || c.is_control() || c == '\0' || c == '\t' || c == '%'
+                })
+            {
+                anyhow::bail!("OAuth2 invalid Host header: security check failed");
+            }
 
             let host_only = host_header.split(':').next().unwrap_or("").trim();
             if host_only != "127.0.0.1" && host_only != "localhost" {
@@ -207,9 +215,10 @@ impl OAuth2Engine {
             .build()?;
 
         let zero_verifier = Zeroizing::new(pkce_verifier);
+        let zero_code = Zeroizing::new(code);
         let mut params = std::collections::HashMap::new();
         params.insert("client_id", self.config.client_id.as_str());
-        params.insert("code", code.as_str());
+        params.insert("code", zero_code.as_str());
         params.insert("redirect_uri", self.config.redirect_uri.as_str());
         params.insert("grant_type", "authorization_code");
         params.insert("code_verifier", zero_verifier.as_str());

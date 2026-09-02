@@ -43,6 +43,7 @@ SetCompressor /SOLID lzma
 !insertmacro MUI_LANGUAGE "English"
 
 Section "MainSection" SEC01
+    SetShellVarContext current
     SetOutPath "$INSTDIR"
     SetOverwrite on
     File "staging\vespetrel\${PRODUCT_EXE}"
@@ -74,6 +75,7 @@ Section "MainSection" SEC01
 SectionEnd
 
 Section "Uninstall"
+    SetShellVarContext current
     SetOutPath "$TEMP"
 
     Delete "$DESKTOP\${PRODUCT_NAME}.lnk"

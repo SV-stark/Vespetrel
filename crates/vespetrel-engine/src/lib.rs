@@ -14,7 +14,7 @@ pub mod snooze;
 pub mod spam;
 pub mod worker;
 
-pub use coordinator::SyncCoordinator;
+pub use coordinator::{SyncCoordinator, make_provider};
 pub use event_bus::{EventBus, EventReceiver, EventSender};
 pub use feeds::{FeedItem, FeedSubscription, parse_feed_xml};
 pub use filter::{

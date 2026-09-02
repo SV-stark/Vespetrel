@@ -58,8 +58,13 @@ impl JmapProvider {
         })
     }
 
-    /// Build JMAP Email/query and Email/get request for a specific mailbox
-    pub fn build_email_query_request(&self, mailbox_id: &str, limit: usize) -> serde_json::Value {
+    /// Build JMAP Email/query and Email/get request for a specific mailbox with pagination
+    pub fn build_email_query_request(
+        &self,
+        mailbox_id: &str,
+        position: usize,
+        limit: usize,
+    ) -> serde_json::Value {
         serde_json::json!({
             "using": ["urn:ietf:params:jmap:core", "urn:ietf:params:jmap:mail"],
             "methodCalls": [
@@ -67,6 +72,7 @@ impl JmapProvider {
                     "accountId": self.config.username,
                     "filter": { "inMailbox": mailbox_id },
                     "sort": [{ "property": "receivedAt", "isAscending": false }],
+                    "position": position,
                     "limit": limit
                 }, "0"],
                 ["Email/get", {
@@ -227,44 +233,76 @@ impl MailProvider for JmapProvider {
     ) -> Result<SyncDelta, vespetrel_core::provider::ProviderError> {
         debug!(folder=%folder.name, state=?state.jmap_state, "JMAP sync_messages");
         if self.config.base_url.starts_with("http") && !self.config.access_token.is_empty() {
-            let req = self.build_email_query_request(&folder.remote_id, 50);
-            let resp = self
-                .http
-                .post(&self.config.base_url)
-                .bearer_auth(&self.config.access_token)
-                .json(&req)
-                .send()
-                .await
-                .map_err(|e| vespetrel_core::provider::ProviderError::Protocol(e.to_string()))?;
-            let json = resp
-                .error_for_status()
-                .map_err(|e| vespetrel_core::provider::ProviderError::Protocol(e.to_string()))?
-                .json::<serde_json::Value>()
-                .await
-                .map_err(|e| vespetrel_core::provider::ProviderError::Protocol(e.to_string()))?;
             let mut delta = SyncDelta::default();
-            if let Some(list) = json
-                .pointer("/methodResponses/1/1/list")
-                .and_then(|v| v.as_array())
-            {
-                for (idx, item) in list.iter().enumerate() {
-                    let id = item.get("id").and_then(|v| v.as_str()).unwrap_or_default();
-                    let subject = item
-                        .get("subject")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("No Subject");
-                    let from = item
-                        .pointer("/from/0/email")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("sender@jmap.example");
-                    let raw = format!("From: {from}\r\nSubject: {subject}\r\nMessage-ID: <{id}@jmap.example>\r\n\r\nJMAP Message Content").into_bytes();
-                    delta.inserted.push(vespetrel_core::provider::SyncMessage {
-                        remote_uid: (idx + 1) as u32,
-                        raw_rfc822: Some(raw),
-                        flags: vec![],
-                        mod_seq: None,
-                    });
+            let mut position = 0;
+            let page_size = 50;
+
+            loop {
+                let req = self.build_email_query_request(&folder.remote_id, position, page_size);
+                let resp = self
+                    .http
+                    .post(&self.config.base_url)
+                    .bearer_auth(&self.config.access_token)
+                    .json(&req)
+                    .send()
+                    .await
+                    .map_err(|e| {
+                        vespetrel_core::provider::ProviderError::Protocol(e.to_string())
+                    })?;
+                let json = resp
+                    .error_for_status()
+                    .map_err(|e| vespetrel_core::provider::ProviderError::Protocol(e.to_string()))?
+                    .json::<serde_json::Value>()
+                    .await
+                    .map_err(|e| {
+                        vespetrel_core::provider::ProviderError::Protocol(e.to_string())
+                    })?;
+
+                let list = json
+                    .pointer("/methodResponses/1/1/list")
+                    .and_then(|v| v.as_array());
+
+                let count = if let Some(items) = list {
+                    let len = items.len();
+                    for (idx, item) in items.iter().enumerate() {
+                        let id = item.get("id").and_then(|v| v.as_str()).unwrap_or_default();
+                        let subject = item
+                            .get("subject")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("No Subject");
+                        let from = item
+                            .pointer("/from/0/email")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("sender@jmap.example");
+                        let raw = format!("From: {from}\r\nSubject: {subject}\r\nMessage-ID: <{id}@jmap.example>\r\n\r\nJMAP Message Content").into_bytes();
+                        let mut flags = Vec::new();
+                        if let Some(keywords) = item.get("keywords").and_then(|k| k.as_object()) {
+                            if keywords.contains_key("$seen") {
+                                flags.push(vespetrel_core::Flag::Seen);
+                            }
+                            if keywords.contains_key("$flagged") {
+                                flags.push(vespetrel_core::Flag::Flagged);
+                            }
+                            if keywords.contains_key("$draft") {
+                                flags.push(vespetrel_core::Flag::Draft);
+                            }
+                        }
+                        delta.inserted.push(vespetrel_core::provider::SyncMessage {
+                            remote_uid: (position + idx + 1) as u32,
+                            raw_rfc822: Some(raw),
+                            flags,
+                            mod_seq: None,
+                        });
+                    }
+                    len
+                } else {
+                    0
+                };
+
+                if count < page_size {
+                    break;
                 }
+                position += count;
             }
             return Ok(delta);
         }

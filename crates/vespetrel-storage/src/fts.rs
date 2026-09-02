@@ -8,11 +8,23 @@ pub struct SearchResult {
     pub rank: f64,
 }
 
-/// Escape user input for SQLite FTS5 MATCH queries
+/// Escape user input for SQLite FTS5 MATCH queries, preserving field prefixes (from:, to:, subject:, body:)
 pub fn escape_fts5_query(raw: &str) -> String {
     let mut terms = Vec::new();
     for word in raw.split_whitespace() {
-        let clean: String = word
+        let (col_prefix, term_part) = if let Some((col, val)) = word.split_once(':') {
+            match col.to_ascii_lowercase().as_str() {
+                "from" => (Some("from_address:"), val),
+                "to" => (Some("to_addresses:"), val),
+                "subject" => (Some("subject:"), val),
+                "body" => (Some("body_content:"), val),
+                _ => (None, word),
+            }
+        } else {
+            (None, word)
+        };
+
+        let clean: String = term_part
             .chars()
             .filter(|c| {
                 c.is_alphanumeric()
@@ -28,8 +40,11 @@ pub fn escape_fts5_query(raw: &str) -> String {
         if !clean.is_empty() {
             // Double embedded quotes to prevent FTS5 injection: " -> ""
             let escaped = clean.replace('"', "\"\"");
-            // Enclose each token in double quotes to prevent FTS5 keyword collisions
-            terms.push(format!("\"{escaped}\""));
+            if let Some(prefix) = col_prefix {
+                terms.push(format!("{prefix}\"{escaped}\""));
+            } else {
+                terms.push(format!("\"{escaped}\""));
+            }
         }
     }
     terms.join(" ")
@@ -50,7 +65,8 @@ pub fn search_messages(
     let clamped_limit = limit.clamp(1, 200) as i64;
 
     let sql = r#"
-        SELECT message_id, subject, snippet(messages_fts, 6, '<b>', '</b>', '...', 20) as snippet, rank
+        SELECT message_id, subject, snippet(messages_fts, 6, '<b>', '</b>', '...', 20) as snippet,
+               bm25(messages_fts, 1.0, 1.0, 10.0, 5.0, 5.0, 3.0, 1.0) as rank
         FROM messages_fts
         WHERE messages_fts MATCH ?1 AND (?2 IS NULL OR account_id = ?2)
         ORDER BY rank
@@ -88,6 +104,10 @@ mod tests {
         assert_eq!(
             escape_fts5_query("\"test\" OR C++"),
             "\"\"\"test\"\"\" \"OR\" \"C++\""
+        );
+        assert_eq!(
+            escape_fts5_query("from:alice@example.com"),
+            "from_address:\"alice@example.com\""
         );
         assert_eq!(escape_fts5_query("   "), "");
     }

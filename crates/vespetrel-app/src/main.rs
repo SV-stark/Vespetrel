@@ -129,10 +129,22 @@ async fn main() -> anyhow::Result<()> {
         .join("blobs");
     let blob_store = std::sync::Arc::new(vespetrel_storage::blob::BlobStore::new(blob_dir));
 
-    // Initialize sync coordinator
+    // Initialize sync coordinator and spawn workers for all configured accounts
     let (mut coordinator, mut rx) = vespetrel_engine::SyncCoordinator::create();
     if let Some(ref pool) = storage_pool {
         coordinator = coordinator.with_storage_pool(pool.clone());
+        if let Ok(conn) = pool.get().await {
+            if let Ok(Ok(accounts)) = conn
+                .interact(|c| vespetrel_storage::repo::list_accounts(c))
+                .await
+            {
+                for acct in &accounts {
+                    let provider = vespetrel_engine::make_provider(acct);
+                    coordinator.spawn_worker(&acct.id, provider);
+                    tracing::info!(account_id=%acct.id, email=%acct.email, "spawned sync worker for account");
+                }
+            }
+        }
     }
     coordinator = coordinator.with_blob_store(blob_store);
 
@@ -350,16 +362,20 @@ async fn main() -> anyhow::Result<()> {
                             }
                             "6" | "sync" => {
                                 println!("🔄 Triggering IMAP/JMAP/EWS sync engine...");
-                                let sender = coordinator.event_sender();
-                                tokio::spawn(async move {
-                                    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
-                                    let _ = sender.send(SyncEvent::FolderListUpdated(vec![]));
-                                });
+                                if let Some(ref pool) = storage_pool {
+                                    if let Ok(conn) = pool.get().await {
+                                        if let Ok(Ok(accounts)) = conn.interact(|c| vespetrel_storage::repo::list_accounts(c)).await {
+                                            for acct in &accounts {
+                                                coordinator.trigger_sync(&acct.id);
+                                            }
+                                        }
+                                    }
+                                }
                             }
                             "7" | "settings" => {
                                 println!("\n⚙️  Vespetrel Configuration:");
                                 println!("  Storage Pool  : SQLite WAL mode, memory cache 64MB");
-                                println!("  FTS5 Search   : Enabled (porter stemmer, unicode61)");
+                                println!("  FTS5 Search   : Enabled (unicode61 tokenizer, BM25 rank)");
                                 println!("  Keyring Store : Windows Native Credential Manager");
                                 println!("  Sanitizer     : ammonia + lol_html (CSS & tracking pixel filter active)\n");
                             }

@@ -182,3 +182,30 @@ impl Drop for SyncCoordinator {
         self.stop_all();
     }
 }
+
+/// Factory function to instantiate the concrete MailProvider implementation for an account.
+pub fn make_provider(account: &vespetrel_core::Account) -> Arc<dyn MailProvider> {
+    match account.provider_type {
+        vespetrel_core::ProviderType::Imap => {
+            let domain = account.email.split('@').nth(1).unwrap_or("localhost");
+            let host = format!("imap.{domain}");
+            let config = vespetrel_imap::ImapConfig::new(host, 993, &account.email, "");
+            Arc::new(vespetrel_imap::ImapProvider::new(config))
+        }
+        vespetrel_core::ProviderType::Gmail => {
+            let config = vespetrel_imap::ImapConfig::new("imap.gmail.com", 993, &account.email, "")
+                .with_xoauth2();
+            Arc::new(vespetrel_imap::ImapProvider::new(config))
+        }
+        vespetrel_core::ProviderType::Jmap => {
+            let domain = account.email.split('@').nth(1).unwrap_or("localhost");
+            let base_url = format!("https://{domain}/jmap");
+            let config = vespetrel_jmap::JmapConfig::new(base_url, &account.email, "");
+            Arc::new(vespetrel_jmap::JmapProvider::new(config))
+        }
+        vespetrel_core::ProviderType::Graph => {
+            let config = vespetrel_graph::GraphConfig::new("");
+            Arc::new(vespetrel_graph::GraphProvider::new(config))
+        }
+    }
+}

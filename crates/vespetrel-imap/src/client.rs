@@ -115,7 +115,8 @@ impl ImapConnection {
                 Ok(Ok(tcp_stream)) => {
                     let mut stream = if self.config.use_tls || self.config.port == 993 {
                         debug!(addr=%addr, "performing TLS handshake for IMAP connection");
-                        let root_store = rustls::RootCertStore::empty();
+                        let mut root_store = rustls::RootCertStore::empty();
+                        root_store.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
                         let client_config = rustls::ClientConfig::builder()
                             .with_root_certificates(root_store)
                             .with_no_client_auth();
@@ -224,11 +225,12 @@ impl ImapConnection {
                         Ok(Ok(n)) if n > 0 => {
                             accumulated.extend_from_slice(&chunk[..n]);
 
-                            // Literal {N}\r\n boundary detection
+                            // Literal {N}\r\n, ~{N}\r\n, {N+}\r\n boundary detection (RFC 3501 & RFC 7888 LITERAL+)
                             let text = String::from_utf8_lossy(&accumulated);
                             if let Some(lit_pos) = text.find('{') {
                                 if let Some(close_brace) = text[lit_pos..].find("}\r\n") {
-                                    let size_str = &text[lit_pos + 1..lit_pos + close_brace];
+                                    let raw_size = &text[lit_pos + 1..lit_pos + close_brace];
+                                    let size_str = raw_size.trim_matches(['+', '~']);
                                     if let Ok(expected_lit_len) = size_str.parse::<usize>() {
                                         let lit_start = lit_pos + close_brace + 3;
                                         let lit_read = accumulated.len().saturating_sub(lit_start);
@@ -237,7 +239,7 @@ impl ImapConnection {
                                             let mut lit_buf = vec![0u8; remaining.min(65536)];
                                             while remaining > 0 {
                                                 if let Ok(Ok(rn)) = tokio::time::timeout(
-                                                    std::time::Duration::from_secs(3),
+                                                    std::time::Duration::from_secs(5),
                                                     stream.read(&mut lit_buf),
                                                 )
                                                 .await
@@ -452,7 +454,7 @@ impl ImapConnection {
 
     pub fn cmd_select(&self, mailbox: &str) -> String {
         let clean = mailbox
-            .replace(['\r', '\n'], "")
+            .replace(['\r', '\n', '*', '%'], "")
             .replace('\\', "\\\\")
             .replace('"', "\\\"");
         format!("SELECT \"{clean}\"")

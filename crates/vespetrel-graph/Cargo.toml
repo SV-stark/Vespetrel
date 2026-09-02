@@ -19,4 +19,5 @@ serde_json = { workspace = true }
 reqwest = { workspace = true }
 chrono = { workspace = true }
 anyhow = { workspace = true }
+url = { workspace = true }
 urlencoding = { workspace = true }

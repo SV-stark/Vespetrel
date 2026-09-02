@@ -8,6 +8,9 @@ description = "Tokio sync coordinator and account worker actors"
 [dependencies]
 vespetrel-core = { path = "../vespetrel-core" }
 vespetrel-storage = { path = "../vespetrel-storage" }
+vespetrel-imap = { path = "../vespetrel-imap" }
+vespetrel-jmap = { path = "../vespetrel-jmap" }
+vespetrel-graph = { path = "../vespetrel-graph" }
 tokio = { workspace = true }
 async-trait = { workspace = true }
 futures = { workspace = true }

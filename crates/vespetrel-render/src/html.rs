@@ -123,9 +123,7 @@ fn rewrite_html(input: &str, opts: &RewriteOptions) -> anyhow::Result<String> {
 fn ammonia_clean(html: &str) -> String {
     let mut builder = Builder::default();
     builder
-        .add_tags([
-            "video", "audio", "source", "table", "thead", "tbody", "tr", "th", "td",
-        ])
+        .add_tags(["table", "thead", "tbody", "tr", "th", "td"])
         .link_rel(Some("noopener noreferrer"))
         .add_generic_attributes([
             "data-blocked-src",
@@ -134,7 +132,12 @@ fn ammonia_clean(html: &str) -> String {
         ])
         .add_url_schemes(["blob", "cid"]);
 
-    builder.clean(html).to_string()
+    let cleaned = builder.clean(html).to_string();
+    if let Ok(re) = regex::Regex::new(r#"(?i)url\s*\(\s*['"]?https?://[^'")]*['"]?\s*\)"#) {
+        re.replace_all(&cleaned, "none").to_string()
+    } else {
+        cleaned
+    }
 }
 
 /// Wrap sanitized email HTML into a full sandboxed HTML document with Content Security Policy (CSP)
@@ -148,7 +151,7 @@ pub fn render_sandboxed_document(clean_body: &str, dark_mode: bool) -> String {
 <html>
 <head>
     <meta charset="utf-8">
-    <meta http-equiv="Content-Security-Policy" content="default-src 'none'; img-src 'self' blob: data: https:; style-src 'unsafe-inline'; font-src 'self' data:;">
+    <meta http-equiv="Content-Security-Policy" content="default-src 'none'; img-src 'self' blob: data:; style-src 'unsafe-inline'; font-src 'self' data:; form-action 'none'; base-uri 'none';">
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <style>
         body {{

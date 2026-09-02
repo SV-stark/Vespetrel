@@ -13,6 +13,9 @@ pub const PRAGMAS: &[&str] = &[
     "PRAGMA busy_timeout = 5000",
     "PRAGMA cache_size = -64000",
     "PRAGMA temp_store = MEMORY",
+    "PRAGMA journal_size_limit = 67108864",
+    "PRAGMA wal_autocheckpoint = 1000",
+    "PRAGMA secure_delete = FAST",
 ];
 
 pub type StoragePool = Pool;
@@ -26,11 +29,15 @@ pub fn create_pool_with_key(
     db_path: &str,
     encryption_key: Option<&str>,
 ) -> crate::StorageResult<StoragePool> {
-    let pool_size = std::env::var("VESPETREL_POOL_SIZE")
-        .ok()
-        .and_then(|s| s.parse::<usize>().ok())
-        .unwrap_or(8)
-        .clamp(1, 64);
+    let pool_size = if db_path == ":memory:" {
+        1
+    } else {
+        std::env::var("VESPETREL_POOL_SIZE")
+            .ok()
+            .and_then(|s| s.parse::<usize>().ok())
+            .unwrap_or(8)
+            .clamp(1, 64)
+    };
     let key_owned = encryption_key.map(|s| Zeroizing::new(s.to_string()));
     let mut cfg = PoolConfig::new(db_path);
     cfg.pool = Some(deadpool_sqlite::PoolConfig::new(pool_size));
