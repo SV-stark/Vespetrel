@@ -18,6 +18,9 @@ members = [
 version = "0.1.0"
 edition = "2024"
 license = "MIT OR Apache-2.0"
+repository = "https://github.com/SV-stark/Vespetrel"
+homepage = "https://github.com/SV-stark/Vespetrel"
+authors = ["Suyash Stark <suyash@vespetrel.org>"]
 
 [workspace.dependencies]
 # Async & Runtime
@@ -26,6 +29,18 @@ async-trait = "0.1"
 futures = "0.3"
 anyhow = "1.0"
 gpui-kit = "0.6.0"
+
+# Internal Workspace Crates
+vespetrel-core = { path = "crates/vespetrel-core", version = "0.1.0" }
+vespetrel-storage = { path = "crates/vespetrel-storage", version = "0.1.0" }
+vespetrel-engine = { path = "crates/vespetrel-engine", version = "0.1.0" }
+vespetrel-imap = { path = "crates/vespetrel-imap", version = "0.1.0" }
+vespetrel-jmap = { path = "crates/vespetrel-jmap", version = "0.1.0" }
+vespetrel-graph = { path = "crates/vespetrel-graph", version = "0.1.0" }
+vespetrel-smtp = { path = "crates/vespetrel-smtp", version = "0.1.0" }
+vespetrel-dav = { path = "crates/vespetrel-dav", version = "0.1.0" }
+vespetrel-crypto = { path = "crates/vespetrel-crypto", version = "0.1.0" }
+vespetrel-render = { path = "crates/vespetrel-render", version = "0.1.0" }
 
 # Database & Storage
 rusqlite = { version = "0.40", features = ["bundled", "chrono", "serde_json"] }

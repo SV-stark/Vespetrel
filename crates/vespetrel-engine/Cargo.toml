@@ -3,15 +3,17 @@ name = "vespetrel-engine"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
+readme = "README.md"
 description = "Tokio sync coordinator and account worker actors"
 
 [dependencies]
-vespetrel-core = { path = "../vespetrel-core" }
-vespetrel-storage = { path = "../vespetrel-storage" }
-vespetrel-crypto = { path = "../vespetrel-crypto" }
-vespetrel-imap = { path = "../vespetrel-imap" }
-vespetrel-jmap = { path = "../vespetrel-jmap" }
-vespetrel-graph = { path = "../vespetrel-graph" }
+vespetrel-core = { workspace = true }
+vespetrel-storage = { workspace = true }
+vespetrel-crypto = { workspace = true }
+vespetrel-imap = { workspace = true }
+vespetrel-jmap = { workspace = true }
+vespetrel-graph = { workspace = true }
 tokio = { workspace = true }
 async-trait = { workspace = true }
 futures = { workspace = true }

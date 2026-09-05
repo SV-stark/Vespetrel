@@ -3,6 +3,8 @@ name = "vespetrel-dav"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
+readme = "README.md"
 description = "CalDAV & CardDAV sync via libdav, icalendar, vcard4"
 
 [features]
@@ -10,7 +12,7 @@ default = []
 mock = []
 
 [dependencies]
-vespetrel-core = { path = "../vespetrel-core" }
+vespetrel-core = { workspace = true }
 tokio = { workspace = true }
 tracing = { workspace = true }
 serde = { workspace = true }

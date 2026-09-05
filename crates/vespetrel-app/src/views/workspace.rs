@@ -34,10 +34,52 @@ impl WorkspaceView {
     }
 }
 
-// Real GPUI impl (enable when gpui dep is present):
-// #[cfg(feature = "gpui")]
-// mod gpui_impl {
-//     use super::*;
-//     use gpui::*;
-//     // impl Render for WorkspaceView { ... }
-// }
+#[cfg(feature = "gpui")]
+mod gpui_impl {
+    use super::*;
+    use gpui_kit::component::resizable::h_resizable;
+    use gpui_kit::gpui::*;
+
+    impl Render for WorkspaceView {
+        fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+            h_resizable("workspace-panels")
+                .child(
+                    div()
+                        .w(px(220.0))
+                        .h_full()
+                        .child("Navigation Pane")
+                        .into_any_element(),
+                )
+                .child(
+                    div()
+                        .w(px(350.0))
+                        .h_full()
+                        .child("Message List")
+                        .into_any_element(),
+                )
+                .child(
+                    div()
+                        .flex_1()
+                        .h_full()
+                        .child("Message Reader")
+                        .into_any_element(),
+                )
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_workspace_view_panes_and_description() {
+        let state = AppState::new();
+        let mut ws = WorkspaceView::new(state);
+        assert_eq!(ws.panes, [0.22, 0.38, 0.40]);
+        ws.set_panes([0.20, 0.40, 0.40]);
+        assert_eq!(ws.panes, [0.20, 0.40, 0.40]);
+        let desc = ws.description();
+        assert!(desc.contains("Workspace left=20% center=40% right=40%"));
+    }
+}

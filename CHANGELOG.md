@@ -90,6 +90,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Filename sanitization protecting against directory traversal attacks.
   - Single-click attachment downloading to the user's `Downloads` folder.
   - Compose tray attachment loading with per-file removal button (`✕`).
+- **Modern `gpui-kit 0.6.0` UI Component Suite**:
+  - Application top header encapsulated in `TitleBar::new()` and bottom workspace status in `StatusBar::new()`.
+  - Main navigation and settings view converted to `TabBar` and `Tab` elements.
+  - Three-pane email workspace powered by `h_resizable` with dynamic split dividers.
+  - Message reader view powered by `v_resizable` cleanly separating header and security details from scrollable content.
+  - Message list virtualized scrolling via `v_virtual_list` and `MessageListView::virtual_item_sizes` for high-performance 60fps scrolling across massive inboxes.
+  - Folder tree integration using `NavigationTree::folder_icon` and `NavigationTree::sorted_folders`.
+  - Modal and overlay migrations:
+    - `AddAccount`: `Dialog` with `Form::vertical()` and structured `Field` inputs.
+    - `Compose`: Slide-over `Sheet` with form fields and autocomplete contact chips.
+    - `CommandPalette`: `Dialog` driving `Command` and `CommandItem` search.
+    - Header quick info `Popover` with keyboard shortcut details.
+  - Native system desktop notifications dispatched through `WindowExt::push_notification` with `Notification::error` and `Notification::success`.
+  - Comprehensive theme token styling adopting `cx.theme()` tokens (`background`, `foreground`, `border`) with `ActiveTheme` and `Sizable` traits.
 
 ### Fixed
 - **IMAP Connection Error Surfacing & Mock Handling**:
@@ -97,10 +111,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Ensured live server connections (Gmail, Outlook, Yahoo, custom IMAP) propagate genuine network, TLS handshake, and timeout errors instead of silently returning disconnected stream states.
   - Added domain-aware `is_mock()` checking for test/demo domains (`example.com`, `imap.example.com`, `.example`, `.invalid`, `.test`, `localhost`, `127.0.0.1`), allowing seamless offline testing and preset exploration without runtime panics.
   - Persisted user-specified `server_host` and `server_port` in `AuthConfig` during setup wizard completion, ensuring custom host/port values are respected by the engine coordinator.
+- **Login Wizard Autodiscover Domain Matching**:
+  - Fixed fallback host handling in domain autodiscovery when unrecognized domains are provided, ensuring valid default host/port configuration.
 
 ### Changed
 - **Migrated UI Stack to `gpui-kit 0.6.0`**:
   - Replaced raw git `gpui` dependency with crates.io `gpui-kit`, utilizing standard component layers (`gpui_kit::component::Root`, `gpui_kit::init`, `gpui_kit::component::input`).
   - Installed `aws-lc-rs` default crypto provider to eliminate dual-crypto-provider ambiguity on Windows.
+- **Dependency Updates**:
+  - Ran `cargo update` upgrading 36 dependencies to their latest compatible versions.
 - **Code Style & Formatting**:
   - Ran `cargo fmt --all` across all 11 workspace crates.
+

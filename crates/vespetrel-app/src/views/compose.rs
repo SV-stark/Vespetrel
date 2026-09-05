@@ -137,6 +137,52 @@ impl ComposeState {
         }
         Ok(())
     }
+
+    pub fn validate_compose_fields(
+        &self,
+        to_str: &str,
+        subj_str: &str,
+        body_str: &str,
+    ) -> FormValidationErrors {
+        let recipient_error = if to_str.trim().is_empty() && self.to_chips.is_empty() {
+            Some("At least one recipient is required".to_string())
+        } else if !to_str.trim().is_empty() && !to_str.contains('@') {
+            Some("Enter a valid email address (missing '@')".to_string())
+        } else {
+            None
+        };
+
+        let subject_error = if subj_str.trim().is_empty() {
+            Some("Subject cannot be blank".to_string())
+        } else {
+            None
+        };
+
+        let body_error = if body_str.trim().is_empty() && self.draft.attachments.is_empty() {
+            Some("Message body or attachment is required".to_string())
+        } else {
+            None
+        };
+
+        FormValidationErrors {
+            recipient_error,
+            subject_error,
+            body_error,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct FormValidationErrors {
+    pub recipient_error: Option<String>,
+    pub subject_error: Option<String>,
+    pub body_error: Option<String>,
+}
+
+impl FormValidationErrors {
+    pub fn is_valid(&self) -> bool {
+        self.recipient_error.is_none() && self.subject_error.is_none() && self.body_error.is_none()
+    }
 }
 
 #[cfg(test)]

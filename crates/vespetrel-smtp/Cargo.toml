@@ -3,6 +3,8 @@ name = "vespetrel-smtp"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
+readme = "README.md"
 description = "SMTP submission with lettre + mail-send + DKIM + XOAUTH2"
 
 [features]
@@ -10,7 +12,7 @@ default = []
 mock = []
 
 [dependencies]
-vespetrel-core = { path = "../vespetrel-core" }
+vespetrel-core = { workspace = true }
 tokio = { workspace = true }
 tracing = { workspace = true }
 lettre = { workspace = true }

@@ -3,6 +3,8 @@ name = "vespetrel-graph"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
+readme = "README.md"
 description = "Microsoft Graph REST adapter for Exchange Online"
 
 [features]
@@ -10,7 +12,7 @@ default = []
 mock = []
 
 [dependencies]
-vespetrel-core = { path = "../vespetrel-core" }
+vespetrel-core = { workspace = true }
 tokio = { workspace = true }
 async-trait = { workspace = true }
 tracing = { workspace = true }

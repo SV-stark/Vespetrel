@@ -192,26 +192,44 @@ impl ImapConnection {
                     if self.config.use_xoauth2 && !self.config.auth_token.is_empty() {
                         let auth_cmd = self.cmd_authenticate_xoauth2();
                         let auth_resp = self.execute_cmd(&auth_cmd).await?;
+                        if let Some(challenge_line) = auth_resp.iter().find(|l| l.starts_with('+'))
+                        {
+                            use base64::Engine;
+                            let b64 = challenge_line.trim_start_matches('+').trim();
+                            let detail = base64::engine::general_purpose::STANDARD
+                                .decode(b64)
+                                .ok()
+                                .and_then(|bytes| String::from_utf8(bytes).ok())
+                                .unwrap_or_else(|| challenge_line.clone());
+                            anyhow::bail!(
+                                "IMAP XOAUTH2 authentication rejected for user {}: {}",
+                                self.config.username,
+                                detail
+                            );
+                        }
                         if auth_resp
                             .iter()
                             .any(|l| l.contains(" NO ") || l.contains(" BAD "))
+                            || !auth_resp.iter().any(|l| l.contains(" OK"))
                         {
                             anyhow::bail!(
-                                "IMAP XOAUTH2 authentication failed for user {}: token expired or invalid scopes",
-                                self.config.username
+                                "IMAP XOAUTH2 authentication failed for user {}: token expired or invalid scopes ({})",
+                                self.config.username,
+                                auth_resp.join("; ")
                             );
                         }
                     } else if !self.config.username.is_empty() && !self.config.auth_token.is_empty()
                     {
                         let login_cmd = self.cmd_login();
                         let login_resp = self.execute_cmd(&login_cmd).await?;
-                        if login_resp
+                        if let Some(err_line) = login_resp
                             .iter()
-                            .any(|l| l.contains(" NO ") || l.contains(" BAD "))
+                            .find(|l| l.contains(" NO ") || l.contains(" BAD "))
                         {
                             anyhow::bail!(
-                                "IMAP LOGIN authentication failed for user {}: invalid password or app password required",
-                                self.config.username
+                                "IMAP LOGIN authentication failed for user {}: {}",
+                                self.config.username,
+                                err_line.trim()
                             );
                         }
                     }
@@ -395,6 +413,15 @@ impl ImapConnection {
             lines.push(format!("{tag_str} OK {cmd} completed"));
             let _ = tag_id;
             return Ok(lines);
+        }
+
+        if self.stream.is_some() {
+            self.stream = None;
+            anyhow::bail!(
+                "IMAP server {}:{} closed the connection unexpectedly. Please verify that IMAP is enabled in your Gmail account settings (Settings -> Forwarding and POP/IMAP -> Enable IMAP) and that your credentials or OAuth scopes are valid.",
+                self.config.host,
+                self.config.port
+            );
         }
 
         anyhow::bail!(
@@ -637,8 +664,18 @@ impl ImapConnection {
     }
 
     pub fn cmd_login(&self) -> String {
-        let clean_user = self.config.username.replace(['\r', '\n', '"'], "");
-        let clean_pass = self.config.auth_token.replace(['\r', '\n', '"'], "");
+        let clean_user = self
+            .config
+            .username
+            .replace(['\r', '\n'], "")
+            .replace('\\', "\\\\")
+            .replace('"', "\\\"");
+        let clean_pass = self
+            .config
+            .auth_token
+            .replace(['\r', '\n'], "")
+            .replace('\\', "\\\\")
+            .replace('"', "\\\"");
         format!("LOGIN \"{clean_user}\" \"{clean_pass}\"")
     }
 

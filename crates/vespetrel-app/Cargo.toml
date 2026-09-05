@@ -3,6 +3,8 @@ name = "vespetrel-app"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
+readme = "README.md"
 description = "GPUI desktop frontend for Vespetrel - 3-pane layout, virtual list, reader, compose"
 
 [[bin]]
@@ -14,12 +16,12 @@ default = ["gpui"]
 gpui = ["dep:gpui-kit"]
 
 [dependencies]
-vespetrel-core = { path = "../vespetrel-core" }
-vespetrel-storage = { path = "../vespetrel-storage" }
-vespetrel-engine = { path = "../vespetrel-engine" }
-vespetrel-render = { path = "../vespetrel-render" }
-vespetrel-smtp = { path = "../vespetrel-smtp" }
-vespetrel-crypto = { path = "../vespetrel-crypto" }
+vespetrel-core = { workspace = true }
+vespetrel-storage = { workspace = true }
+vespetrel-engine = { workspace = true }
+vespetrel-render = { workspace = true }
+vespetrel-smtp = { workspace = true }
+vespetrel-crypto = { workspace = true }
 keyring = { workspace = true }
 tokio = { workspace = true }
 tracing = { workspace = true }

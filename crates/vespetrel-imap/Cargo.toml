@@ -3,6 +3,8 @@ name = "vespetrel-imap"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
+readme = "README.md"
 description = "IMAP client with IDLE, CONDSTORE, QRESYNC, XOAUTH2"
 
 [features]
@@ -10,7 +12,7 @@ default = []
 mock = []
 
 [dependencies]
-vespetrel-core = { path = "../vespetrel-core" }
+vespetrel-core = { workspace = true }
 tokio = { workspace = true }
 async-trait = { workspace = true }
 thiserror = { workspace = true }

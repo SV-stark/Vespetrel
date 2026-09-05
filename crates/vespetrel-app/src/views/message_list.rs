@@ -197,6 +197,18 @@ impl MessageListView {
             self
         })
     }
+
+    #[cfg(feature = "gpui")]
+    pub fn virtual_item_sizes(
+        &self,
+        count: usize,
+    ) -> std::rc::Rc<Vec<gpui_kit::gpui::Size<gpui_kit::gpui::Pixels>>> {
+        let h = gpui_kit::gpui::px(self.density.row_height_px());
+        let sizes: Vec<gpui_kit::gpui::Size<gpui_kit::gpui::Pixels>> = (0..count)
+            .map(|_| gpui_kit::gpui::size(gpui_kit::gpui::px(350.0), h))
+            .collect();
+        std::rc::Rc::new(sizes)
+    }
 }
 
 /// Zero-allocation case-insensitive ASCII substring search using sliding window

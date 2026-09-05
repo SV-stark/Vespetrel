@@ -11,8 +11,24 @@ pub mod gpui_app {
         tasks::TaskListView,
     };
     pub use gpui_kit::base;
+    use gpui_kit::base::Selectable;
     pub use gpui_kit::component;
+    pub use gpui_kit::component::badge::Badge;
+    pub use gpui_kit::component::button::{Button, ButtonVariants};
+    pub use gpui_kit::component::command::{Command, CommandGroup, CommandItem, CommandState};
+    pub use gpui_kit::component::dialog::Dialog;
+    pub use gpui_kit::component::form::{Field, Form};
+    pub use gpui_kit::component::notification::Notification;
+    pub use gpui_kit::component::popover::Popover;
+    use gpui_kit::component::resizable::{h_resizable, v_resizable};
+    pub use gpui_kit::component::sheet::Sheet;
+    pub use gpui_kit::component::status_bar::StatusBar;
+    pub use gpui_kit::component::tab::{Tab, TabBar};
+    pub use gpui_kit::component::{
+        ActiveTheme, Sizable, ThemeStyled, TitleBar, VirtualList, WindowExt, v_virtual_list,
+    };
     pub use gpui_kit::gpui;
+
     pub use gpui_kit::gpui::*;
     use vespetrel_core::{
         Account, CalendarEvent, Contact, Folder, FolderRole, MessageSummary, ProviderType,
@@ -29,6 +45,27 @@ pub mod gpui_app {
         pub outgoing_host: Entity<component::input::InputState>,
         pub outgoing_port: Entity<component::input::InputState>,
         pub client_id: Entity<component::input::InputState>,
+    }
+
+    fn make_text_input(
+        window: &mut Window,
+        cx: &mut Context<MainWindow>,
+        placeholder: &str,
+        value: &str,
+        masked: bool,
+    ) -> Entity<component::input::InputState> {
+        let val = value.to_string();
+        let ph = placeholder.to_string();
+        cx.new(|cx| {
+            let mut st = component::input::InputState::new(window, cx).placeholder(ph);
+            if masked {
+                st = st.masked(true);
+            }
+            if !val.is_empty() {
+                st = st.default_value(val);
+            }
+            st
+        })
     }
 
     impl WizardInputEntities {
@@ -76,82 +113,39 @@ pub mod gpui_app {
                         _ => String::new(),
                     });
 
-            let email = cx.new(|cx| {
-                let mut st =
-                    component::input::InputState::new(window, cx).placeholder("user@example.com");
-                if !email_val.is_empty() {
-                    st = st.default_value(email_val);
-                }
-                st
-            });
-
-            let password = cx.new(|cx| {
-                let mut st = component::input::InputState::new(window, cx)
-                    .placeholder("Password or 16-character App Password")
-                    .masked(true);
-                if !pass_val.is_empty() {
-                    st = st.default_value(pass_val);
-                }
-                st
-            });
-
-            let name = cx.new(|cx| {
-                let mut st = component::input::InputState::new(window, cx)
-                    .placeholder("Display Name (e.g. Alex Smith)");
-                if !name_val.is_empty() {
-                    st = st.default_value(name_val);
-                }
-                st
-            });
-
-            let incoming_host = cx.new(|cx| {
-                let mut st =
-                    component::input::InputState::new(window, cx).placeholder("imap.example.com");
-                if !in_host_val.is_empty() {
-                    st = st.default_value(in_host_val);
-                }
-                st
-            });
-
-            let incoming_port = cx.new(|cx| {
-                component::input::InputState::new(window, cx)
-                    .placeholder("993")
-                    .default_value(in_port_val)
-            });
-
-            let outgoing_host = cx.new(|cx| {
-                let mut st =
-                    component::input::InputState::new(window, cx).placeholder("smtp.example.com");
-                if !out_host_val.is_empty() {
-                    st = st.default_value(out_host_val);
-                }
-                st
-            });
-
-            let outgoing_port = cx.new(|cx| {
-                component::input::InputState::new(window, cx)
-                    .placeholder("587")
-                    .default_value(out_port_val)
-            });
-
-            let client_id = cx.new(|cx| {
-                let mut st = component::input::InputState::new(window, cx)
-                    .placeholder("OAuth Client ID (e.g. 12345.apps.googleusercontent.com)");
-                if !client_id_val.is_empty() {
-                    st = st.default_value(client_id_val);
-                }
-                st
-            });
-
             Self {
-                email,
-                password,
-                name,
-                incoming_host,
-                incoming_port,
-                outgoing_host,
-                outgoing_port,
-                client_id,
+                email: make_text_input(window, cx, "user@example.com", &email_val, false),
+                password: make_text_input(
+                    window,
+                    cx,
+                    "Password or 16-character App Password",
+                    &pass_val,
+                    true,
+                ),
+                name: make_text_input(
+                    window,
+                    cx,
+                    "Display Name (e.g. Alex Smith)",
+                    &name_val,
+                    false,
+                ),
+                incoming_host: make_text_input(window, cx, "imap.example.com", &in_host_val, false),
+                incoming_port: make_text_input(window, cx, "993", &in_port_val, false),
+                outgoing_host: make_text_input(
+                    window,
+                    cx,
+                    "smtp.example.com",
+                    &out_host_val,
+                    false,
+                ),
+                outgoing_port: make_text_input(window, cx, "587", &out_port_val, false),
+                client_id: make_text_input(
+                    window,
+                    cx,
+                    "OAuth Client ID (e.g. 12345.apps.googleusercontent.com)",
+                    &client_id_val,
+                    false,
+                ),
             }
         }
     }
@@ -170,30 +164,23 @@ pub mod gpui_app {
             subj_val: &str,
             body_val: &str,
         ) -> Self {
-            let to = cx.new(|cx| {
-                let mut st = component::input::InputState::new(window, cx)
-                    .placeholder("Recipient (e.g. user@example.com)");
-                if !to_val.is_empty() {
-                    st = st.default_value(to_val);
-                }
-                st
-            });
-            let subject = cx.new(|cx| {
-                let mut st = component::input::InputState::new(window, cx).placeholder("Subject");
-                if !subj_val.is_empty() {
-                    st = st.default_value(subj_val);
-                }
-                st
-            });
-            let body = cx.new(|cx| {
-                let mut st = component::input::InputState::new(window, cx)
-                    .placeholder("Write your email message here...");
-                if !body_val.is_empty() {
-                    st = st.default_value(body_val);
-                }
-                st
-            });
-            Self { to, subject, body }
+            Self {
+                to: make_text_input(
+                    window,
+                    cx,
+                    "Recipient (e.g. user@example.com)",
+                    to_val,
+                    false,
+                ),
+                subject: make_text_input(window, cx, "Subject", subj_val, false),
+                body: make_text_input(
+                    window,
+                    cx,
+                    "Write your email message here...",
+                    body_val,
+                    false,
+                ),
+            }
         }
     }
 
@@ -279,6 +266,7 @@ pub mod gpui_app {
         pub login_wizard: LoginWizardState,
         pub wizard_inputs: Option<WizardInputEntities>,
         pub toasts: Vec<Toast>,
+        pub command_state: Option<Entity<CommandState>>,
     }
 
     impl MainWindow {
@@ -505,6 +493,7 @@ pub mod gpui_app {
                 login_wizard: LoginWizardState::new(),
                 wizard_inputs: None,
                 toasts: Vec::new(),
+                command_state: None,
             }
         }
 
@@ -1795,6 +1784,9 @@ pub mod gpui_app {
 
     impl Render for MainWindow {
         fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+            if self.command_state.is_none() {
+                self.command_state = Some(cx.new(|cx| CommandState::new(window, cx)));
+            }
             if self.active_modal == ActiveModal::AddAccount && self.wizard_inputs.is_none() {
                 self.wizard_inputs = Some(WizardInputEntities::new(window, cx, &self.login_wizard));
             }
@@ -1808,12 +1800,21 @@ pub mod gpui_app {
                 ));
             }
 
+            for toast in self.toasts.drain(..) {
+                let note = if toast.is_error {
+                    Notification::error(toast.message)
+                } else {
+                    Notification::success(toast.message)
+                };
+                window.push_notification(note, cx);
+            }
+
             div()
                 .flex()
                 .flex_col()
                 .size_full()
-                .bg(rgb(0x0f1117))
-                .text_color(rgb(0xe2e8f0))
+                .bg(cx.theme().background)
+                .text_color(cx.theme().foreground)
                 .child(self.render_header(cx))
                 .child(
                     div()
@@ -1826,7 +1827,7 @@ pub mod gpui_app {
                 )
                 .child(self.render_status_bar())
                 .child(self.render_toasts(cx))
-                .child(self.render_modal_layer(cx))
+                .child(self.render_modal_layer(window, cx))
         }
     }
 
@@ -1904,7 +1905,6 @@ pub mod gpui_app {
                     )
                 }))
         }
-
         fn render_header(&self, cx: &Context<Self>) -> impl IntoElement {
             let search_display = if self.search_query.is_empty() {
                 "Search messages, senders, attachments (FTS5)...".to_string()
@@ -1912,167 +1912,181 @@ pub mod gpui_app {
                 self.search_query.clone()
             };
 
-            div()
-                .flex()
-                .flex_row()
-                .items_center()
-                .justify_between()
-                .h(px(48.0))
-                .px(px(16.0))
-                .bg(rgb(0x131722))
-                .border_b_1()
-                .border_color(rgb(0x1f293d))
-                .child(
-                    div()
-                        .flex()
-                        .flex_row()
-                        .items_center()
-                        .gap(px(10.0))
-                        .child(
-                            div()
-                                .flex()
-                                .items_center()
-                                .justify_center()
-                                .w(px(28.0))
-                                .h(px(28.0))
-                                .rounded_md()
-                                .bg(rgb(0x3b82f6))
-                                .text_color(rgb(0xffffff))
-                                .font_weight(FontWeight::BOLD)
-                                .text_sm()
-                                .child("V"),
-                        )
-                        .child(
-                            div()
-                                .font_weight(FontWeight::BOLD)
-                                .text_sm()
-                                .text_color(rgb(0xf8fafc))
-                                .child("Vespetrel Mail"),
-                        ),
-                )
-                .child(
-                    div()
-                        .id("header-search-bar")
-                        .flex()
-                        .flex_row()
-                        .items_center()
-                        .justify_between()
-                        .w(px(420.0))
-                        .h(px(32.0))
-                        .px(px(12.0))
-                        .rounded_md()
-                        .bg(rgb(0x1a202e))
-                        .border_1()
-                        .border_color(if self.search_query.is_empty() {
-                            rgb(0x2d3748)
-                        } else {
-                            rgb(0x3b82f6)
-                        })
-                        .gap(px(8.0))
-                        .child(
-                            div()
-                                .id("search-bar-trigger")
-                                .flex()
-                                .flex_row()
-                                .flex_1()
-                                .items_center()
-                                .gap(px(8.0))
-                                .cursor_pointer()
-                                .on_click(cx.listener(|this, _, _, cx| {
-                                    this.command_palette.open();
-                                    this.active_modal = ActiveModal::CommandPalette;
-                                    cx.notify();
-                                }))
-                                .child(div().text_xs().text_color(rgb(0x94a3b8)).child("🔍"))
-                                .child(
-                                    div()
-                                        .text_xs()
-                                        .text_color(if self.search_query.is_empty() {
-                                            rgb(0x64748b)
-                                        } else {
-                                            rgb(0x60a5fa)
-                                        })
-                                        .child(search_display),
-                                ),
-                        )
-                        .children((!self.search_query.is_empty()).then(|| {
-                            div()
-                                .id("btn-clear-search")
-                                .px(px(6.0))
-                                .py(px(1.0))
-                                .rounded_md()
-                                .bg(rgb(0x1e293b))
-                                .text_xs()
-                                .text_color(rgb(0x94a3b8))
-                                .cursor_pointer()
-                                .on_click(cx.listener(|this, _, _, cx| {
-                                    this.clear_search(cx);
-                                }))
-                                .child("✕")
-                        })),
-                )
-                .child(
-                    div()
-                        .flex()
-                        .flex_row()
-                        .items_center()
-                        .gap(px(8.0))
-                        .child(
-                            div()
-                                .id("btn-header-compose")
-                                .flex()
-                                .items_center()
-                                .gap(px(6.0))
-                                .px(px(12.0))
-                                .py(px(6.0))
-                                .rounded_md()
-                                .bg(rgb(0x2563eb))
-                                .text_color(rgb(0xffffff))
-                                .text_xs()
-                                .font_weight(FontWeight::SEMIBOLD)
-                                .cursor_pointer()
-                                .on_click(cx.listener(|this, _, _, cx| {
-                                    this.active_modal = ActiveModal::Compose;
-                                    cx.notify();
-                                }))
-                                .child("✍️ Compose"),
-                        )
-                        .child(
-                            div()
-                                .id("btn-header-sync")
-                                .flex()
-                                .items_center()
-                                .px(px(10.0))
-                                .py(px(6.0))
-                                .rounded_md()
-                                .bg(rgb(0x1e293b))
-                                .text_color(rgb(0xcbd5e1))
-                                .text_xs()
-                                .cursor_pointer()
-                                .on_click(cx.listener(|this, _, _, cx| {
-                                    this.trigger_sync(cx);
-                                }))
-                                .child("🔄 Sync"),
-                        )
-                        .child(
-                            div()
-                                .id("btn-header-palette")
-                                .flex()
-                                .items_center()
-                                .px(px(10.0))
-                                .py(px(6.0))
-                                .rounded_md()
-                                .bg(rgb(0x1e293b))
-                                .text_color(rgb(0x94a3b8))
-                                .text_xs()
-                                .cursor_pointer()
-                                .on_click(cx.listener(|this, _, _, cx| {
-                                    this.active_modal = ActiveModal::CommandPalette;
-                                    cx.notify();
-                                }))
-                                .child("⌘K"),
-                        ),
-                )
+            let nav_tabs = [
+                (ActiveViewTab::Mail, "✉️ Mail"),
+                (ActiveViewTab::Calendar, "📅 Calendar"),
+                (ActiveViewTab::Contacts, "👥 Contacts"),
+                (ActiveViewTab::Tasks, "✅ Tasks"),
+                (ActiveViewTab::Settings, "⚙️ Settings"),
+            ];
+
+            TitleBar::new().child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .justify_between()
+                    .w_full()
+                    .h(px(48.0))
+                    .px(px(16.0))
+                    .bg(rgb(0x131722))
+                    .border_b_1()
+                    .border_color(rgb(0x1f293d))
+                    .child(
+                        div()
+                            .flex()
+                            .flex_row()
+                            .items_center()
+                            .gap(px(12.0))
+                            .child(
+                                div()
+                                    .flex()
+                                    .items_center()
+                                    .justify_center()
+                                    .w(px(28.0))
+                                    .h(px(28.0))
+                                    .rounded_md()
+                                    .bg(rgb(0x3b82f6))
+                                    .text_color(rgb(0xffffff))
+                                    .font_weight(FontWeight::BOLD)
+                                    .text_sm()
+                                    .child("V"),
+                            )
+                            .child(
+                                div()
+                                    .font_weight(FontWeight::BOLD)
+                                    .text_sm()
+                                    .text_color(rgb(0xf8fafc))
+                                    .child("Vespetrel"),
+                            )
+                            .child(TabBar::new("header-nav-tabbar").children(
+                                nav_tabs.into_iter().map(|(tab, label)| {
+                                    let is_active = self.active_tab == tab;
+                                    Tab::new().label(label).selected(is_active).on_click(
+                                        cx.listener(move |this, _, _, cx| {
+                                            this.active_tab = tab;
+                                            cx.notify();
+                                        }),
+                                    )
+                                }),
+                            )),
+                    )
+                    .child(
+                        div()
+                            .id("header-search-bar")
+                            .flex()
+                            .flex_row()
+                            .items_center()
+                            .justify_between()
+                            .w(px(420.0))
+                            .h(px(32.0))
+                            .px(px(12.0))
+                            .rounded_md()
+                            .bg(rgb(0x1a202e))
+                            .border_1()
+                            .border_color(if self.search_query.is_empty() {
+                                rgb(0x2d3748)
+                            } else {
+                                rgb(0x3b82f6)
+                            })
+                            .gap(px(8.0))
+                            .child(
+                                div()
+                                    .id("search-bar-trigger")
+                                    .flex()
+                                    .flex_row()
+                                    .flex_1()
+                                    .items_center()
+                                    .gap(px(8.0))
+                                    .cursor_pointer()
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.command_palette.open();
+                                        this.active_modal = ActiveModal::CommandPalette;
+                                        cx.notify();
+                                    }))
+                                    .child(div().text_xs().text_color(rgb(0x94a3b8)).child("🔍"))
+                                    .child(
+                                        div()
+                                            .text_xs()
+                                            .text_color(if self.search_query.is_empty() {
+                                                rgb(0x64748b)
+                                            } else {
+                                                rgb(0x60a5fa)
+                                            })
+                                            .child(search_display),
+                                    ),
+                            )
+                            .children((!self.search_query.is_empty()).then(|| {
+                                Button::new("btn-clear-search").ghost().label("✕").on_click(
+                                    cx.listener(|this, _, _, cx| {
+                                        this.clear_search(cx);
+                                    }),
+                                )
+                            })),
+                    )
+                    .child(
+                        div()
+                            .flex()
+                            .flex_row()
+                            .items_center()
+                            .gap(px(8.0))
+                            .child(
+                                Button::new("btn-header-compose")
+                                    .primary()
+                                    .label("✍️ Compose")
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.active_modal = ActiveModal::Compose;
+                                        cx.notify();
+                                    })),
+                            )
+                            .child(
+                                Button::new("btn-header-sync")
+                                    .secondary()
+                                    .label("🔄 Sync")
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.trigger_sync(cx);
+                                    })),
+                            )
+                            .child(
+                                Button::new("btn-header-palette")
+                                    .secondary()
+                                    .label("⌘K")
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.active_modal = ActiveModal::CommandPalette;
+                                        cx.notify();
+                                    })),
+                            )
+                            .child(
+                                Popover::new("header-info-popover")
+                                    .trigger(Button::new("btn-header-info").ghost().label("ℹ️"))
+                                    .content(|_, _, cx| {
+                                        div()
+                                            .p(px(10.0))
+                                            .bg(cx.theme().background)
+                                            .border_1()
+                                            .border_color(rgb(0x2d3748))
+                                            .rounded_md()
+                                            .flex()
+                                            .flex_col()
+                                            .gap(px(4.0))
+                                            .child(
+                                                div()
+                                                    .text_xs()
+                                                    .font_weight(FontWeight::BOLD)
+                                                    .text_color(cx.theme().foreground)
+                                                    .child("Vespetrel v0.1.0"),
+                                            )
+                                            .child(
+                                                div()
+                                                    .text_xs()
+                                                    .text_color(rgb(0x94a3b8))
+                                                    .child("High-performance Native Mail Client"),
+                                            )
+                                            .into_any_element()
+                                    }),
+                            ),
+                    ),
+            )
         }
 
         fn render_sidebar_tabs(&self, cx: &Context<Self>) -> impl IntoElement {
@@ -2097,38 +2111,26 @@ pub mod gpui_app {
                 .gap(px(8.0))
                 .children(tabs.into_iter().map(|(tab, icon, label)| {
                     let is_active = self.active_tab == tab;
-                    div()
-                        .id(ElementId::Name(format!("tab-item-{}", label).into()))
-                        .flex()
-                        .flex_col()
-                        .items_center()
-                        .justify_center()
-                        .w(px(44.0))
-                        .h(px(44.0))
-                        .rounded_lg()
-                        .bg(if is_active {
-                            rgb(0x1e293b)
-                        } else {
-                            rgb(0x11141c)
-                        })
-                        .text_color(if is_active {
-                            rgb(0x60a5fa)
-                        } else {
-                            rgb(0x64748b)
-                        })
-                        .border_1()
-                        .border_color(if is_active {
-                            rgb(0x3b82f6)
-                        } else {
-                            rgb(0x00000000)
-                        })
-                        .cursor_pointer()
-                        .on_click(cx.listener(move |this, _, _, cx| {
-                            this.active_tab = tab;
-                            cx.notify();
-                        }))
-                        .child(div().text_base().child(icon))
-                        .child(div().text_xs().child(label))
+                    let mut btn =
+                        Button::new(ElementId::Name(format!("tab-item-{}", label).into()))
+                            .child(
+                                div()
+                                    .flex()
+                                    .flex_col()
+                                    .items_center()
+                                    .justify_center()
+                                    .gap(px(2.0))
+                                    .child(div().text_base().child(icon))
+                                    .child(div().text_xs().child(label)),
+                            )
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.active_tab = tab;
+                                cx.notify();
+                            }));
+                    if is_active {
+                        btn = btn.primary();
+                    }
+                    btn
                 }))
         }
 
@@ -2149,15 +2151,10 @@ pub mod gpui_app {
         }
 
         fn render_mail_workspace(&self, cx: &Context<Self>) -> impl IntoElement {
-            div()
-                .flex()
-                .flex_row()
-                .flex_1()
-                .h_full()
-                .overflow_hidden()
-                .child(self.render_folder_tree(cx))
-                .child(self.render_message_list_pane(cx))
-                .child(self.render_message_reader_pane(cx))
+            h_resizable("mail-workspace-panels")
+                .child(self.render_folder_tree(cx).into_any_element())
+                .child(self.render_message_list_pane(cx).into_any_element())
+                .child(self.render_message_reader_pane(cx).into_any_element())
         }
 
         fn render_folder_tree(&self, cx: &Context<Self>) -> impl IntoElement {
@@ -2337,16 +2334,11 @@ pub mod gpui_app {
                                     ),
                             )
                             .child(if unified_unread > 0 {
-                                div()
-                                    .px(px(6.0))
-                                    .py(px(1.0))
-                                    .rounded_full()
-                                    .bg(rgb(0x2563eb))
-                                    .text_color(rgb(0xffffff))
-                                    .text_xs()
-                                    .child(format!("{unified_unread}"))
+                                Badge::new()
+                                    .count(unified_unread as usize)
+                                    .into_any_element()
                             } else {
-                                div()
+                                div().into_any_element()
                             }),
                     );
 
@@ -2360,15 +2352,7 @@ pub mod gpui_app {
                                 && (self.selected_folder_id.as_deref() == Some(&f.id)
                                     || self.selected_folder_id.as_deref() == Some(&f.remote_id));
                             let folder_id_clone = f.id.clone();
-                            let icon = match f.role {
-                                FolderRole::Inbox => "📥",
-                                FolderRole::Drafts => "📝",
-                                FolderRole::Sent => "📤",
-                                FolderRole::Archive => "📦",
-                                FolderRole::Junk => "🚫",
-                                FolderRole::Trash => "🗑️",
-                                FolderRole::Custom => "📁",
-                            };
+                            let icon = NavigationTree::folder_icon(&f.role);
                             let count = f.unread_count;
 
                             div()
@@ -2413,16 +2397,9 @@ pub mod gpui_app {
                                         ),
                                 )
                                 .child(if count > 0 {
-                                    div()
-                                        .px(px(6.0))
-                                        .py(px(1.0))
-                                        .rounded_full()
-                                        .bg(rgb(0x2563eb))
-                                        .text_color(rgb(0xffffff))
-                                        .text_xs()
-                                        .child(format!("{count}"))
+                                    Badge::new().count(count as usize).into_any_element()
                                 } else {
-                                    div()
+                                    div().into_any_element()
                                 })
                         })
                         .collect::<Vec<_>>();
@@ -2432,9 +2409,151 @@ pub mod gpui_app {
                 }))
         }
 
+        fn render_message_row(
+            &self,
+            row: &ThreadedMessage<'_>,
+            cx: &Context<Self>,
+        ) -> impl IntoElement {
+            let msg = row.summary;
+            let is_selected = self.selected_message_id.as_deref() == Some(&msg.id);
+            let sender = msg.from_name.as_deref().unwrap_or(&msg.from_address);
+            let subject = msg.subject.as_deref().unwrap_or("(No Subject)");
+            let snippet = msg.snippet.as_deref().unwrap_or("");
+            let date_str = msg.sent_at.format("%b %d, %H:%M").to_string();
+            let msg_id = msg.id.clone();
+            let is_child = row.is_child;
+            let thread_count = row.thread_count;
+
+            let pad_left = if is_child { px(24.0) } else { px(10.0) };
+
+            let mut item_div = div()
+                .id(ElementId::Name(format!("msg-item-{}", msg_id).into()))
+                .flex()
+                .flex_col()
+                .pl(pad_left)
+                .pr(px(10.0))
+                .py(match self.row_density {
+                    MessageRowDensity::Compact => px(4.0),
+                    MessageRowDensity::Comfortable => px(8.0),
+                    MessageRowDensity::Roomy => px(12.0),
+                })
+                .border_b_1()
+                .border_color(rgb(0x182030))
+                .bg(if is_selected {
+                    rgb(0x1e2a42)
+                } else if !msg.is_read {
+                    rgb(0x141a29)
+                } else {
+                    rgb(0x10141d)
+                })
+                .cursor_pointer()
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    this.select_message(msg_id.clone(), cx);
+                }));
+
+            let header_row = div()
+                .flex()
+                .flex_row()
+                .items_center()
+                .justify_between()
+                .child(
+                    div()
+                        .flex()
+                        .flex_row()
+                        .items_center()
+                        .gap(px(6.0))
+                        .child(if is_child {
+                            div().text_xs().text_color(rgb(0x64748b)).child("↳")
+                        } else if !msg.is_read {
+                            div().w(px(6.0)).h(px(6.0)).rounded_full().bg(rgb(0x3b82f6))
+                        } else {
+                            div().w(px(6.0)).h(px(6.0))
+                        })
+                        .child(
+                            div()
+                                .text_xs()
+                                .font_weight(if !msg.is_read {
+                                    FontWeight::BOLD
+                                } else {
+                                    FontWeight::MEDIUM
+                                })
+                                .text_color(rgb(0xf1f5f9))
+                                .child(sender.to_string()),
+                        ),
+                )
+                .child(
+                    div()
+                        .flex()
+                        .flex_row()
+                        .items_center()
+                        .gap(px(6.0))
+                        .child(if thread_count > 1 && !is_child {
+                            Badge::new()
+                                .child(format!("🧵 {thread_count}"))
+                                .into_any_element()
+                        } else {
+                            div().into_any_element()
+                        })
+                        .child(
+                            div()
+                                .text_xs()
+                                .text_color(if msg.is_flagged {
+                                    rgb(0xfbbf24)
+                                } else {
+                                    rgb(0x475569)
+                                })
+                                .child(if msg.is_flagged { "★" } else { "☆" }),
+                        )
+                        .child(div().text_xs().text_color(rgb(0x64748b)).child(date_str)),
+                );
+
+            item_div = item_div.child(header_row);
+
+            if self.row_density != MessageRowDensity::Compact {
+                item_div = item_div.child(
+                    div()
+                        .pt(px(2.0))
+                        .text_xs()
+                        .font_weight(if !msg.is_read {
+                            FontWeight::SEMIBOLD
+                        } else {
+                            FontWeight::NORMAL
+                        })
+                        .text_color(rgb(0xe2e8f0))
+                        .child(subject.to_string()),
+                );
+            }
+
+            if self.row_density == MessageRowDensity::Roomy && !snippet.is_empty() {
+                item_div =
+                    item_div.child(div().pt(px(2.0)).text_xs().text_color(rgb(0x94a3b8)).child(
+                        if snippet.len() > 100 {
+                            format!("{}...", &snippet[..100])
+                        } else {
+                            snippet.to_string()
+                        },
+                    ));
+            } else if self.row_density == MessageRowDensity::Comfortable && !snippet.is_empty() {
+                item_div =
+                    item_div.child(div().pt(px(2.0)).text_xs().text_color(rgb(0x94a3b8)).child(
+                        if snippet.len() > 60 {
+                            format!("{}...", &snippet[..60])
+                        } else {
+                            snippet.to_string()
+                        },
+                    ));
+            }
+
+            item_div
+        }
+
         fn render_message_list_pane(&self, cx: &Context<Self>) -> impl IntoElement {
-            let visible_rows: Vec<ThreadedMessage<'_>> =
-                self.threaded_messages().into_iter().take(100).collect();
+            let total_count = self.threaded_messages().len();
+            let row_height = self.row_density.row_height_px();
+            let sizes: Vec<gpui_kit::gpui::Size<gpui_kit::gpui::Pixels>> = (0..total_count)
+                .map(|_| gpui_kit::gpui::size(px(350.0), px(row_height)))
+                .collect();
+            let item_sizes = std::rc::Rc::new(sizes);
 
             let sort_label = match self.sort_order {
                 MessageSortOrder::DateDescending => "↓ Date",
@@ -2486,26 +2605,16 @@ pub mod gpui_app {
                                 .pb(px(6.0))
                                 .text_xs()
                                 .child(
-                                    div()
-                                        .id("btn-toggle-thread")
-                                        .px(px(6.0))
-                                        .py(px(2.0))
-                                        .rounded_md()
-                                        .bg(if self.is_threaded {
-                                            rgb(0x2563eb)
+                                    Button::new("btn-toggle-thread")
+                                        .with_variant(if self.is_threaded {
+                                            gpui_kit::component::button::ButtonVariant::Primary
                                         } else {
-                                            rgb(0x1e293b)
+                                            gpui_kit::component::button::ButtonVariant::Secondary
                                         })
-                                        .text_color(if self.is_threaded {
-                                            rgb(0xffffff)
-                                        } else {
-                                            rgb(0x94a3b8)
-                                        })
-                                        .cursor_pointer()
+                                        .label("🧵 Threaded")
                                         .on_click(cx.listener(|this, _, _, cx| {
                                             this.toggle_threading(cx);
-                                        }))
-                                        .child("🧵 Threaded"),
+                                        })),
                                 )
                                 .child(
                                     div()
@@ -2513,193 +2622,38 @@ pub mod gpui_app {
                                         .flex_row()
                                         .gap(px(4.0))
                                         .child(
-                                            div()
-                                                .id("btn-toggle-sort")
-                                                .px(px(6.0))
-                                                .py(px(2.0))
-                                                .rounded_md()
-                                                .bg(rgb(0x1e293b))
-                                                .text_color(rgb(0x94a3b8))
-                                                .cursor_pointer()
+                                            Button::new("btn-toggle-sort")
+                                                .secondary()
+                                                .label(sort_label)
                                                 .on_click(cx.listener(|this, _, _, cx| {
                                                     this.cycle_sort_order(cx);
-                                                }))
-                                                .child(sort_label),
+                                                })),
                                         )
                                         .child(
-                                            div()
-                                                .id("btn-toggle-density")
-                                                .px(px(6.0))
-                                                .py(px(2.0))
-                                                .rounded_md()
-                                                .bg(rgb(0x1e293b))
-                                                .text_color(rgb(0x94a3b8))
-                                                .cursor_pointer()
+                                            Button::new("btn-toggle-density")
+                                                .secondary()
+                                                .label(density_label)
                                                 .on_click(cx.listener(|this, _, _, cx| {
                                                     this.cycle_row_density(cx);
-                                                }))
-                                                .child(density_label),
+                                                })),
                                         ),
                                 ),
                         ),
                 )
-                .child(
-                    div()
-                        .flex()
-                        .flex_col()
-                        .flex_1()
-                        .children(visible_rows.into_iter().map(|row| {
-                            let msg = row.summary;
-                            let is_selected = self.selected_message_id.as_deref() == Some(&msg.id);
-                            let sender = msg.from_name.as_deref().unwrap_or(&msg.from_address);
-                            let subject = msg.subject.as_deref().unwrap_or("(No Subject)");
-                            let snippet = msg.snippet.as_deref().unwrap_or("");
-                            let date_str = msg.sent_at.format("%b %d, %H:%M").to_string();
-                            let msg_id = msg.id.clone();
-                            let is_child = row.is_child;
-                            let thread_count = row.thread_count;
-
-                            let pad_left = if is_child { px(24.0) } else { px(10.0) };
-
-                            let mut item_div = div()
-                                .id(ElementId::Name(format!("msg-item-{}", msg_id).into()))
-                                .flex()
-                                .flex_col()
-                                .pl(pad_left)
-                                .pr(px(10.0))
-                                .py(match self.row_density {
-                                    MessageRowDensity::Compact => px(4.0),
-                                    MessageRowDensity::Comfortable => px(8.0),
-                                    MessageRowDensity::Roomy => px(12.0),
-                                })
-                                .border_b_1()
-                                .border_color(rgb(0x182030))
-                                .bg(if is_selected {
-                                    rgb(0x1e2a42)
-                                } else if !msg.is_read {
-                                    rgb(0x141a29)
-                                } else {
-                                    rgb(0x10141d)
-                                })
-                                .cursor_pointer()
-                                .on_click(cx.listener(move |this, _, _, cx| {
-                                    this.select_message(msg_id.clone(), cx);
-                                }));
-
-                            let header_row = div()
-                                .flex()
-                                .flex_row()
-                                .items_center()
-                                .justify_between()
-                                .child(
-                                    div()
-                                        .flex()
-                                        .flex_row()
-                                        .items_center()
-                                        .gap(px(6.0))
-                                        .child(if is_child {
-                                            div().text_xs().text_color(rgb(0x64748b)).child("↳")
-                                        } else if !msg.is_read {
-                                            div()
-                                                .w(px(6.0))
-                                                .h(px(6.0))
-                                                .rounded_full()
-                                                .bg(rgb(0x3b82f6))
-                                        } else {
-                                            div().w(px(6.0)).h(px(6.0))
-                                        })
-                                        .child(
-                                            div()
-                                                .text_xs()
-                                                .font_weight(if !msg.is_read {
-                                                    FontWeight::BOLD
-                                                } else {
-                                                    FontWeight::MEDIUM
-                                                })
-                                                .text_color(rgb(0xf1f5f9))
-                                                .child(sender.to_string()),
-                                        ),
-                                )
-                                .child(
-                                    div()
-                                        .flex()
-                                        .flex_row()
-                                        .items_center()
-                                        .gap(px(6.0))
-                                        .child(if thread_count > 1 && !is_child {
-                                            div()
-                                                .px(px(5.0))
-                                                .py(px(1.0))
-                                                .rounded_full()
-                                                .bg(rgb(0x1e293b))
-                                                .text_color(rgb(0x60a5fa))
-                                                .text_xs()
-                                                .child(format!("🧵 {thread_count}"))
-                                        } else {
-                                            div()
-                                        })
-                                        .child(
-                                            div()
-                                                .text_xs()
-                                                .text_color(if msg.is_flagged {
-                                                    rgb(0xfbbf24)
-                                                } else {
-                                                    rgb(0x475569)
-                                                })
-                                                .child(if msg.is_flagged { "★" } else { "☆" }),
-                                        )
-                                        .child(
-                                            div()
-                                                .text_xs()
-                                                .text_color(rgb(0x64748b))
-                                                .child(date_str),
-                                        ),
-                                );
-
-                            item_div = item_div.child(header_row);
-
-                            if self.row_density != MessageRowDensity::Compact {
-                                item_div = item_div.child(
-                                    div()
-                                        .pt(px(2.0))
-                                        .text_xs()
-                                        .font_weight(if !msg.is_read {
-                                            FontWeight::SEMIBOLD
-                                        } else {
-                                            FontWeight::NORMAL
-                                        })
-                                        .text_color(rgb(0xe2e8f0))
-                                        .child(subject.to_string()),
-                                );
-                            }
-
-                            if self.row_density == MessageRowDensity::Roomy && !snippet.is_empty() {
-                                item_div = item_div.child(
-                                    div().pt(px(2.0)).text_xs().text_color(rgb(0x94a3b8)).child(
-                                        if snippet.len() > 100 {
-                                            format!("{}...", &snippet[..100])
-                                        } else {
-                                            snippet.to_string()
-                                        },
-                                    ),
-                                );
-                            } else if self.row_density == MessageRowDensity::Comfortable
-                                && !snippet.is_empty()
-                            {
-                                item_div = item_div.child(
-                                    div().pt(px(2.0)).text_xs().text_color(rgb(0x94a3b8)).child(
-                                        if snippet.len() > 60 {
-                                            format!("{}...", &snippet[..60])
-                                        } else {
-                                            snippet.to_string()
-                                        },
-                                    ),
-                                );
-                            }
-
-                            item_div
-                        })),
-                )
+                .child(div().flex_1().overflow_hidden().child(v_virtual_list(
+                    cx.entity(),
+                    "v-messages-list",
+                    item_sizes,
+                    |this, range, _window, cx| {
+                        let all = this.threaded_messages();
+                        range
+                            .filter_map(|idx| {
+                                all.get(idx)
+                                    .map(|row| this.render_message_row(row, cx).into_any_element())
+                            })
+                            .collect()
+                    },
+                )))
         }
 
         fn render_filter_chip(
@@ -2741,7 +2695,7 @@ pub mod gpui_app {
                 .flex_col()
                 .flex_1()
                 .h_full()
-                .bg(rgb(0x0d1117))
+                .bg(cx.theme().background)
                 .child(if let Some(msg) = msg_opt {
                     let from_name = msg.from_name.as_deref().unwrap_or("");
                     let from_addr = &msg.from_address;
@@ -2750,10 +2704,10 @@ pub mod gpui_app {
                     let rendered_body = self.message_viewer.rendered();
                     let attachments = &self.message_viewer.attachments;
 
-                    div()
+                    let header_panel = div()
                         .flex()
                         .flex_col()
-                        .size_full()
+                        .w_full()
                         // Top toolbar
                         .child(
                             div()
@@ -2772,15 +2726,9 @@ pub mod gpui_app {
                                         .items_center()
                                         .gap(px(8.0))
                                         .child(
-                                            div()
-                                                .id("btn-reply-message")
-                                                .px(px(10.0))
-                                                .py(px(5.0))
-                                                .rounded_md()
-                                                .bg(rgb(0x2563eb))
-                                                .text_color(rgb(0xffffff))
-                                                .text_xs()
-                                                .cursor_pointer()
+                                            Button::new("btn-reply-message")
+                                                .primary()
+                                                .label("↩ Reply")
                                                 .on_click(cx.listener({
                                                     let reply_to = msg.from_address.clone();
                                                     let reply_subj = if msg
@@ -2809,19 +2757,12 @@ pub mod gpui_app {
                                                         this.active_modal = ActiveModal::Compose;
                                                         cx.notify();
                                                     }
-                                                }))
-                                                .child("↩ Reply"),
+                                                })),
                                         )
                                         .child(
-                                            div()
-                                                .id("btn-reply-all-message")
-                                                .px(px(10.0))
-                                                .py(px(5.0))
-                                                .rounded_md()
-                                                .bg(rgb(0x1e293b))
-                                                .text_color(rgb(0xcbd5e1))
-                                                .text_xs()
-                                                .cursor_pointer()
+                                            Button::new("btn-reply-all-message")
+                                                .secondary()
+                                                .label("👥 Reply All")
                                                 .on_click(cx.listener({
                                                     let reply_to = msg.from_address.clone();
                                                     let reply_subj = if msg
@@ -2850,19 +2791,12 @@ pub mod gpui_app {
                                                         this.active_modal = ActiveModal::Compose;
                                                         cx.notify();
                                                     }
-                                                }))
-                                                .child("👥 Reply All"),
+                                                })),
                                         )
                                         .child(
-                                            div()
-                                                .id("btn-forward-message")
-                                                .px(px(10.0))
-                                                .py(px(5.0))
-                                                .rounded_md()
-                                                .bg(rgb(0x1e293b))
-                                                .text_color(rgb(0xcbd5e1))
-                                                .text_xs()
-                                                .cursor_pointer()
+                                            Button::new("btn-forward-message")
+                                                .secondary()
+                                                .label("↪ Forward")
                                                 .on_click(cx.listener({
                                                     let fwd_subj = if msg
                                                         .subject
@@ -2899,38 +2833,23 @@ pub mod gpui_app {
                                                         this.active_modal = ActiveModal::Compose;
                                                         cx.notify();
                                                     }
-                                                }))
-                                                .child("↪ Forward"),
+                                                })),
                                         )
                                         .child(
-                                            div()
-                                                .id("btn-archive-message")
-                                                .px(px(10.0))
-                                                .py(px(5.0))
-                                                .rounded_md()
-                                                .bg(rgb(0x1e293b))
-                                                .text_color(rgb(0xcbd5e1))
-                                                .text_xs()
-                                                .cursor_pointer()
+                                            Button::new("btn-archive-message")
+                                                .secondary()
+                                                .label("📦 Archive")
                                                 .on_click(cx.listener(|this, _, _, cx| {
                                                     this.archive_selected_message(cx);
-                                                }))
-                                                .child("📦 Archive"),
+                                                })),
                                         )
                                         .child(
-                                            div()
-                                                .id("btn-delete-message")
-                                                .px(px(10.0))
-                                                .py(px(5.0))
-                                                .rounded_md()
-                                                .bg(rgb(0x1e293b))
-                                                .text_color(rgb(0xf87171))
-                                                .text_xs()
-                                                .cursor_pointer()
+                                            Button::new("btn-delete-message")
+                                                .danger()
+                                                .label("🗑️ Delete")
                                                 .on_click(cx.listener(|this, _, _, cx| {
                                                     this.delete_selected_message(cx);
-                                                }))
-                                                .child("🗑️ Delete"),
+                                                })),
                                         ),
                                 )
                                 // Security & Auth Badges
@@ -2941,39 +2860,15 @@ pub mod gpui_app {
                                         .items_center()
                                         .gap(px(6.0))
                                         .child(
-                                            div()
-                                                .px(px(8.0))
-                                                .py(px(3.0))
-                                                .rounded_md()
-                                                .bg(rgb(0x064e3b))
-                                                .border_1()
-                                                .border_color(rgb(0x059669))
-                                                .text_color(rgb(0x34d399))
-                                                .text_xs()
+                                            Badge::new()
                                                 .child("✓ DKIM Pass"),
                                         )
                                         .child(
-                                            div()
-                                                .px(px(8.0))
-                                                .py(px(3.0))
-                                                .rounded_md()
-                                                .bg(rgb(0x064e3b))
-                                                .border_1()
-                                                .border_color(rgb(0x059669))
-                                                .text_color(rgb(0x34d399))
-                                                .text_xs()
+                                            Badge::new()
                                                 .child("✓ SPF Pass"),
                                         )
                                         .child(
-                                            div()
-                                                .px(px(8.0))
-                                                .py(px(3.0))
-                                                .rounded_md()
-                                                .bg(rgb(0x1e293b))
-                                                .border_1()
-                                                .border_color(rgb(0x334155))
-                                                .text_color(rgb(0x94a3b8))
-                                                .text_xs()
+                                            Badge::new()
                                                 .child(match self.message_viewer.security_status {
                                                     SecurityStatus::PgpSignedValid => "🔒 PGP Signed ✓",
                                                     SecurityStatus::PgpEncryptedAndSigned => "🔒 PGP Encrypted & Signed ✓",
@@ -3125,7 +3020,14 @@ pub mod gpui_app {
                                             "Block Remote Images"
                                         }),
                                 ),
-                        )
+                        );
+
+                    let body_panel = div()
+                        .flex()
+                        .flex_col()
+                        .flex_1()
+                        .w_full()
+                        .overflow_hidden()
                         // Attachments tray (if any)
                         .child(if !attachments.is_empty() {
                             div()
@@ -3225,8 +3127,12 @@ pub mod gpui_app {
                                         .text_xs()
                                         .text_color(rgb(0x94a3b8))
                                         .child("Rendered natively with Pure Rust GPUI Engine. Full-text search and offline storage powered by SQLite WAL + FTS5."),
-                                ),
-                        )
+                                ));
+
+                    v_resizable("reader-v-panels")
+                        .child(header_panel.into_any_element())
+                        .child(body_panel.into_any_element())
+                        .into_any_element()
                 } else {
                     div()
                         .flex()
@@ -3239,6 +3145,7 @@ pub mod gpui_app {
                                 .text_color(rgb(0x64748b))
                                 .child("Select a message to view its contents"),
                         )
+                        .into_any_element()
                 })
         }
 
@@ -3557,30 +3464,17 @@ pub mod gpui_app {
                                 .child("🎨 Appearance & Color Theme"),
                         )
                         .child(
-                            div()
-                                .flex()
-                                .flex_row()
-                                .flex_wrap()
-                                .gap(px(8.0))
-                                .children(themes.into_iter().map(|(th, label)| {
+                            TabBar::new("settings-theme-tabbar").children(
+                                themes.into_iter().map(|(th, label)| {
                                     let is_active = self.settings.theme == th;
-                                    div()
-                                        .id(ElementId::Name(format!("btn-theme-{}", label).into()))
-                                        .px(px(12.0))
-                                        .py(px(6.0))
-                                        .rounded_md()
-                                        .bg(if is_active { rgb(0x1e3a8a) } else { rgb(0x0f172a) })
-                                        .border_1()
-                                        .border_color(if is_active { rgb(0x3b82f6) } else { rgb(0x334155) })
-                                        .text_xs()
-                                        .text_color(if is_active { rgb(0x93c5fd) } else { rgb(0x94a3b8) })
-                                        .font_weight(if is_active { FontWeight::BOLD } else { FontWeight::NORMAL })
-                                        .cursor_pointer()
+                                    Tab::new()
+                                        .label(label)
+                                        .selected(is_active)
                                         .on_click(cx.listener(move |this, _, _, cx| {
                                             this.set_settings_theme(th, cx);
                                         }))
-                                        .child(format!("{}{}", if is_active { "● " } else { "" }, label))
-                                })),
+                                }),
+                            ),
                         ),
                 )
                 // Section 2: Reading & Display Density
@@ -3602,29 +3496,17 @@ pub mod gpui_app {
                                 .child("📐 Message List Density"),
                         )
                         .child(
-                            div()
-                                .flex()
-                                .flex_row()
-                                .gap(px(8.0))
-                                .children(densities.into_iter().map(|(dens, label)| {
+                            TabBar::new("settings-density-tabbar").children(
+                                densities.into_iter().map(|(dens, label)| {
                                     let is_active = self.settings.row_density == dens;
-                                    div()
-                                        .id(ElementId::Name(format!("btn-density-{}", label).into()))
-                                        .px(px(12.0))
-                                        .py(px(6.0))
-                                        .rounded_md()
-                                        .bg(if is_active { rgb(0x1e3a8a) } else { rgb(0x0f172a) })
-                                        .border_1()
-                                        .border_color(if is_active { rgb(0x3b82f6) } else { rgb(0x334155) })
-                                        .text_xs()
-                                        .text_color(if is_active { rgb(0x93c5fd) } else { rgb(0x94a3b8) })
-                                        .font_weight(if is_active { FontWeight::BOLD } else { FontWeight::NORMAL })
-                                        .cursor_pointer()
+                                    Tab::new()
+                                        .label(label)
+                                        .selected(is_active)
                                         .on_click(cx.listener(move |this, _, _, cx| {
                                             this.set_settings_density(dens, cx);
                                         }))
-                                        .child(format!("{}{}", if is_active { "● " } else { "" }, label))
-                                })),
+                                }),
+                            ),
                         ),
                 )
                 // Section 3: Privacy & Security
@@ -3814,56 +3696,69 @@ pub mod gpui_app {
                 "Connected • Direct3D/Vulkan 120 FPS"
             };
 
-            div()
-                .flex()
-                .flex_row()
-                .items_center()
-                .justify_between()
-                .h(px(24.0))
-                .px(px(16.0))
-                .bg(rgb(0x0c0e14))
-                .border_t_1()
-                .border_color(rgb(0x1a202c))
-                .text_xs()
-                .text_color(rgb(0x64748b))
-                .child(
-                    div()
-                        .flex()
-                        .flex_row()
-                        .items_center()
-                        .gap(px(6.0))
-                        .child(
-                            div()
-                                .w(px(6.0))
-                                .h(px(6.0))
-                                .rounded_full()
-                                .bg(indicator_color),
-                        )
-                        .child(
-                            div()
-                                .text_color(if is_error_or_offline {
-                                    rgb(0xfca5a5)
-                                } else {
-                                    rgb(0x94a3b8)
-                                })
-                                .child(self.status_message.clone()),
-                        ),
-                )
-                .child(div().child(status_indicator_text))
+            StatusBar::new().child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .justify_between()
+                    .w_full()
+                    .h(px(24.0))
+                    .px(px(16.0))
+                    .bg(rgb(0x0c0e14))
+                    .border_t_1()
+                    .border_color(rgb(0x1a202c))
+                    .text_xs()
+                    .text_color(rgb(0x64748b))
+                    .child(
+                        div()
+                            .flex()
+                            .flex_row()
+                            .items_center()
+                            .gap(px(6.0))
+                            .child(
+                                div()
+                                    .w(px(6.0))
+                                    .h(px(6.0))
+                                    .rounded_full()
+                                    .bg(indicator_color),
+                            )
+                            .child(
+                                div()
+                                    .text_color(if is_error_or_offline {
+                                        rgb(0xfca5a5)
+                                    } else {
+                                        rgb(0x94a3b8)
+                                    })
+                                    .child(self.status_message.clone()),
+                            ),
+                    )
+                    .child(div().child(status_indicator_text)),
+            )
         }
 
-        fn render_modal_layer(&self, cx: &Context<Self>) -> impl IntoElement {
+        fn render_modal_layer(
+            &self,
+            window: &mut Window,
+            cx: &mut Context<Self>,
+        ) -> impl IntoElement {
             match self.active_modal {
                 ActiveModal::None => div().into_any_element(),
-                ActiveModal::Compose => self.render_compose_modal(cx).into_any_element(),
+                ActiveModal::Compose => self.render_compose_modal(window, cx).into_any_element(),
                 ActiveModal::CommandPalette => {
                     self.render_command_palette_modal(cx).into_any_element()
                 }
-                ActiveModal::AddAccount => self.render_add_account_modal(cx).into_any_element(),
+                ActiveModal::AddAccount => {
+                    self.render_add_account_modal(window, cx).into_any_element()
+                }
             }
         }
 
-        fn render_compose_modal(&self, cx: &Context<Self>) -> impl IntoElement {
+        fn render_compose_modal(
+            &self,
+            window: &mut Window,
+            cx: &mut Context<Self>,
+        ) -> impl IntoElement {
             let to_text = if self.compose_to.is_empty() {
                 "user@example.com".to_string()
             } else {
@@ -3904,131 +3799,122 @@ pub mod gpui_app {
                 Vec::new()
             };
 
-            div()
-                .id("modal-compose-overlay")
-                .flex()
-                .items_center()
-                .justify_center()
-                .size_full()
-                .bg(rgb(0x000000bb))
-                .child(
-                    div()
-                        .id("modal-compose-box")
-                        .flex()
-                        .flex_col()
-                        .w(px(640.0))
-                        .h(px(520.0))
-                        .rounded_xl()
-                        .bg(rgb(0x161b26))
-                        .border_1()
-                        .border_color(rgb(0x2d3748))
-                        .p(px(20.0))
-                        .gap(px(10.0))
-                        .child(
-                            div()
-                                .flex()
-                                .flex_row()
-                                .items_center()
-                                .justify_between()
-                                .child(
-                                    div()
-                                        .text_base()
-                                        .font_weight(FontWeight::BOLD)
-                                        .text_color(rgb(0xf8fafc))
-                                        .child("✍️ New Message Composer"),
-                                )
-                                .child(
-                                    div()
-                                        .id("btn-close-compose")
-                                        .text_sm()
-                                        .text_color(rgb(0x94a3b8))
-                                        .cursor_pointer()
-                                        .on_click(cx.listener(|this, _, _, cx| {
-                                            this.active_modal = ActiveModal::None;
-                                            this.compose_inputs = None;
-                                            cx.notify();
-                                        }))
-                                        .child("✕"),
-                                ),
-                        )
-                        // Recipient "To:" Input + Autocomplete Chips
-                        .child(
-                            div()
-                                .flex()
-                                .flex_col()
-                                .gap(px(4.0))
-                                .child(
-                                    div()
-                                        .flex()
-                                        .flex_row()
-                                        .items_center()
-                                        .gap(px(8.0))
-                                        .p(px(8.0))
-                                        .rounded_md()
-                                        .bg(rgb(0x1c2333))
-                                        .child(
-                                            div()
-                                                .text_xs()
-                                                .font_weight(FontWeight::SEMIBOLD)
-                                                .text_color(rgb(0x94a3b8))
-                                                .child("To:"),
-                                        )
-                                        .child(if let Some(inputs) = &self.compose_inputs {
-                                            component::input::Input::new(&inputs.to)
-                                                .cleanable(true)
-                                                .into_any_element()
-                                        } else {
-                                            div()
-                                                .text_xs()
-                                                .text_color(rgb(0xf1f5f9))
-                                                .child(to_text)
-                                                .into_any_element()
-                                        }),
-                                )
-                                .child(if !suggestions.is_empty() {
-                                    div()
-                                        .flex()
-                                        .flex_row()
-                                        .flex_wrap()
-                                        .gap(px(6.0))
-                                        .px(px(4.0))
-                                        .children(suggestions.into_iter().map(|contact| {
-                                            let email_clone = contact.email.clone();
-                                            let display = contact
-                                                .display_name
-                                                .clone()
-                                                .unwrap_or_else(|| contact.email.clone());
-                                            div()
-                                                .id(ElementId::Name(
-                                                    format!("chip-contact-{}", contact.id).into(),
-                                                ))
-                                                .px(px(8.0))
-                                                .py(px(2.0))
-                                                .rounded_md()
-                                                .bg(rgb(0x1e3a8a))
-                                                .border_1()
-                                                .border_color(rgb(0x3b82f6))
-                                                .text_xs()
-                                                .text_color(rgb(0x93c5fd))
-                                                .cursor_pointer()
-                                                .on_click(cx.listener(move |this, _, window, cx| {
-                                                    if let Some(inputs) = &this.compose_inputs {
-                                                        inputs.to.update(cx, |inp, cx| {
-                                                            inp.set_value(
-                                                                email_clone.clone(),
-                                                                window,
-                                                                cx,
-                                                            )
-                                                        });
-                                                    }
-                                                    cx.notify();
-                                                }))
-                                                .child(format!("👤 {display} <{}>", contact.email))
-                                        }))
-                                } else {
-                                    div()
-                                }),
-                        )
+            Sheet::new(window, cx).child(
+                div()
+                    .id("modal-compose-overlay")
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .size_full()
+                    .bg(rgb(0x000000bb))
+                    .child(
+                        div()
+                            .id("modal-compose-box")
+                            .flex()
+                            .flex_col()
+                            .w(px(640.0))
+                            .h(px(520.0))
+                            .rounded_xl()
+                            .bg(rgb(0x161b26))
+                            .border_1()
+                            .border_color(rgb(0x2d3748))
+                            .p(px(20.0))
+                            .gap(px(10.0))
+                            .child(
+                                div()
+                                    .flex()
+                                    .flex_row()
+                                    .items_center()
+                                    .justify_between()
+                                    .child(
+                                        div()
+                                            .text_base()
+                                            .font_weight(FontWeight::BOLD)
+                                            .text_color(rgb(0xf8fafc))
+                                            .child("✍️ New Message Composer"),
+                                    )
+                                    .child(
+                                        div()
+                                            .id("btn-close-compose")
+                                            .text_sm()
+                                            .text_color(rgb(0x94a3b8))
+                                            .cursor_pointer()
+                                            .on_click(cx.listener(|this, _, _, cx| {
+                                                this.active_modal = ActiveModal::None;
+                                                this.compose_inputs = None;
+                                                cx.notify();
+                                            }))
+                                            .child("✕"),
+                                    ),
+                            )
+                            // Recipient "To:" Input + Autocomplete Chips via Form & Field
+                            .child(
+                                div()
+                                    .flex()
+                                    .flex_col()
+                                    .gap(px(4.0))
+                                    .child(
+                                        Form::vertical()
+                                            .child(
+                                                Field::new()
+                                                    .label("To:")
+                                                    .child(if let Some(inputs) = &self.compose_inputs {
+                                                        component::input::Input::new(&inputs.to)
+                                                            .cleanable(true)
+                                                            .into_any_element()
+                                                    } else {
+                                                        div()
+                                                            .text_xs()
+                                                            .text_color(rgb(0xf1f5f9))
+                                                            .child(to_text)
+                                                            .into_any_element()
+                                                    }),
+                                            ),
+                                    )
+                                    .child(if !suggestions.is_empty() {
+                                        div()
+                                            .flex()
+                                            .flex_row()
+                                            .flex_wrap()
+                                            .gap(px(6.0))
+                                            .px(px(4.0))
+                                            .children(suggestions.into_iter().map(|contact| {
+                                                let email_clone = contact.email.clone();
+                                                let display = contact
+                                                    .display_name
+                                                    .clone()
+                                                    .unwrap_or_else(|| contact.email.clone());
+                                                div()
+                                                    .id(ElementId::Name(
+                                                        format!("chip-contact-{}", contact.id).into(),
+                                                    ))
+                                                    .px(px(8.0))
+                                                    .py(px(2.0))
+                                                    .rounded_md()
+                                                    .bg(rgb(0x1e3a8a))
+                                                    .border_1()
+                                                    .border_color(rgb(0x3b82f6))
+                                                    .text_xs()
+                                                    .text_color(rgb(0x93c5fd))
+                                                    .cursor_pointer()
+                                                    .on_click(cx.listener(move |this, _, window, cx| {
+                                                        if let Some(inputs) = &this.compose_inputs {
+                                                            inputs.to.update(cx, |inp, cx| {
+                                                                inp.set_value(
+                                                                    email_clone.clone(),
+                                                                    window,
+                                                                    cx,
+                                                                )
+                                                            });
+                                                        }
+                                                        cx.notify();
+                                                    }))
+                                                    .child(format!("👤 {display} <{}>", contact.email))
+                                            }))
+                                    } else {
+                                        div()
+                                    }),
+                            )
                         // Subject Input
                         .child(
                             div()
@@ -4108,17 +3994,8 @@ pub mod gpui_app {
                                                 }),
                                         )
                                         .child(
-                                            div()
-                                                .id("btn-add-attachment")
-                                                .px(px(8.0))
-                                                .py(px(4.0))
-                                                .rounded_md()
-                                                .bg(rgb(0x1e293b))
-                                                .border_1()
-                                                .border_color(rgb(0x334155))
-                                                .text_xs()
-                                                .text_color(rgb(0xcbd5e1))
-                                                .cursor_pointer()
+                                            Button::new("btn-add-attachment")
+                                                .label("📎 Add Attachment")
                                                 .on_click(cx.listener(|this, _, _, cx| {
                                                     let idx = this.compose_attachments.len() + 1;
                                                     this.compose_attachments.push(
@@ -4134,26 +4011,15 @@ pub mod gpui_app {
                                                         cx,
                                                     );
                                                     cx.notify();
-                                                }))
-                                                .child("📎 Add Attachment"),
+                                                })),
                                         ),
                                 )
                                 .child(
-                                    div()
-                                        .id("btn-save-draft")
-                                        .px(px(8.0))
-                                        .py(px(4.0))
-                                        .rounded_md()
-                                        .bg(rgb(0x1e293b))
-                                        .border_1()
-                                        .border_color(rgb(0x334155))
-                                        .text_xs()
-                                        .text_color(rgb(0x38bdf8))
-                                        .cursor_pointer()
+                                    Button::new("btn-save-draft")
+                                        .label("💾 Save Draft")
                                         .on_click(cx.listener(|this, _, _, cx| {
                                             this.save_draft(cx);
-                                        }))
-                                        .child("💾 Save Draft"),
+                                        })),
                                 ),
                         )
                         // Body Input
@@ -4273,15 +4139,8 @@ pub mod gpui_app {
                                         .items_center()
                                         .gap(px(8.0))
                                         .child(
-                                            div()
-                                                .id("btn-discard-compose")
-                                                .px(px(14.0))
-                                                .py(px(6.0))
-                                                .rounded_md()
-                                                .bg(rgb(0x1e293b))
-                                                .text_color(rgb(0xcbd5e1))
-                                                .text_xs()
-                                                .cursor_pointer()
+                                            Button::new("btn-discard-compose")
+                                                .label("Discard")
                                                 .on_click(cx.listener(|this, _, _, cx| {
                                                     this.active_modal = ActiveModal::None;
                                                     this.compose_inputs = None;
@@ -4289,31 +4148,23 @@ pub mod gpui_app {
                                                     this.compose_draft_id = None;
                                                     this.compose_reply_to_id = None;
                                                     cx.notify();
-                                                }))
-                                                .child("Discard"),
+                                                })),
                                         )
                                         .child(
-                                            div()
-                                                .id("btn-send-compose")
-                                                .px(px(16.0))
-                                                .py(px(6.0))
-                                                .rounded_md()
-                                                .bg(rgb(0x2563eb))
-                                                .text_color(rgb(0xffffff))
-                                                .text_xs()
-                                                .font_weight(FontWeight::BOLD)
-                                                .cursor_pointer()
+                                            Button::new("btn-send-compose")
+                                                .label("Send 🚀")
+                                                .primary()
                                                 .on_click(cx.listener(|this, _, _, cx| {
                                                     this.send_composed_message(cx);
-                                                }))
-                                                .child("Send 🚀"),
+                                                })),
                                         ),
                                 ),
                         ),
                 )
+            )
         }
 
-        fn render_command_palette_modal(&self, cx: &Context<Self>) -> impl IntoElement {
+        fn render_command_palette_modal(&self, cx: &mut Context<Self>) -> impl IntoElement {
             let actions: Vec<(String, String, Option<String>)> = self
                 .command_palette
                 .filtered_actions()
@@ -4321,142 +4172,162 @@ pub mod gpui_app {
                 .map(|a| (a.id.clone(), a.title.clone(), a.shortcut.clone()))
                 .collect();
 
-            div()
-                .id("modal-palette-overlay")
-                .flex()
-                .items_center()
-                .justify_center()
-                .size_full()
-                .bg(rgb(0x000000bb))
-                .child(
-                    div()
-                        .id("modal-palette-box")
-                        .flex()
-                        .flex_col()
-                        .w(px(520.0))
-                        .rounded_xl()
-                        .bg(rgb(0x161b26))
-                        .border_1()
-                        .border_color(rgb(0x2d3748))
-                        .p(px(16.0))
-                        .gap(px(10.0))
-                        .child(
-                            div()
-                                .flex()
-                                .flex_row()
-                                .items_center()
-                                .p(px(10.0))
-                                .rounded_md()
-                                .bg(rgb(0x111622))
-                                .border_1()
-                                .border_color(rgb(0x232c40))
-                                .gap(px(8.0))
-                                .child(div().text_sm().child("⌘"))
-                                .child(
-                                    div()
-                                        .text_xs()
-                                        .text_color(if self.command_palette.query.is_empty() {
-                                            rgb(0x94a3b8)
-                                        } else {
-                                            rgb(0xf1f5f9)
-                                        })
-                                        .child(if self.command_palette.query.is_empty() {
-                                            "Type a command or search action...".to_string()
-                                        } else {
-                                            self.command_palette.query.clone()
-                                        }),
-                                ),
-                        )
-                        .child(div().flex().flex_col().gap(px(4.0)).children(
-                            actions.into_iter().enumerate().map(
-                                |(idx, (act_id, title, shortcut))| {
-                                    let act_id_clone = act_id.clone();
-                                    div()
-                                        .id(ElementId::Name(
-                                            format!("palette-action-{}", idx).into(),
-                                        ))
-                                        .flex()
-                                        .flex_row()
-                                        .items_center()
-                                        .justify_between()
-                                        .px(px(12.0))
-                                        .py(px(8.0))
-                                        .rounded_md()
-                                        .bg(if idx == 0 {
-                                            rgb(0x1e293b)
-                                        } else {
-                                            rgb(0x00000000)
-                                        })
-                                        .cursor_pointer()
-                                        .on_click(cx.listener(move |this, _, _, cx| {
-                                            match act_id_clone.as_str() {
-                                                "mail.compose" => {
-                                                    this.active_modal = ActiveModal::Compose;
-                                                }
-                                                "nav.inbox" => {
-                                                    this.active_tab = ActiveViewTab::Mail;
-                                                    if let Some(inbox) = this
-                                                        .folders
-                                                        .iter()
-                                                        .find(|f| f.role == FolderRole::Inbox)
-                                                    {
-                                                        this.selected_folder_id =
-                                                            Some(inbox.id.clone());
+            let cmd_el = if let Some(ref cmd_state) = self.command_state {
+                let mut cmd = Command::new(cmd_state);
+                for (_idx, (_act_id, title, _shortcut)) in actions.iter().enumerate() {
+                    cmd = cmd.item(CommandItem::new().label(title.clone()));
+                }
+                Some(cmd)
+            } else {
+                None
+            };
+
+            Dialog::new(cx).child(
+                div()
+                    .id("modal-palette-overlay")
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .size_full()
+                    .bg(rgb(0x000000bb))
+                    .child(
+                        div()
+                            .id("modal-palette-box")
+                            .flex()
+                            .flex_col()
+                            .w(px(520.0))
+                            .rounded_xl()
+                            .bg(rgb(0x161b26))
+                            .border_1()
+                            .border_color(rgb(0x2d3748))
+                            .p(px(16.0))
+                            .gap(px(10.0))
+                            .children(cmd_el)
+                            .child(
+                                div()
+                                    .flex()
+                                    .flex_row()
+                                    .items_center()
+                                    .p(px(10.0))
+                                    .rounded_md()
+                                    .bg(rgb(0x111622))
+                                    .border_1()
+                                    .border_color(rgb(0x232c40))
+                                    .gap(px(8.0))
+                                    .child(div().text_sm().child("⌘"))
+                                    .child(
+                                        div()
+                                            .text_xs()
+                                            .text_color(if self.command_palette.query.is_empty() {
+                                                rgb(0x94a3b8)
+                                            } else {
+                                                rgb(0xf1f5f9)
+                                            })
+                                            .child(if self.command_palette.query.is_empty() {
+                                                "Type a command or search action...".to_string()
+                                            } else {
+                                                self.command_palette.query.clone()
+                                            }),
+                                    ),
+                            )
+                            .child(div().flex().flex_col().gap(px(4.0)).children(
+                                actions.into_iter().enumerate().map(
+                                    |(idx, (act_id, title, shortcut))| {
+                                        let act_id_clone = act_id.clone();
+                                        div()
+                                            .id(ElementId::Name(
+                                                format!("palette-action-{}", idx).into(),
+                                            ))
+                                            .flex()
+                                            .flex_row()
+                                            .items_center()
+                                            .justify_between()
+                                            .px(px(12.0))
+                                            .py(px(8.0))
+                                            .rounded_md()
+                                            .bg(if idx == 0 {
+                                                rgb(0x1e293b)
+                                            } else {
+                                                rgb(0x00000000)
+                                            })
+                                            .cursor_pointer()
+                                            .on_click(cx.listener(move |this, _, _, cx| {
+                                                match act_id_clone.as_str() {
+                                                    "mail.compose" => {
+                                                        this.active_modal = ActiveModal::Compose;
                                                     }
-                                                    this.active_modal = ActiveModal::None;
+                                                    "nav.inbox" => {
+                                                        this.active_tab = ActiveViewTab::Mail;
+                                                        if let Some(inbox) = this
+                                                            .folders
+                                                            .iter()
+                                                            .find(|f| f.role == FolderRole::Inbox)
+                                                        {
+                                                            this.selected_folder_id =
+                                                                Some(inbox.id.clone());
+                                                        }
+                                                        this.active_modal = ActiveModal::None;
+                                                    }
+                                                    "nav.flagged" => {
+                                                        this.active_tab = ActiveViewTab::Mail;
+                                                        this.list_filter = ListFilter::Flagged;
+                                                        this.active_modal = ActiveModal::None;
+                                                    }
+                                                    "mail.sync" => {
+                                                        this.active_modal = ActiveModal::None;
+                                                        this.trigger_sync(cx);
+                                                    }
+                                                    "view.calendar" => {
+                                                        this.active_tab = ActiveViewTab::Calendar;
+                                                        this.active_modal = ActiveModal::None;
+                                                    }
+                                                    "view.contacts" => {
+                                                        this.active_tab = ActiveViewTab::Contacts;
+                                                        this.active_modal = ActiveModal::None;
+                                                    }
+                                                    "view.tasks" => {
+                                                        this.active_tab = ActiveViewTab::Tasks;
+                                                        this.active_modal = ActiveModal::None;
+                                                    }
+                                                    "settings.keybindings" => {
+                                                        this.active_tab = ActiveViewTab::Settings;
+                                                        this.active_modal = ActiveModal::None;
+                                                    }
+                                                    _ => {
+                                                        this.active_modal = ActiveModal::None;
+                                                    }
                                                 }
-                                                "nav.flagged" => {
-                                                    this.active_tab = ActiveViewTab::Mail;
-                                                    this.list_filter = ListFilter::Flagged;
-                                                    this.active_modal = ActiveModal::None;
-                                                }
-                                                "mail.sync" => {
-                                                    this.active_modal = ActiveModal::None;
-                                                    this.trigger_sync(cx);
-                                                }
-                                                "view.calendar" => {
-                                                    this.active_tab = ActiveViewTab::Calendar;
-                                                    this.active_modal = ActiveModal::None;
-                                                }
-                                                "view.contacts" => {
-                                                    this.active_tab = ActiveViewTab::Contacts;
-                                                    this.active_modal = ActiveModal::None;
-                                                }
-                                                "view.tasks" => {
-                                                    this.active_tab = ActiveViewTab::Tasks;
-                                                    this.active_modal = ActiveModal::None;
-                                                }
-                                                "settings.keybindings" => {
-                                                    this.active_tab = ActiveViewTab::Settings;
-                                                    this.active_modal = ActiveModal::None;
-                                                }
-                                                _ => {
-                                                    this.active_modal = ActiveModal::None;
-                                                }
-                                            }
-                                            this.command_palette.close();
-                                            cx.notify();
-                                        }))
-                                        .child(
-                                            div().text_xs().text_color(rgb(0xf1f5f9)).child(title),
-                                        )
-                                        .child(
-                                            div()
-                                                .px(px(6.0))
-                                                .py(px(2.0))
-                                                .rounded_md()
-                                                .bg(rgb(0x111622))
-                                                .text_xs()
-                                                .text_color(rgb(0x94a3b8))
-                                                .child(shortcut.unwrap_or_default()),
-                                        )
-                                },
-                            ),
-                        )),
-                )
+                                                this.command_palette.close();
+                                                cx.notify();
+                                            }))
+                                            .child(
+                                                div()
+                                                    .text_xs()
+                                                    .text_color(rgb(0xf1f5f9))
+                                                    .child(title),
+                                            )
+                                            .child(
+                                                div()
+                                                    .px(px(6.0))
+                                                    .py(px(2.0))
+                                                    .rounded_md()
+                                                    .bg(rgb(0x111622))
+                                                    .text_xs()
+                                                    .text_color(rgb(0x94a3b8))
+                                                    .child(shortcut.unwrap_or_default()),
+                                            )
+                                    },
+                                ),
+                            )),
+                    ),
+            )
         }
 
-        fn render_add_account_modal(&self, cx: &Context<Self>) -> impl IntoElement {
+        fn render_add_account_modal(
+            &self,
+            _window: &mut Window,
+            cx: &mut Context<Self>,
+        ) -> impl IntoElement {
             let selected_p = self.login_wizard.provider_type.clone();
             let is_oauth = self.login_wizard.auth_mode == AuthModeChoice::OAuth2
                 && (selected_p == ProviderType::Gmail || selected_p == ProviderType::Graph);
@@ -4507,8 +4378,9 @@ pub mod gpui_app {
 
             let inputs_opt = self.wizard_inputs.as_ref();
 
-            div()
-                .id("modal-add-account-overlay")
+            Dialog::new(cx).child(
+                div()
+                    .id("modal-add-account-overlay")
                 .flex()
                 .items_center()
                 .justify_center()
@@ -4664,40 +4536,31 @@ pub mod gpui_app {
                                                     .bg(rgb(0x181f2f))
                                                     .p(px(2.0))
                                                     .rounded_md()
-                                                    .child(
-                                                        div()
-                                                            .id("auth-mode-oauth2")
-                                                            .px(px(8.0))
-                                                            .py(px(3.0))
-                                                            .rounded_sm()
-                                                            .bg(if is_oauth_active { rgb(0x2563eb) } else { rgb(0x00000000) })
-                                                            .text_xs()
-                                                            .font_weight(if is_oauth_active { FontWeight::BOLD } else { FontWeight::NORMAL })
-                                                            .text_color(if is_oauth_active { rgb(0xffffff) } else { rgb(0x94a3b8) })
-                                                            .cursor_pointer()
+                                                    .child({
+                                                        let mut btn = Button::new("auth-mode-oauth2")
+                                                            .label("🌐 Browser OAuth2")
                                                             .on_click(cx.listener(|this, _, _, cx| {
                                                                 this.login_wizard.auth_mode = AuthModeChoice::OAuth2;
                                                                 cx.notify();
-                                                            }))
-                                                            .child("🌐 Browser OAuth2"),
-                                                    )
-                                                    .child(
-                                                        div()
-                                                            .id("auth-mode-password")
-                                                            .px(px(8.0))
-                                                            .py(px(3.0))
-                                                            .rounded_sm()
-                                                            .bg(if !is_oauth_active { rgb(0x2563eb) } else { rgb(0x00000000) })
-                                                            .text_xs()
-                                                            .font_weight(if !is_oauth_active { FontWeight::BOLD } else { FontWeight::NORMAL })
-                                                            .text_color(if !is_oauth_active { rgb(0xffffff) } else { rgb(0x94a3b8) })
-                                                            .cursor_pointer()
+                                                            }));
+                                                        if is_oauth_active {
+                                                            btn = btn.primary();
+                                                        }
+                                                        btn
+                                                    })
+                                                    .child({
+                                                        let label = if selected_p == ProviderType::Gmail { "🔑 App Password (IMAP)" } else { "🔑 Password / IMAP" };
+                                                        let mut btn = Button::new("auth-mode-password")
+                                                            .label(label)
                                                             .on_click(cx.listener(|this, _, _, cx| {
                                                                 this.login_wizard.auth_mode = AuthModeChoice::Password;
                                                                 cx.notify();
-                                                            }))
-                                                            .child(if selected_p == ProviderType::Gmail { "🔑 App Password (IMAP)" } else { "🔑 Password / IMAP" }),
-                                                    )
+                                                            }));
+                                                        if !is_oauth_active {
+                                                            btn = btn.primary();
+                                                        }
+                                                        btn
+                                                    })
                                             } else {
                                                 div()
                                             }
@@ -4744,44 +4607,26 @@ pub mod gpui_app {
                                                     ),
                                             )
                                             .child(
-                                                div()
-                                                    .flex()
-                                                    .flex_col()
-                                                    .gap(px(4.0))
+                                                Form::vertical()
+                                                    .gap(px(8.0))
                                                     .child(
-                                                        div()
-                                                            .flex()
-                                                            .flex_row()
-                                                            .items_center()
-                                                            .justify_between()
-                                                            .child(div().text_xs().font_weight(FontWeight::SEMIBOLD).text_color(rgb(0x94a3b8)).child("OAuth Client ID:"))
-                                                            .child(div().text_xs().text_color(rgb(0x64748b)).child("Optional (env: VESPETREL_GOOGLE_CLIENT_ID)")),
+                                                        Field::new()
+                                                            .label("OAuth Client ID (Optional):")
+                                                            .child(if let Some(inputs) = inputs_opt {
+                                                                component::input::Input::new(&inputs.client_id).cleanable(true).into_any_element()
+                                                            } else {
+                                                                div().text_xs().text_color(rgb(0x64748b)).child("OAuth Client ID").into_any_element()
+                                                            }),
                                                     )
-                                                    .child(if let Some(inputs) = inputs_opt {
-                                                        component::input::Input::new(&inputs.client_id).cleanable(true).into_any_element()
-                                                    } else {
-                                                        div().text_xs().text_color(rgb(0x64748b)).child("OAuth Client ID").into_any_element()
-                                                    }),
-                                            )
-                                            .child(
-                                                div()
-                                                    .flex()
-                                                    .flex_col()
-                                                    .gap(px(4.0))
                                                     .child(
-                                                        div()
-                                                            .flex()
-                                                            .flex_row()
-                                                            .items_center()
-                                                            .justify_between()
-                                                            .child(div().text_xs().font_weight(FontWeight::SEMIBOLD).text_color(rgb(0x94a3b8)).child("Email Address (Optional hint):"))
-                                                            .child(div().text_xs().text_color(rgb(0x64748b)).child("Auto-discovered from Google if blank")),
-                                                    )
-                                                    .child(if let Some(inputs) = inputs_opt {
-                                                        component::input::Input::new(&inputs.email).cleanable(true).into_any_element()
-                                                    } else {
-                                                        div().text_xs().text_color(rgb(0x64748b)).child("user@gmail.com").into_any_element()
-                                                    }),
+                                                        Field::new()
+                                                            .label("Email Address (Optional hint):")
+                                                            .child(if let Some(inputs) = inputs_opt {
+                                                                component::input::Input::new(&inputs.email).cleanable(true).into_any_element()
+                                                            } else {
+                                                                div().text_xs().text_color(rgb(0x64748b)).child("user@gmail.com").into_any_element()
+                                                            }),
+                                                    ),
                                             )
                                             .child(
                                                 if let Some(status_str) = &self.login_wizard.oauth_status {
@@ -4823,40 +4668,35 @@ pub mod gpui_app {
                                                     .child("💡 Google App Password: In your Google Account, go to Security → 2-Step Verification → App passwords. Generate a 16-character password and enter it below."),
                                             )
                                             .child(
-                                                div()
-                                                    .flex()
-                                                    .flex_col()
-                                                    .gap(px(4.0))
-                                                    .child(div().text_xs().font_weight(FontWeight::SEMIBOLD).text_color(rgb(0x94a3b8)).child("Gmail Address:"))
-                                                    .child(if let Some(inputs) = inputs_opt {
-                                                        component::input::Input::new(&inputs.email).cleanable(true).into_any_element()
-                                                    } else {
-                                                        div().text_xs().text_color(rgb(0xe2e8f0)).child(display_email.to_string()).into_any_element()
-                                                    }),
-                                            )
-                                            .child(
-                                                div()
-                                                    .flex()
-                                                    .flex_col()
-                                                    .gap(px(4.0))
-                                                    .child(div().text_xs().font_weight(FontWeight::SEMIBOLD).text_color(rgb(0x94a3b8)).child("16-character Google App Password:"))
-                                                    .child(if let Some(inputs) = inputs_opt {
-                                                        component::input::Input::new(&inputs.password).mask_toggle().cleanable(true).into_any_element()
-                                                    } else {
-                                                        div().text_xs().text_color(rgb(0x64748b)).child("••••••••••••••••").into_any_element()
-                                                    }),
-                                            )
-                                            .child(
-                                                div()
-                                                    .flex()
-                                                    .flex_col()
-                                                    .gap(px(4.0))
-                                                    .child(div().text_xs().font_weight(FontWeight::SEMIBOLD).text_color(rgb(0x94a3b8)).child("Display Name (optional):"))
-                                                    .child(if let Some(inputs) = inputs_opt {
-                                                        component::input::Input::new(&inputs.name).cleanable(true).into_any_element()
-                                                    } else {
-                                                        div().text_xs().text_color(rgb(0xe2e8f0)).child(display_name.to_string()).into_any_element()
-                                                    }),
+                                                Form::vertical()
+                                                    .gap(px(8.0))
+                                                    .child(
+                                                        Field::new()
+                                                            .label("Gmail Address:")
+                                                            .child(if let Some(inputs) = inputs_opt {
+                                                                component::input::Input::new(&inputs.email).cleanable(true).into_any_element()
+                                                            } else {
+                                                                div().text_xs().text_color(rgb(0xe2e8f0)).child(display_email.to_string()).into_any_element()
+                                                            }),
+                                                    )
+                                                    .child(
+                                                        Field::new()
+                                                            .label("16-character Google App Password:")
+                                                            .child(if let Some(inputs) = inputs_opt {
+                                                                component::input::Input::new(&inputs.password).mask_toggle().cleanable(true).into_any_element()
+                                                            } else {
+                                                                div().text_xs().text_color(rgb(0x64748b)).child("••••••••••••••••").into_any_element()
+                                                            }),
+                                                    )
+                                                    .child(
+                                                        Field::new()
+                                                            .label("Display Name (optional):")
+                                                            .child(if let Some(inputs) = inputs_opt {
+                                                                component::input::Input::new(&inputs.name).cleanable(true).into_any_element()
+                                                            } else {
+                                                                div().text_xs().text_color(rgb(0xe2e8f0)).child(display_name.to_string()).into_any_element()
+                                                            }),
+                                                    ),
                                             )
                                             .child(
                                                 div()
@@ -4881,40 +4721,35 @@ pub mod gpui_app {
                                             .border_1()
                                             .border_color(rgb(0x232c3f))
                                             .child(
-                                                div()
-                                                    .flex()
-                                                    .flex_col()
-                                                    .gap(px(4.0))
-                                                    .child(div().text_xs().font_weight(FontWeight::SEMIBOLD).text_color(rgb(0x94a3b8)).child("Email Address:"))
-                                                    .child(if let Some(inputs) = inputs_opt {
-                                                        component::input::Input::new(&inputs.email).cleanable(true).into_any_element()
-                                                    } else {
-                                                        div().text_xs().text_color(rgb(0xe2e8f0)).child(display_email.to_string()).into_any_element()
-                                                    }),
-                                            )
-                                            .child(
-                                                div()
-                                                    .flex()
-                                                    .flex_col()
-                                                    .gap(px(4.0))
-                                                    .child(div().text_xs().font_weight(FontWeight::SEMIBOLD).text_color(rgb(0x94a3b8)).child("Password / Token:"))
-                                                    .child(if let Some(inputs) = inputs_opt {
-                                                        component::input::Input::new(&inputs.password).mask_toggle().cleanable(true).into_any_element()
-                                                    } else {
-                                                        div().text_xs().text_color(rgb(0x64748b)).child("••••••••••••••••").into_any_element()
-                                                    }),
-                                            )
-                                            .child(
-                                                div()
-                                                    .flex()
-                                                    .flex_col()
-                                                    .gap(px(4.0))
-                                                    .child(div().text_xs().font_weight(FontWeight::SEMIBOLD).text_color(rgb(0x94a3b8)).child("Display Name (optional):"))
-                                                    .child(if let Some(inputs) = inputs_opt {
-                                                        component::input::Input::new(&inputs.name).cleanable(true).into_any_element()
-                                                    } else {
-                                                        div().text_xs().text_color(rgb(0xe2e8f0)).child(display_name.to_string()).into_any_element()
-                                                    }),
+                                                Form::vertical()
+                                                    .gap(px(8.0))
+                                                    .child(
+                                                        Field::new()
+                                                            .label("Email Address:")
+                                                            .child(if let Some(inputs) = inputs_opt {
+                                                                component::input::Input::new(&inputs.email).cleanable(true).into_any_element()
+                                                            } else {
+                                                                div().text_xs().text_color(rgb(0xe2e8f0)).child(display_email.to_string()).into_any_element()
+                                                            }),
+                                                    )
+                                                    .child(
+                                                        Field::new()
+                                                            .label("Password / Token:")
+                                                            .child(if let Some(inputs) = inputs_opt {
+                                                                component::input::Input::new(&inputs.password).mask_toggle().cleanable(true).into_any_element()
+                                                            } else {
+                                                                div().text_xs().text_color(rgb(0x64748b)).child("••••••••••••••••").into_any_element()
+                                                            }),
+                                                    )
+                                                    .child(
+                                                        Field::new()
+                                                            .label("Display Name (optional):")
+                                                            .child(if let Some(inputs) = inputs_opt {
+                                                                component::input::Input::new(&inputs.name).cleanable(true).into_any_element()
+                                                            } else {
+                                                                div().text_xs().text_color(rgb(0xe2e8f0)).child(display_name.to_string()).into_any_element()
+                                                            }),
+                                                    ),
                                             )
                                             .child(
                                                 div()
@@ -4992,40 +4827,35 @@ pub mod gpui_app {
                                             .border_1()
                                             .border_color(rgb(0x232c3f))
                                             .child(
-                                                div()
-                                                    .flex()
-                                                    .flex_col()
-                                                    .gap(px(4.0))
-                                                    .child(div().text_xs().font_weight(FontWeight::SEMIBOLD).text_color(rgb(0x94a3b8)).child("Email Address:"))
-                                                    .child(if let Some(inputs) = inputs_opt {
-                                                        component::input::Input::new(&inputs.email).cleanable(true).into_any_element()
-                                                    } else {
-                                                        div().text_xs().text_color(rgb(0xe2e8f0)).child(display_email.to_string()).into_any_element()
-                                                    }),
-                                            )
-                                            .child(
-                                                div()
-                                                    .flex()
-                                                    .flex_col()
-                                                    .gap(px(4.0))
-                                                    .child(div().text_xs().font_weight(FontWeight::SEMIBOLD).text_color(rgb(0x94a3b8)).child("Password / API Token:"))
-                                                    .child(if let Some(inputs) = inputs_opt {
-                                                        component::input::Input::new(&inputs.password).mask_toggle().cleanable(true).into_any_element()
-                                                    } else {
-                                                        div().text_xs().text_color(rgb(0x64748b)).child("••••••••••••••••").into_any_element()
-                                                    }),
-                                            )
-                                            .child(
-                                                div()
-                                                    .flex()
-                                                    .flex_col()
-                                                    .gap(px(4.0))
-                                                    .child(div().text_xs().font_weight(FontWeight::SEMIBOLD).text_color(rgb(0x94a3b8)).child("Server Host:"))
-                                                    .child(if let Some(inputs) = inputs_opt {
-                                                        component::input::Input::new(&inputs.incoming_host).cleanable(true).into_any_element()
-                                                    } else {
-                                                        div().text_xs().text_color(rgb(0x64748b)).child("api.fastmail.com").into_any_element()
-                                                    }),
+                                                Form::vertical()
+                                                    .gap(px(8.0))
+                                                    .child(
+                                                        Field::new()
+                                                            .label("Email Address:")
+                                                            .child(if let Some(inputs) = inputs_opt {
+                                                                component::input::Input::new(&inputs.email).cleanable(true).into_any_element()
+                                                            } else {
+                                                                div().text_xs().text_color(rgb(0xe2e8f0)).child(display_email.to_string()).into_any_element()
+                                                            }),
+                                                    )
+                                                    .child(
+                                                        Field::new()
+                                                            .label("Password / API Token:")
+                                                            .child(if let Some(inputs) = inputs_opt {
+                                                                component::input::Input::new(&inputs.password).mask_toggle().cleanable(true).into_any_element()
+                                                            } else {
+                                                                div().text_xs().text_color(rgb(0x64748b)).child("••••••••••••••••").into_any_element()
+                                                            }),
+                                                    )
+                                                    .child(
+                                                        Field::new()
+                                                            .label("Server Host:")
+                                                            .child(if let Some(inputs) = inputs_opt {
+                                                                component::input::Input::new(&inputs.incoming_host).cleanable(true).into_any_element()
+                                                            } else {
+                                                                div().text_xs().text_color(rgb(0x64748b)).child("api.fastmail.com").into_any_element()
+                                                            }),
+                                                    ),
                                             )
                                     }
                                 ),
@@ -5178,21 +5008,13 @@ pub mod gpui_app {
                                 .border_t_1()
                                 .border_color(rgb(0x1f293d))
                                 .child(
-                                    div()
-                                        .id("wizard-btn-cancel")
-                                        .px(px(14.0))
-                                        .py(px(7.0))
-                                        .rounded_md()
-                                        .bg(rgb(0x1e293b))
-                                        .text_xs()
-                                        .text_color(rgb(0xcbd5e1))
-                                        .cursor_pointer()
+                                    Button::new("wizard-btn-cancel")
+                                        .label("Cancel")
                                         .on_click(cx.listener(|this, _, _, cx| {
                                             this.active_modal = ActiveModal::None;
                                             this.wizard_inputs = None;
                                             cx.notify();
-                                        }))
-                                        .child("Cancel"),
+                                        })),
                                 )
                                 .child(
                                     if is_oauth {
@@ -5201,31 +5023,17 @@ pub mod gpui_app {
                                             ProviderType::Graph => "Sign in with Microsoft (Browser) 🏢",
                                             _ => "Sign in with Browser 🌐",
                                         };
-                                        div()
-                                            .id("wizard-btn-oauth")
-                                            .px(px(18.0))
-                                            .py(px(7.0))
-                                            .rounded_md()
-                                            .bg(rgb(0x2563eb))
-                                            .text_xs()
-                                            .font_weight(FontWeight::BOLD)
-                                            .text_color(rgb(0xffffff))
-                                            .cursor_pointer()
+                                        Button::new("wizard-btn-oauth")
+                                            .label(btn_label)
+                                            .primary()
                                             .on_click(cx.listener(|this, _, window, cx| {
                                                 this.start_oauth2_flow(window, cx);
                                             }))
-                                            .child(btn_label)
+                                            .into_any_element()
                                     } else {
-                                        div()
-                                            .id("wizard-btn-connect")
-                                            .px(px(18.0))
-                                            .py(px(7.0))
-                                            .rounded_md()
-                                            .bg(rgb(0x2563eb))
-                                            .text_xs()
-                                            .font_weight(FontWeight::BOLD)
-                                            .text_color(rgb(0xffffff))
-                                            .cursor_pointer()
+                                        Button::new("wizard-btn-connect")
+                                            .label("Connect Account")
+                                            .primary()
                                             .on_click(cx.listener(|this, _, _, cx| {
                                                 let (email, password, name, mut in_host, mut in_port, mut out_host, mut out_port) = if let Some(inputs) = &this.wizard_inputs {
                                                     (
@@ -5375,11 +5183,12 @@ pub mod gpui_app {
                                                     }
                                                 }).detach();
                                             }))
-                                            .child("Connect Account 🚀")
+                                            .into_any_element()
                                     },
                                 ),
                         ),
-                )
+                ),
+            )
         }
 
         /// Initiates the OAuth2 PKCE authorization flow via system default web browser
