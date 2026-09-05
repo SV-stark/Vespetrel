@@ -52,6 +52,12 @@ pub struct AuthConfig {
     pub expires_at: Option<i64>,
     /// OAuth2 client info (non-secret)
     pub oauth: Option<OAuthConfig>,
+    /// Optional incoming server hostname
+    #[serde(default)]
+    pub server_host: Option<String>,
+    /// Optional incoming server port
+    #[serde(default)]
+    pub server_port: Option<u16>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -81,6 +87,8 @@ impl Default for AuthConfig {
             refresh_token_keyring_key: None,
             expires_at: None,
             oauth: None,
+            server_host: None,
+            server_port: None,
         }
     }
 }

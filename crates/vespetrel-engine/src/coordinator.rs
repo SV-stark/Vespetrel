@@ -190,23 +190,31 @@ pub fn make_provider_with_token(
 ) -> Arc<dyn MailProvider> {
     match account.provider_type {
         vespetrel_core::ProviderType::Imap => {
-            let domain = account.email.split('@').nth(1).unwrap_or("localhost");
-            let host = match domain {
-                "outlook.com" | "hotmail.com" | "live.com" | "office365.com" => {
-                    "outlook.office365.com".to_string()
+            let host = account.auth_config.server_host.clone().unwrap_or_else(|| {
+                let domain = account.email.split('@').nth(1).unwrap_or("localhost");
+                match domain {
+                    "outlook.com" | "hotmail.com" | "live.com" | "office365.com" => {
+                        "outlook.office365.com".to_string()
+                    }
+                    "gmail.com" => "imap.gmail.com".to_string(),
+                    "yahoo.com" => "imap.mail.yahoo.com".to_string(),
+                    "icloud.com" => "imap.mail.me.com".to_string(),
+                    other => format!("imap.{other}"),
                 }
-                "gmail.com" => "imap.gmail.com".to_string(),
-                "yahoo.com" => "imap.mail.yahoo.com".to_string(),
-                "icloud.com" => "imap.mail.me.com".to_string(),
-                other => format!("imap.{other}"),
-            };
-            let config = vespetrel_imap::ImapConfig::new(host, 993, &account.email, auth_token);
+            });
+            let port = account.auth_config.server_port.unwrap_or(993);
+            let config = vespetrel_imap::ImapConfig::new(host, port, &account.email, auth_token);
             Arc::new(vespetrel_imap::ImapProvider::new(config))
         }
         vespetrel_core::ProviderType::Gmail => {
-            let config =
-                vespetrel_imap::ImapConfig::new("imap.gmail.com", 993, &account.email, auth_token)
-                    .with_xoauth2();
+            let host = account
+                .auth_config
+                .server_host
+                .clone()
+                .unwrap_or_else(|| "imap.gmail.com".to_string());
+            let port = account.auth_config.server_port.unwrap_or(993);
+            let config = vespetrel_imap::ImapConfig::new(host, port, &account.email, auth_token)
+                .with_xoauth2();
             Arc::new(vespetrel_imap::ImapProvider::new(config))
         }
         vespetrel_core::ProviderType::Jmap => {

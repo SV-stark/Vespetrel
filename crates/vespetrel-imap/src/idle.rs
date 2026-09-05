@@ -239,28 +239,22 @@ where
                     if should_exit {
                         return Ok(());
                     }
+                } else if conn.is_mock() {
+                    if let Some(ev) = idle_loop.handle_untagged("* 1 EXISTS") {
+                        on_event(ev);
+                    }
+                    tokio::select! {
+                        _ = renew_ticker.tick() => {
+                            debug!("25-minute IDLE renewal interval elapsed, cycling IDLE/DONE");
+                            let _ = conn.execute_cmd("DONE").await;
+                            let _ = conn.execute_cmd(conn.cmd_idle()).await;
+                        }
+                        _ = tokio::time::sleep(Duration::from_millis(50)) => {
+                            return Ok(());
+                        }
+                    }
                 } else {
-                    #[cfg(any(test, feature = "mock"))]
-                    {
-                        if let Some(ev) = idle_loop.handle_untagged("* 1 EXISTS") {
-                            on_event(ev);
-                        }
-                        tokio::select! {
-                            _ = renew_ticker.tick() => {
-                                debug!("25-minute IDLE renewal interval elapsed, cycling IDLE/DONE");
-                                let _ = conn.execute_cmd("DONE").await;
-                                let _ = conn.execute_cmd(conn.cmd_idle()).await;
-                            }
-                            _ = tokio::time::sleep(Duration::from_millis(50)) => {
-                                return Ok(());
-                            }
-                        }
-                    }
-
-                    #[cfg(not(any(test, feature = "mock")))]
-                    {
-                        anyhow::bail!("cannot run IDLE without an active server stream");
-                    }
+                    anyhow::bail!("cannot run IDLE without an active server stream");
                 }
             }
             Err(e) => {

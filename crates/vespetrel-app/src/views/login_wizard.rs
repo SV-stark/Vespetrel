@@ -206,6 +206,11 @@ impl LoginWizardState {
             }
         }
 
+        if !self.incoming_host.trim().is_empty() {
+            acct.auth_config.server_host = Some(self.incoming_host.trim().to_string());
+            acct.auth_config.server_port = Some(self.incoming_port);
+        }
+
         Ok(acct)
     }
 }

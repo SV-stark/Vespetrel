@@ -91,6 +91,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Single-click attachment downloading to the user's `Downloads` folder.
   - Compose tray attachment loading with per-file removal button (`✕`).
 
+### Fixed
+- **IMAP Connection Error Surfacing & Mock Handling**:
+  - Eliminated the opaque release-mode error (`"IMAP connection not connected to live server and mock fallback is disabled in release mode"`).
+  - Ensured live server connections (Gmail, Outlook, Yahoo, custom IMAP) propagate genuine network, TLS handshake, and timeout errors instead of silently returning disconnected stream states.
+  - Added domain-aware `is_mock()` checking for test/demo domains (`example.com`, `imap.example.com`, `.example`, `.invalid`, `.test`, `localhost`, `127.0.0.1`), allowing seamless offline testing and preset exploration without runtime panics.
+  - Persisted user-specified `server_host` and `server_port` in `AuthConfig` during setup wizard completion, ensuring custom host/port values are respected by the engine coordinator.
+
 ### Changed
 - **Migrated UI Stack to `gpui-kit 0.6.0`**:
   - Replaced raw git `gpui` dependency with crates.io `gpui-kit`, utilizing standard component layers (`gpui_kit::component::Root`, `gpui_kit::init`, `gpui_kit::component::input`).

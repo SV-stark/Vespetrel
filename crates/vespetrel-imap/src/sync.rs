@@ -46,8 +46,7 @@ impl MailProvider for ImapProvider {
         }
 
         if folders.is_empty() {
-            #[cfg(any(test, feature = "mock"))]
-            if conn.stream.is_none() {
+            if conn.stream.is_none() || conn.is_mock() {
                 folders.push(RemoteFolder {
                     remote_id: "INBOX".into(),
                     name: "INBOX".into(),

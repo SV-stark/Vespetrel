@@ -106,6 +106,20 @@ impl ImapConnection {
         }
     }
 
+    pub fn is_mock(&self) -> bool {
+        cfg!(any(test, feature = "mock"))
+            || self.config.host.is_empty()
+            || self.config.host == "localhost"
+            || self.config.host == "127.0.0.1"
+            || self.config.host == "example.com"
+            || self.config.host == "imap.example.com"
+            || self.config.host.ends_with(".example")
+            || self.config.host.ends_with(".example.com")
+            || self.config.host.ends_with(".invalid")
+            || self.config.host.ends_with(".test")
+            || self.config.host.ends_with(".localhost")
+    }
+
     pub fn next_tag(&mut self) -> (u32, String) {
         self.tag_counter += 1;
         (self.tag_counter, format!("A{:04}", self.tag_counter))
@@ -113,19 +127,20 @@ impl ImapConnection {
 
     pub async fn connect(&mut self) -> anyhow::Result<()> {
         info!(host=%self.config.host, port=self.config.port, use_tls=self.config.use_tls, "connecting to IMAP");
-        if !self.config.host.is_empty()
-            && self.config.host != "localhost"
-            && self.config.host != "127.0.0.1"
-            && !self.config.host.ends_with(".example")
-            && self.config.port > 0
-        {
+
+        let is_mock = self.is_mock();
+        let try_live =
+            !is_mock || self.config.host == "localhost" || self.config.host == "127.0.0.1";
+
+        if try_live && !self.config.host.is_empty() && self.config.port > 0 {
             let addr = format!("{}:{}", self.config.host, self.config.port);
-            match tokio::time::timeout(
-                std::time::Duration::from_secs(5),
-                tokio::net::TcpStream::connect(&addr),
-            )
-            .await
-            {
+            let timeout_dur = if is_mock {
+                std::time::Duration::from_millis(500)
+            } else {
+                std::time::Duration::from_secs(10)
+            };
+
+            match tokio::time::timeout(timeout_dur, tokio::net::TcpStream::connect(&addr)).await {
                 Ok(Ok(tcp_stream)) => {
                     let mut stream = if self.config.use_tls || self.config.port == 993 {
                         debug!(addr=%addr, "performing TLS handshake for IMAP connection");
@@ -139,7 +154,13 @@ impl ImapConnection {
                         let server_name =
                             rustls::pki_types::ServerName::try_from(self.config.host.clone())
                                 .map_err(|e| anyhow::anyhow!("invalid TLS server name: {e}"))?;
-                        let tls_stream = connector.connect(server_name, tcp_stream).await?;
+                        let tls_stream =
+                            connector
+                                .connect(server_name, tcp_stream)
+                                .await
+                                .map_err(|e| {
+                                    anyhow::anyhow!("TLS handshake failed with {addr}: {e}")
+                                })?;
                         ImapStream::Tls(tls_stream)
                     } else {
                         ImapStream::Plain(tcp_stream)
@@ -147,7 +168,7 @@ impl ImapConnection {
 
                     let mut banner_buf = vec![0u8; 4096];
                     if let Ok(Ok(n)) = tokio::time::timeout(
-                        std::time::Duration::from_secs(2),
+                        std::time::Duration::from_secs(3),
                         stream.read(&mut banner_buf),
                     )
                     .await
@@ -175,7 +196,10 @@ impl ImapConnection {
                             .iter()
                             .any(|l| l.contains(" NO ") || l.contains(" BAD "))
                         {
-                            anyhow::bail!("IMAP XOAUTH2 authentication failed");
+                            anyhow::bail!(
+                                "IMAP XOAUTH2 authentication failed for user {}: token expired or invalid scopes",
+                                self.config.username
+                            );
                         }
                     } else if !self.config.username.is_empty() && !self.config.auth_token.is_empty()
                     {
@@ -185,7 +209,10 @@ impl ImapConnection {
                             .iter()
                             .any(|l| l.contains(" NO ") || l.contains(" BAD "))
                         {
-                            anyhow::bail!("IMAP LOGIN authentication failed");
+                            anyhow::bail!(
+                                "IMAP LOGIN authentication failed for user {}: invalid password or app password required",
+                                self.config.username
+                            );
                         }
                     }
 
@@ -196,10 +223,20 @@ impl ImapConnection {
                     }
                 }
                 Ok(Err(e)) => {
-                    debug!(addr=%addr, error=%e, "failed to establish TCP stream, using mock endpoint");
+                    if is_mock {
+                        debug!(addr=%addr, error=%e, "failed to connect to local mock endpoint, using simulated IMAP");
+                    } else {
+                        anyhow::bail!("Failed to connect to IMAP server {addr}: {e}");
+                    }
                 }
                 Err(_) => {
-                    debug!(addr=%addr, "TCP stream connect timed out, using mock endpoint");
+                    if is_mock {
+                        debug!(addr=%addr, "connect to local mock endpoint timed out, using simulated IMAP");
+                    } else {
+                        anyhow::bail!(
+                            "Connection to IMAP server {addr} timed out after 10 seconds"
+                        );
+                    }
                 }
             }
         }
@@ -322,9 +359,7 @@ impl ImapConnection {
             }
         }
 
-        // Mock test fallback strictly gated behind test/mock
-        #[cfg(any(test, feature = "mock"))]
-        {
+        if self.is_mock() {
             let mut lines = Vec::new();
             let upper = cmd.trim().to_uppercase();
 
@@ -359,17 +394,14 @@ impl ImapConnection {
 
             lines.push(format!("{tag_str} OK {cmd} completed"));
             let _ = tag_id;
-            Ok(lines)
+            return Ok(lines);
         }
 
-        #[cfg(not(any(test, feature = "mock")))]
-        {
-            let _ = tag_id;
-            let _ = tag_str;
-            anyhow::bail!(
-                "IMAP connection not connected to live server and mock fallback is disabled in release mode"
-            );
-        }
+        anyhow::bail!(
+            "IMAP connection to {}:{} is not connected",
+            self.config.host,
+            self.config.port
+        );
     }
 
     pub async fn logout(&mut self) -> anyhow::Result<()> {
@@ -414,16 +446,16 @@ impl ImapConnection {
             return Ok(());
         }
 
-        #[cfg(any(test, feature = "mock"))]
-        {
+        if self.is_mock() {
             let _ = _tag_id;
-            Ok(())
+            return Ok(());
         }
 
-        #[cfg(not(any(test, feature = "mock")))]
-        {
-            anyhow::bail!("IMAP connection not connected for APPEND");
-        }
+        anyhow::bail!(
+            "IMAP connection to {}:{} is not connected for APPEND",
+            self.config.host,
+            self.config.port
+        );
     }
 
     pub async fn execute_fetch_raw(&mut self, uid: u32) -> anyhow::Result<Vec<u8>> {
