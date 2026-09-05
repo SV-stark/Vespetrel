@@ -30,7 +30,7 @@ pub fn run_migrations(conn: &mut Connection) -> StorageResult<()> {
             .unwrap_or(false);
 
     if !is_v1_applied {
-        let tx = conn.transaction()?;
+        let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Exclusive)?;
         tx.execute_batch(
             r#"
             -- Accounts
@@ -260,7 +260,7 @@ pub fn run_migrations(conn: &mut Connection) -> StorageResult<()> {
             .unwrap_or(false);
 
     if !is_v2_applied {
-        let tx = conn.transaction()?;
+        let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Exclusive)?;
         // Recreate FTS5 table with accent-folding unicode61 tokenizer
         tx.execute_batch(
             r#"
@@ -297,7 +297,12 @@ pub fn run_migrations(conn: &mut Connection) -> StorageResult<()> {
             END;
 
             CREATE TRIGGER IF NOT EXISTS messages_au AFTER UPDATE ON messages
-            WHEN old.subject != new.subject OR old.from_address != new.from_address OR old.from_name != new.from_name OR old.to_addresses != new.to_addresses OR old.body_text_preview != new.body_text_preview OR old.body_snippet != new.body_snippet
+            WHEN old.subject IS NOT new.subject
+              OR old.from_address IS NOT new.from_address
+              OR old.from_name IS NOT new.from_name
+              OR old.to_addresses IS NOT new.to_addresses
+              OR old.body_text_preview IS NOT new.body_text_preview
+              OR old.body_snippet IS NOT new.body_snippet
             BEGIN
                 DELETE FROM messages_fts WHERE message_id = old.id;
                 INSERT INTO messages_fts(message_id, account_id, subject, from_address, from_name, to_addresses, body_content)
@@ -315,6 +320,95 @@ pub fn run_migrations(conn: &mut Connection) -> StorageResult<()> {
         conn.execute_batch("PRAGMA user_version = 2")?;
     }
 
+    // Check if migration version 3 has been applied (add remote_id column to messages)
+    let is_v3_applied: bool = user_ver >= 3
+        || conn
+            .query_row(
+                "SELECT count(*) FROM _schema_migrations WHERE version = 3",
+                [],
+                |r| r.get::<_, i64>(0),
+            )
+            .map(|count| count > 0)
+            .unwrap_or(false);
+
+    if !is_v3_applied {
+        let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Exclusive)?;
+        let has_remote_id: bool = tx
+            .query_row(
+                "SELECT count(*) FROM pragma_table_info('messages') WHERE name = 'remote_id'",
+                [],
+                |r| r.get::<_, i64>(0),
+            )
+            .map(|c| c > 0)
+            .unwrap_or(false);
+
+        if !has_remote_id {
+            tx.execute_batch(
+                r#"
+                ALTER TABLE messages ADD COLUMN remote_id TEXT;
+                CREATE INDEX IF NOT EXISTS idx_messages_remote_id ON messages(folder_id, remote_id);
+                "#,
+            )?;
+        }
+
+        let now = chrono::Utc::now().timestamp();
+        tx.execute(
+            "INSERT OR IGNORE INTO _schema_migrations (version, name, applied_at) VALUES (3, 'messages_remote_id_col', ?1)",
+            [now],
+        )?;
+        tx.commit()?;
+        conn.execute_batch("PRAGMA user_version = 3")?;
+    }
+
+    // Check if migration version 4 has been applied (outbox table)
+    let is_v4_applied: bool = user_ver >= 4
+        || conn
+            .query_row(
+                "SELECT count(*) FROM _schema_migrations WHERE version = 4",
+                [],
+                |r| r.get::<_, i64>(0),
+            )
+            .map(|count| count > 0)
+            .unwrap_or(false);
+
+    if !is_v4_applied {
+        let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Exclusive)?;
+        tx.execute_batch(
+            r#"
+            CREATE TABLE IF NOT EXISTS outbox (
+                id TEXT PRIMARY KEY,
+                account_id TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+                composed_message TEXT NOT NULL,
+                scheduled_at INTEGER NOT NULL,
+                send_at INTEGER NOT NULL,
+                is_cancelled INTEGER NOT NULL DEFAULT 0,
+                attempts INTEGER NOT NULL DEFAULT 0,
+                last_error TEXT
+            );
+            CREATE INDEX IF NOT EXISTS idx_outbox_send ON outbox(send_at, is_cancelled);
+            CREATE INDEX IF NOT EXISTS idx_outbox_account ON outbox(account_id);
+            "#,
+        )?;
+
+        let now = chrono::Utc::now().timestamp();
+        tx.execute(
+            "INSERT OR IGNORE INTO _schema_migrations (version, name, applied_at) VALUES (4, 'outbox_table', ?1)",
+            [now],
+        )?;
+        tx.commit()?;
+        conn.execute_batch("PRAGMA user_version = 4")?;
+    }
+
+    Ok(())
+}
+
+/// Explicit job to rebuild FTS5 index from the messages table
+pub fn rebuild_fts(conn: &Connection) -> StorageResult<()> {
+    conn.execute_batch(
+        r#"
+        INSERT INTO messages_fts(messages_fts) VALUES('rebuild');
+        "#,
+    )?;
     Ok(())
 }
 
@@ -355,5 +449,26 @@ mod tests {
             )
             .unwrap();
         assert_eq!(v2_count, 1);
+
+        let v3_count: i64 = conn
+            .query_row(
+                "SELECT count(*) FROM _schema_migrations WHERE version = 3",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(v3_count, 1);
+
+        let v4_count: i64 = conn
+            .query_row(
+                "SELECT count(*) FROM _schema_migrations WHERE version = 4",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(v4_count, 1);
+
+        // Verify rebuild_fts works
+        rebuild_fts(&conn).unwrap();
     }
 }

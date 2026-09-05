@@ -71,8 +71,9 @@ mod tests {
             Ok(SyncDelta {
                 inserted: vec![SyncMessage {
                     remote_uid: 101,
+                    remote_id: Some("101".into()),
                     flags: vec![Flag::Seen],
-                    raw_rfc822: None,
+                    raw_rfc822: Some(b"From: sender@example.com\r\nTo: user@domain.com\r\nSubject: Message 101\r\n\r\nHello test".to_vec()),
                     mod_seq: Some(1),
                 }],
                 ..Default::default()

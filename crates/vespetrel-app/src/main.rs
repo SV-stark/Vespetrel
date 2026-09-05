@@ -75,16 +75,31 @@ fn print_help() {
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    // Safe logger init (ignores error if already initialized)
+    // Install default Rustls crypto provider to prevent multi-provider ambiguity panic
+    let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+
+    let args: Vec<String> = std::env::args().collect();
+    let is_verbose =
+        args.contains(&"--verbose".to_string()) || std::env::var("VESPETREL_VERBOSE").is_ok();
+
+    // Safe logger init with --verbose support
+    let filter = if is_verbose {
+        EnvFilter::from_default_env().add_directive("vespetrel=debug".parse().unwrap_or_default())
+    } else {
+        EnvFilter::from_default_env().add_directive("vespetrel=warn".parse().unwrap_or_default())
+    };
     tracing_subscriber::fmt()
-        .with_env_filter(
-            EnvFilter::from_default_env()
-                .add_directive("vespetrel=warn".parse().unwrap_or_default()),
-        )
+        .with_env_filter(filter)
         .try_init()
         .ok();
 
-    let args: Vec<String> = std::env::args().collect();
+    // Install crash handler panic hook for clean observability
+    std::panic::set_hook(Box::new(|panic_info| {
+        eprintln!("CRITICAL: Vespetrel crashed unexpectedly:");
+        eprintln!("{panic_info}");
+        tracing::error!(target: "crash", "{panic_info}");
+    }));
+
     if args.contains(&"--help".to_string()) || args.contains(&"-h".to_string()) {
         println!("Vespetrel - Pure Rust Mail Client v0.1.0");
         println!("\nUsage: vespetrel [OPTIONS]");
@@ -94,6 +109,7 @@ async fn main() -> anyhow::Result<()> {
         );
         println!("  --memory       Use in-memory SQLite database (headless test mode)");
         println!("  --headless     Run headless startup check and exit immediately");
+        println!("  --verbose      Enable verbose debug tracing output");
         println!("  --version      Print version information");
         println!("  --help         Print this help message");
         return Ok(());
@@ -123,6 +139,23 @@ async fn main() -> anyhow::Result<()> {
 
     // Initialize storage pool and BlobStore
     let storage_pool = app.create_storage_pool().ok();
+
+    // Verify SQLite database integrity (quick_check)
+    if let Some(ref pool) = storage_pool {
+        if let Ok(conn) = pool.get().await {
+            let _ = conn
+                .interact(|c| {
+                    let integrity: Result<String, _> =
+                        c.query_row("PRAGMA quick_check(1);", [], |r| r.get(0));
+                    if let Ok(status) = integrity {
+                        if status != "ok" {
+                            tracing::warn!("SQLite integrity check warning: {status}");
+                        }
+                    }
+                })
+                .await;
+        }
+    }
     let blob_dir = if db_path == ":memory:" {
         let p = std::env::temp_dir().join(format!("vespetrel_blobs_{}", uuid::Uuid::new_v4()));
         let _ = std::fs::create_dir_all(&p);

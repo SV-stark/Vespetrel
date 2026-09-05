@@ -19,6 +19,28 @@ pub struct AttachmentInfo {
     pub size: usize,
 }
 
+const MAX_ATTACHMENTS: usize = 50;
+const MAX_ATTACHMENT_SIZE: usize = 25 * 1024 * 1024; // 25 MB
+
+pub fn sanitize_attachment_filename(name: &str) -> String {
+    let without_nulls: String = name.chars().filter(|&c| c != '\0').collect();
+    let path = std::path::Path::new(&without_nulls);
+    let base = path
+        .file_name()
+        .and_then(|f| f.to_str())
+        .unwrap_or("attachment");
+    let safe_base = base
+        .replace("../", "")
+        .replace("..\\", "")
+        .replace('/', "_")
+        .replace('\\', "_");
+    if safe_base.is_empty() || safe_base == "." || safe_base == ".." {
+        "attachment".to_string()
+    } else {
+        safe_base
+    }
+}
+
 impl ParsedMail {
     pub fn parse(raw: &[u8]) -> Option<Self> {
         let msg = MessageParser::default().parse(raw)?;
@@ -47,9 +69,15 @@ impl ParsedMail {
 
         let attachments = msg
             .attachments()
-            .map(|a| AttachmentInfo {
-                filename: a.attachment_name().unwrap_or("untitled").to_string(),
-                content_type: a
+            .take(MAX_ATTACHMENTS)
+            .filter_map(|a| {
+                let size = a.contents().len();
+                if size > MAX_ATTACHMENT_SIZE {
+                    return None;
+                }
+                let raw_name = a.attachment_name().unwrap_or("untitled");
+                let filename = sanitize_attachment_filename(raw_name);
+                let content_type = a
                     .content_type()
                     .map(|ct| {
                         format!(
@@ -58,8 +86,13 @@ impl ParsedMail {
                             ct.c_subtype.as_deref().unwrap_or("octet-stream")
                         )
                     })
-                    .unwrap_or_else(|| "application/octet-stream".into()),
-                size: a.contents().len(),
+                    .unwrap_or_else(|| "application/octet-stream".into());
+
+                Some(AttachmentInfo {
+                    filename,
+                    content_type,
+                    size,
+                })
             })
             .collect::<Vec<_>>();
 
@@ -215,5 +248,22 @@ mod tests {
             escaped,
             "&lt;script&gt;alert('hello &amp; welcome');&lt;/script&gt;"
         );
+    }
+
+    #[test]
+    fn test_attachment_filename_sanitization() {
+        assert_eq!(
+            sanitize_attachment_filename("../../secret.txt"),
+            "secret.txt"
+        );
+        assert_eq!(
+            sanitize_attachment_filename("..\\..\\windows\\system32.dll"),
+            "system32.dll"
+        );
+        assert_eq!(
+            sanitize_attachment_filename("invoice\0.pdf.exe"),
+            "invoice.pdf.exe"
+        );
+        assert_eq!(sanitize_attachment_filename(""), "attachment");
     }
 }

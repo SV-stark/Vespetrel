@@ -1,6 +1,6 @@
 use tracing::{debug, info};
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct ImapConfig {
     pub host: String,
     pub port: u16,
@@ -9,6 +9,19 @@ pub struct ImapConfig {
     /// Password or OAuth2 access token (XOAUTH2)
     pub auth_token: String,
     pub use_xoauth2: bool,
+}
+
+impl std::fmt::Debug for ImapConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ImapConfig")
+            .field("host", &self.host)
+            .field("port", &self.port)
+            .field("use_tls", &self.use_tls)
+            .field("username", &self.username)
+            .field("auth_token", &"[REDACTED]")
+            .field("use_xoauth2", &self.use_xoauth2)
+            .finish()
+    }
 }
 
 impl ImapConfig {
@@ -174,6 +187,12 @@ impl ImapConnection {
                         {
                             anyhow::bail!("IMAP LOGIN authentication failed");
                         }
+                    }
+
+                    // Enable QRESYNC extension dynamically if server advertises support (RFC 5161 / RFC 7162)
+                    if self.has_capability("ENABLE") && self.has_capability("QRESYNC") {
+                        let enable_cmd = self.cmd_enable_qresync();
+                        let _ = self.execute_cmd(&enable_cmd).await;
                     }
                 }
                 Ok(Err(e)) => {
@@ -362,6 +381,51 @@ impl ImapConnection {
         Ok(())
     }
 
+    pub async fn execute_append(
+        &mut self,
+        mailbox: &str,
+        flags: &[vespetrel_core::Flag],
+        raw_mime: &[u8],
+    ) -> anyhow::Result<()> {
+        let cmd = self.cmd_append(mailbox, flags, raw_mime.len());
+        let (_tag_id, tag_str) = self.next_tag();
+        let cmd_str = format!("{tag_str} {cmd}\r\n");
+
+        if let Some(stream) = &mut self.stream {
+            stream.write_all(cmd_str.as_bytes()).await?;
+
+            let mut cont_buf = [0u8; 128];
+            let n = stream.read(&mut cont_buf).await?;
+            let cont_str = String::from_utf8_lossy(&cont_buf[..n]);
+            if !cont_str.starts_with('+') && !cont_str.contains("\r\n+") {
+                anyhow::bail!("server rejected IMAP APPEND literal continuation: {cont_str}");
+            }
+
+            stream.write_all(raw_mime).await?;
+            stream.write_all(b"\r\n").await?;
+            stream.flush().await?;
+
+            let mut done_buf = [0u8; 512];
+            let dn = stream.read(&mut done_buf).await?;
+            let done_str = String::from_utf8_lossy(&done_buf[..dn]);
+            if done_str.contains(" NO ") || done_str.contains(" BAD ") {
+                anyhow::bail!("IMAP APPEND failed: {done_str}");
+            }
+            return Ok(());
+        }
+
+        #[cfg(any(test, feature = "mock"))]
+        {
+            let _ = _tag_id;
+            Ok(())
+        }
+
+        #[cfg(not(any(test, feature = "mock")))]
+        {
+            anyhow::bail!("IMAP connection not connected for APPEND");
+        }
+    }
+
     pub async fn execute_fetch_raw(&mut self, uid: u32) -> anyhow::Result<Vec<u8>> {
         let fetch_cmd = self.cmd_uid_fetch_rfc822(uid);
         let lines = self.execute_cmd(&fetch_cmd).await?;
@@ -504,6 +568,36 @@ impl ImapConnection {
             .replace('\\', "\\\\")
             .replace('"', "\\\"");
         format!("SELECT \"{clean}\"")
+    }
+
+    /// Build RFC 7162 Section 3.2.5.2 SELECT mailbox (QRESYNC (uidvalidity modseq))
+    pub fn cmd_select_qresync(&self, mailbox: &str, uid_validity: u32, mod_seq: u64) -> String {
+        let clean = mailbox
+            .replace(['\r', '\n', '*', '%'], "")
+            .replace('\\', "\\\\")
+            .replace('"', "\\\"");
+        format!("SELECT \"{clean}\" (QRESYNC ({uid_validity} {mod_seq}))")
+    }
+
+    /// Build RFC 3501 Section 6.3.11 APPEND command
+    pub fn cmd_append(&self, mailbox: &str, flags: &[vespetrel_core::Flag], size: usize) -> String {
+        let clean = mailbox.replace(['\r', '\n', '"'], "").replace('\\', "\\\\");
+        let flags_str = if flags.is_empty() {
+            "".to_string()
+        } else {
+            let f_list: Vec<&str> = flags
+                .iter()
+                .map(|f| match f {
+                    vespetrel_core::Flag::Seen => "\\Seen",
+                    vespetrel_core::Flag::Answered => "\\Answered",
+                    vespetrel_core::Flag::Flagged => "\\Flagged",
+                    vespetrel_core::Flag::Deleted => "\\Deleted",
+                    vespetrel_core::Flag::Draft => "\\Draft",
+                })
+                .collect();
+            format!(" ({})", f_list.join(" "))
+        };
+        format!("APPEND \"{clean}\"{flags_str} {{{size}}}")
     }
 
     pub fn cmd_authenticate_xoauth2(&self) -> String {

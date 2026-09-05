@@ -2,7 +2,7 @@
 use tracing::{debug, info};
 use vespetrel_core::message::ComposedMessage;
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct SmtpConfig {
     pub host: String,
     pub port: u16,
@@ -16,6 +16,23 @@ pub struct SmtpConfig {
     pub dkim_domain: Option<String>,
     /// Autocrypt 1.1 Header value (optional)
     pub autocrypt_header: Option<String>,
+}
+
+impl std::fmt::Debug for SmtpConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SmtpConfig")
+            .field("host", &self.host)
+            .field("port", &self.port)
+            .field("username", &self.username)
+            .field("auth_token", &"[REDACTED]")
+            .field("use_xoauth2", &self.use_xoauth2)
+            .field("use_starttls", &self.use_starttls)
+            .field("dkim_key", &self.dkim_key.as_ref().map(|_| "[REDACTED]"))
+            .field("dkim_selector", &self.dkim_selector)
+            .field("dkim_domain", &self.dkim_domain)
+            .field("autocrypt_header", &self.autocrypt_header)
+            .finish()
+    }
 }
 
 impl SmtpConfig {
@@ -69,7 +86,7 @@ impl SmtpClient {
         Self { config }
     }
 
-    /// Build Lettre message (handles MIME headers, recipients, body)
+    /// Build Lettre message (handles MIME headers, recipients, attachments, Message-ID, DKIM)
     pub fn build_lettre_message(&self, msg: &ComposedMessage) -> anyhow::Result<lettre::Message> {
         use lettre::message::Message as LettreMessage;
 
@@ -82,9 +99,17 @@ impl SmtpClient {
         let from_mailbox = lettre::message::Mailbox::new(from_name, from_addr);
 
         let clean_subject = msg.subject.replace(['\r', '\n'], " ");
+        let domain = if let Some(pos) = msg.from.email.find('@') {
+            &msg.from.email[pos + 1..]
+        } else {
+            &self.config.host
+        };
+        let msg_id = format!("<{}@{}>", uuid::Uuid::new_v4(), domain);
+
         let mut builder = LettreMessage::builder()
             .from(from_mailbox)
-            .subject(clean_subject);
+            .subject(clean_subject)
+            .message_id(Some(msg_id));
 
         for to in &msg.to {
             let addr: lettre::Address = to.email.trim().replace(['\r', '\n'], "").parse()?;
@@ -124,6 +149,44 @@ impl SmtpClient {
             builder = builder.raw_header(val);
         }
 
+        // Build base content (plain text, alternative plain+html, or html only)
+        let body_part = if let Some(html) = &msg.body_html {
+            if !msg.body_text.trim().is_empty() {
+                lettre::message::MultiPart::alternative_plain_html(
+                    msg.body_text.clone(),
+                    html.clone(),
+                )
+            } else {
+                lettre::message::MultiPart::alternative()
+                    .singlepart(lettre::message::SinglePart::html(html.clone()))
+            }
+        } else {
+            lettre::message::MultiPart::alternative()
+                .singlepart(lettre::message::SinglePart::plain(msg.body_text.clone()))
+        };
+
+        // Combine with attachments into MultiPart::mixed() if attachments are present
+        let multipart_body = if !msg.attachments.is_empty() {
+            let mut mixed = lettre::message::MultiPart::mixed().multipart(body_part);
+            for att in &msg.attachments {
+                let ct = att
+                    .content_type
+                    .parse::<lettre::message::header::ContentType>()
+                    .unwrap_or_else(|_| {
+                        "application/octet-stream"
+                            .parse::<lettre::message::header::ContentType>()
+                            .unwrap()
+                    });
+                let attachment_part = lettre::message::Attachment::new(att.filename.clone())
+                    .body(att.data.clone(), ct);
+                mixed = mixed.singlepart(attachment_part);
+            }
+            Some(mixed)
+        } else {
+            None
+        };
+
+        // Handle DKIM signing if configured
         if let (Some(domain), Some(selector), Some(key)) = (
             &self.config.dkim_domain,
             &self.config.dkim_selector,
@@ -147,8 +210,34 @@ impl SmtpClient {
                 date_str.clone(),
             ));
 
-            let body_content = msg.body_html.as_deref().unwrap_or(&msg.body_text);
-            let canon_body = canonicalize_relaxed_body(body_content);
+            // Format preview message to compute exact canonicalized MIME body
+            let preview_builder = builder.clone();
+            let preview_email = if let Some(mixed) = multipart_body.clone() {
+                preview_builder.multipart(mixed)?
+            } else if let Some(html) = &msg.body_html {
+                if !msg.body_text.trim().is_empty() {
+                    preview_builder.multipart(
+                        lettre::message::MultiPart::alternative_plain_html(
+                            msg.body_text.clone(),
+                            html.clone(),
+                        ),
+                    )?
+                } else {
+                    preview_builder.body(html.clone())?
+                }
+            } else {
+                preview_builder.body(msg.body_text.clone())?
+            };
+
+            let preview_raw = preview_email.formatted();
+            let body_bytes =
+                if let Some(pos) = preview_raw.windows(4).position(|w| w == b"\r\n\r\n") {
+                    &preview_raw[pos + 4..]
+                } else {
+                    &preview_raw[..]
+                };
+
+            let canon_body = canonicalize_relaxed_body_bytes(body_bytes);
             let mut hasher = <sha2::Sha256 as sha2::Digest>::new();
             hasher.update(&canon_body);
             let bh = base64::engine::general_purpose::STANDARD.encode(hasher.finalize());
@@ -231,7 +320,9 @@ impl SmtpClient {
             builder = builder.raw_header(val);
         }
 
-        let email = if let Some(html) = &msg.body_html {
+        let email = if let Some(mixed) = multipart_body {
+            builder.multipart(mixed)?
+        } else if let Some(html) = &msg.body_html {
             if !msg.body_text.trim().is_empty() {
                 builder.multipart(lettre::message::MultiPart::alternative_plain_html(
                     msg.body_text.clone(),
@@ -283,11 +374,17 @@ impl SmtpClient {
     /// Live SMTP transport delivery connecting to Gmail/custom SMTP
     pub async fn send_live(&self, msg: &ComposedMessage) -> anyhow::Result<()> {
         use lettre::transport::smtp::authentication::Credentials;
+        use lettre::transport::smtp::client::{Tls, TlsParameters};
         use lettre::{AsyncSmtpTransport, AsyncTransport, Tokio1Executor};
 
         info!(subject=%msg.subject, host=%self.config.host, port=self.config.port, "connecting to live SMTP transport");
 
-        let mut transport_builder = if self.config.use_starttls {
+        let mut transport_builder = if self.config.port == 465 {
+            // Port 465 is implicit TLS (SMTPS wrapper)
+            let tls_params = TlsParameters::new(self.config.host.clone())?;
+            AsyncSmtpTransport::<Tokio1Executor>::relay(&self.config.host)?
+                .tls(Tls::Wrapper(tls_params))
+        } else if self.config.use_starttls {
             AsyncSmtpTransport::<Tokio1Executor>::starttls_relay(&self.config.host)?
         } else {
             AsyncSmtpTransport::<Tokio1Executor>::relay(&self.config.host)?
@@ -312,6 +409,15 @@ impl SmtpClient {
         info!(subject=%msg.subject, "SMTP message delivered successfully");
         Ok(())
     }
+}
+
+/// Canonicalizes an email body from raw bytes using RFC 6376 §3.4.4 relaxed body canonicalization.
+pub fn canonicalize_relaxed_body_bytes(body: &[u8]) -> Vec<u8> {
+    if body.is_empty() {
+        return Vec::new();
+    }
+    let s = String::from_utf8_lossy(body);
+    canonicalize_relaxed_body(&s)
 }
 
 /// Canonicalizes an email body using the RFC 6376 §3.4.4 relaxed body canonicalization algorithm.
@@ -473,5 +579,43 @@ mod tests {
         assert!(raw_str.contains("Cc: Carol <carol@example.com>"));
         assert!(raw_str.contains("In-Reply-To: <prev-msg@example.com>"));
         assert!(raw_str.contains("<h1>Sprint Update</h1>"));
+    }
+
+    #[test]
+    fn test_smtp_build_message_with_attachments() {
+        use vespetrel_core::message::ComposedAttachment;
+
+        let config = SmtpConfig::new("smtp.example.com", 587, "alice", "token");
+        let client = SmtpClient::new(config);
+
+        let msg = ComposedMessage {
+            from: Address {
+                name: Some("Alice".into()),
+                email: "alice@example.com".into(),
+            },
+            to: vec![Address {
+                name: Some("Bob".into()),
+                email: "bob@example.com".into(),
+            }],
+            cc: Vec::new(),
+            bcc: Vec::new(),
+            subject: "Quarterly Report".into(),
+            body_text: "Please find report attached.".into(),
+            body_html: None,
+            in_reply_to: None,
+            references: Vec::new(),
+            attachments: vec![ComposedAttachment {
+                filename: "report.pdf".into(),
+                content_type: "application/pdf".into(),
+                data: b"%PDF-1.4 dummy pdf content".to_vec(),
+            }],
+        };
+
+        let formatted = client.build_rfc822(&msg).unwrap();
+        let raw_str = String::from_utf8_lossy(&formatted);
+        assert!(raw_str.contains("report.pdf"));
+        assert!(raw_str.contains("application/pdf"));
+        assert!(raw_str.contains("multipart/mixed"));
+        assert!(raw_str.contains("Message-ID:"));
     }
 }

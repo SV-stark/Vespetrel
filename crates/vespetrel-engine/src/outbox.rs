@@ -123,12 +123,135 @@ impl OutboxQueue {
         }
         msgs
     }
+
+    /// Enqueue a scheduled message into both memory and persistent SQLite outbox table
+    pub fn schedule_send_persistent(
+        &mut self,
+        conn: &rusqlite::Connection,
+        account_id: &str,
+        message: ComposedMessage,
+        send_at: DateTime<Utc>,
+    ) -> Result<String, vespetrel_storage::StorageError> {
+        let id = self.schedule_send(message.clone(), send_at);
+        let entry = vespetrel_storage::repo::OutboxEntry {
+            id: id.clone(),
+            account_id: account_id.to_string(),
+            composed_message: message,
+            scheduled_at: Utc::now().timestamp(),
+            send_at: send_at.timestamp(),
+            is_cancelled: false,
+            attempts: 0,
+            last_error: None,
+        };
+        vespetrel_storage::repo::enqueue_outbox(conn, &entry)?;
+        Ok(id)
+    }
+
+    /// Cancel a scheduled send in memory and persist cancellation to SQLite outbox
+    pub fn cancel_scheduled_persistent(
+        &mut self,
+        conn: &rusqlite::Connection,
+        id: &str,
+    ) -> Result<bool, vespetrel_storage::StorageError> {
+        self.cancel_scheduled(id);
+        vespetrel_storage::repo::cancel_outbox(conn, id)
+    }
+
+    /// Restore pending scheduled messages from SQLite outbox table on application startup
+    pub fn load_from_db(
+        &mut self,
+        conn: &rusqlite::Connection,
+    ) -> Result<usize, vespetrel_storage::StorageError> {
+        let now_ts = Utc::now().timestamp();
+        // Load all uncancelled messages due in the future or ready to process
+        let entries = vespetrel_storage::repo::list_due_outbox(conn, now_ts + 86400 * 365)?;
+        let count = entries.len();
+        for entry in entries {
+            let send_at = DateTime::from_timestamp(entry.send_at, 0).unwrap_or_else(Utc::now);
+            let scheduled_at =
+                DateTime::from_timestamp(entry.scheduled_at, 0).unwrap_or_else(Utc::now);
+            self.scheduled.insert(
+                entry.id.clone(),
+                ScheduledMessage {
+                    id: entry.id,
+                    message: entry.composed_message,
+                    scheduled_at,
+                    send_at,
+                    is_cancelled: entry.is_cancelled,
+                },
+            );
+        }
+        Ok(count)
+    }
 }
 
-impl Default for OutboxQueue {
-    fn default() -> Self {
-        Self::new()
+impl UndoSendBuffer {
+    /// Enqueue into undo buffer and persist to SQLite outbox table
+    pub fn enqueue_persistent(
+        &mut self,
+        conn: &rusqlite::Connection,
+        account_id: &str,
+        message: ComposedMessage,
+    ) -> Result<String, vespetrel_storage::StorageError> {
+        let id = self.enqueue(message.clone());
+        let item = self.pending.get(&id).unwrap();
+        let entry = vespetrel_storage::repo::OutboxEntry {
+            id: id.clone(),
+            account_id: account_id.to_string(),
+            composed_message: message,
+            scheduled_at: item.scheduled_at.timestamp(),
+            send_at: item.send_at.timestamp(),
+            is_cancelled: false,
+            attempts: 0,
+            last_error: None,
+        };
+        vespetrel_storage::repo::enqueue_outbox(conn, &entry)?;
+        Ok(id)
     }
+
+    /// Cancel undo send in memory and mark cancelled in SQLite outbox table
+    pub fn cancel_persistent(
+        &mut self,
+        conn: &rusqlite::Connection,
+        id: &str,
+    ) -> Result<Option<ComposedMessage>, vespetrel_storage::StorageError> {
+        let recovered = self.cancel(id);
+        vespetrel_storage::repo::cancel_outbox(conn, id)?;
+        Ok(recovered)
+    }
+}
+
+/// Drains due messages from SQLite outbox table and dispatches them via MailProvider
+pub async fn process_due_outbox(
+    conn: &rusqlite::Connection,
+    provider: &dyn vespetrel_core::provider::MailProvider,
+    now: DateTime<Utc>,
+) -> Vec<(String, Result<(), String>)> {
+    let mut results = Vec::new();
+    let entries = match vespetrel_storage::repo::list_due_outbox(conn, now.timestamp()) {
+        Ok(e) => e,
+        Err(e) => {
+            tracing::error!(error=%e, "failed to query due outbox messages");
+            return results;
+        }
+    };
+
+    for entry in entries {
+        match provider.send_message(&entry.composed_message).await {
+            Ok(_) => {
+                tracing::info!(id=%entry.id, to=?entry.composed_message.to, "outbox message delivered successfully");
+                let _ = vespetrel_storage::repo::delete_outbox_entry(conn, &entry.id);
+                results.push((entry.id, Ok(())));
+            }
+            Err(e) => {
+                let err_str = e.to_string();
+                tracing::error!(id=%entry.id, error=%err_str, "outbox delivery failed");
+                let _ = vespetrel_storage::repo::mark_outbox_failed(conn, &entry.id, &err_str);
+                results.push((entry.id, Err(err_str)));
+            }
+        }
+    }
+    results
 }
 
 #[cfg(test)]
@@ -205,5 +328,54 @@ mod tests {
         assert_eq!(ready.len(), 1);
         assert_eq!(ready[0].subject, "Scheduled Update");
         assert!(!outbox.cancel_scheduled(&id));
+    }
+
+    #[tokio::test]
+    async fn test_persistent_outbox_flow() {
+        let conn = vespetrel_storage::open_in_memory().unwrap();
+        let acct = vespetrel_core::Account::new(
+            "outbox_acct",
+            "outbox@test.com",
+            vespetrel_core::ProviderType::Imap,
+        );
+        vespetrel_storage::repo::upsert_account(&conn, &acct).unwrap();
+
+        let mut queue = OutboxQueue::new();
+        let msg = ComposedMessage {
+            from: Address {
+                name: None,
+                email: "outbox@test.com".into(),
+            },
+            to: vec![Address {
+                name: None,
+                email: "dest@test.com".into(),
+            }],
+            cc: vec![],
+            bcc: vec![],
+            subject: "DB Outbox Test".into(),
+            body_text: "Body".into(),
+            body_html: None,
+            in_reply_to: None,
+            references: vec![],
+            attachments: vec![],
+        };
+
+        let now = Utc::now();
+        let id = queue
+            .schedule_send_persistent(&conn, &acct.id, msg, now)
+            .unwrap();
+        assert!(!id.is_empty());
+
+        // Restore in a fresh queue
+        let mut queue2 = OutboxQueue::new();
+        let loaded = queue2.load_from_db(&conn).unwrap();
+        assert_eq!(loaded, 1);
+        assert!(queue2.scheduled.contains_key(&id));
+    }
+}
+
+impl Default for OutboxQueue {
+    fn default() -> Self {
+        Self::new()
     }
 }

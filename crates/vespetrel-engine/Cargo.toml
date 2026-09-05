@@ -8,6 +8,7 @@ description = "Tokio sync coordinator and account worker actors"
 [dependencies]
 vespetrel-core = { path = "../vespetrel-core" }
 vespetrel-storage = { path = "../vespetrel-storage" }
+vespetrel-crypto = { path = "../vespetrel-crypto" }
 vespetrel-imap = { path = "../vespetrel-imap" }
 vespetrel-jmap = { path = "../vespetrel-jmap" }
 vespetrel-graph = { path = "../vespetrel-graph" }
@@ -30,6 +31,7 @@ simdutf8 = { workspace = true }
 rand = { workspace = true }
 keyring = { workspace = true }
 rusqlite = { workspace = true }
+sha2 = { workspace = true }
 
 
 

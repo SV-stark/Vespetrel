@@ -146,8 +146,37 @@ impl AccountWorker {
                                 debug!(error=%e, "incremental IDLE sync failed");
                             }
                         }
-                        Some(WorkerCommand::UpdateFlags{ folder_remote_id: _, uids, add, remove }) => {
-                            if let Err(e) = self.provider.update_flags(&uids, &add, &remove).await {
+                        Some(WorkerCommand::UpdateFlags{ folder_remote_id, uids, add, remove }) => {
+                            let mut remote_ids = Vec::new();
+                            if let Some(pool) = &self.storage_pool {
+                                if let Ok(conn) = pool.get().await {
+                                    let uids_c = uids.clone();
+                                    let fid = folder_remote_id.clone();
+                                    let q = conn.interact(move |c| -> anyhow::Result<Vec<String>> {
+                                        let mut ids = Vec::new();
+                                        for chunk in uids_c.chunks(500) {
+                                            let placeholders = chunk.iter().map(|_| "?").collect::<Vec<_>>().join(",");
+                                            let sql = format!("SELECT remote_id FROM messages WHERE folder_id = ? AND remote_uid IN ({placeholders}) AND remote_id IS NOT NULL");
+                                            let mut stmt = c.prepare(&sql)?;
+                                            let mut params: Vec<&dyn rusqlite::ToSql> = Vec::with_capacity(chunk.len() + 1);
+                                            params.push(&fid);
+                                            for u in chunk { params.push(u); }
+                                            let rows = stmt.query_map(rusqlite::params_from_iter(params), |r| r.get::<_, String>(0))?;
+                                            for id_res in rows { ids.push(id_res?); }
+                                        }
+                                        Ok(ids)
+                                    }).await;
+                                    if let Ok(Ok(ids)) = q {
+                                        remote_ids = ids;
+                                    }
+                                }
+                            }
+                            let res = if !remote_ids.is_empty() {
+                                self.provider.update_flags_by_remote_id(&remote_ids, &add, &remove).await
+                            } else {
+                                self.provider.update_flags(&uids, &add, &remove).await
+                            };
+                            if let Err(e) = res {
                                 error!(error=%e, "update_flags failed");
                             }
                         }
@@ -161,8 +190,43 @@ impl AccountWorker {
         }
     }
 
-    async fn sync_once(&self) -> anyhow::Result<()> {
-        let folders = self.provider.sync_folder_list().await?;
+    pub async fn try_refresh_auth(&mut self) -> anyhow::Result<()> {
+        let pool = match &self.storage_pool {
+            Some(p) => p.clone(),
+            None => anyhow::bail!("cannot refresh auth: no storage pool configured"),
+        };
+        let aid = self.account_id.clone();
+        let conn = pool.get().await?;
+        let acct = conn
+            .interact(move |c| vespetrel_storage::repo::get_account(c, &aid))
+            .await
+            .map_err(|e| anyhow::anyhow!("interact failed: {e}"))??
+            .ok_or_else(|| anyhow::anyhow!("account {} not found in storage", self.account_id))?;
+
+        let new_token = crate::coordinator::resolve_and_refresh_token(&acct, Some(&pool))
+            .await
+            .map_err(|e| anyhow::anyhow!("token refresh failed: {e}"))?;
+
+        self.provider = crate::coordinator::make_provider_with_token(&acct, new_token);
+        info!(account_id=%self.account_id, "successfully refreshed token and updated provider");
+        Ok(())
+    }
+
+    async fn sync_once(&mut self) -> anyhow::Result<()> {
+        let mut folders_res = self.provider.sync_folder_list().await;
+        if let Err(ref e) = folders_res {
+            let err_str = e.to_string();
+            if err_str.contains("401")
+                || err_str.to_lowercase().contains("unauthorized")
+                || err_str.to_lowercase().contains("authenticate")
+            {
+                warn!(account_id=%self.account_id, "authentication error in sync_folder_list, attempting OAuth refresh");
+                if self.try_refresh_auth().await.is_ok() {
+                    folders_res = self.provider.sync_folder_list().await;
+                }
+            }
+        }
+        let folders = folders_res?;
 
         // Acquire connection from storage pool if available with 5s timeout
         let storage_conn = match &self.storage_pool {
@@ -233,7 +297,24 @@ impl AccountWorker {
             let folder_db_id = folder_record.id.clone();
             let state = account_sync_state.clone();
 
-            match self.provider.sync_messages(&folder_record, state).await {
+            let mut sync_res = self
+                .provider
+                .sync_messages(&folder_record, state.clone())
+                .await;
+            if let Err(ref e) = sync_res {
+                let err_str = e.to_string();
+                if err_str.contains("401")
+                    || err_str.to_lowercase().contains("unauthorized")
+                    || err_str.to_lowercase().contains("authenticate")
+                {
+                    warn!(account_id=%self.account_id, "authentication error in sync_messages, attempting OAuth refresh");
+                    if self.try_refresh_auth().await.is_ok() {
+                        sync_res = self.provider.sync_messages(&folder_record, state).await;
+                    }
+                }
+            }
+
+            match sync_res {
                 Ok(delta) => {
                     let mut summaries = Vec::new();
                     let mut msgs_to_store = Vec::new();
@@ -249,92 +330,137 @@ impl AccountWorker {
                                 .ok()
                         };
 
-                        let mut msg = if let Some(ref raw_bytes) = raw_bytes_opt {
-                            if let Some(parsed) = MessageParser::default().parse(raw_bytes) {
-                                let subject = parsed.subject().unwrap_or("No Subject").to_string();
-                                let from_addr = parsed
-                                    .from()
-                                    .and_then(|f| f.first())
-                                    .and_then(|a| a.address.as_deref())
-                                    .unwrap_or("unknown@sender.com")
-                                    .to_string();
-                                let from_name = parsed
-                                    .from()
-                                    .and_then(|f| f.first())
-                                    .and_then(|a| a.name.as_deref())
-                                    .map(|s| s.to_string());
-                                let to_addrs = parsed
-                                    .to()
-                                    .map(|t| {
-                                        t.iter()
-                                            .filter_map(|a| a.address.as_deref())
-                                            .map(|s| s.to_string())
-                                            .collect::<Vec<_>>()
-                                    })
-                                    .unwrap_or_default();
-
-                                let mut m = vespetrel_core::Message::new(
-                                    &self.account_id,
-                                    &folder_db_id,
-                                    sync_msg.remote_uid,
-                                    subject,
-                                    from_addr,
-                                    to_addrs,
+                        let raw_bytes = match raw_bytes_opt {
+                            Some(ref b) if !b.is_empty() => b.clone(),
+                            _ => {
+                                debug!(
+                                    remote_uid = sync_msg.remote_uid,
+                                    "no raw rfc822 bytes available, skipping message"
                                 );
-                                m.from_name = from_name;
-                                m.message_id_header = parsed.message_id().map(|s| s.to_string());
-                                m.in_reply_to =
-                                    parsed.in_reply_to().as_text().map(|s| s.to_string());
-                                m.body_snippet = parsed
-                                    .body_text(0)
-                                    .map(|t| t.chars().take(200).collect::<String>());
-                                m.body_text_preview = parsed.body_text(0).map(|t| t.to_string());
-                                m.size_bytes = raw_bytes.len() as i64;
-                                let shard = &m.id[..2.min(m.id.len())];
-                                m.blob_path = format!("{shard}/{}.lz4", m.id);
-
-                                if let Some(ref classifier) = self.classifier {
-                                    let check_text = format!(
-                                        "{} {}",
-                                        m.subject.as_deref().unwrap_or(""),
-                                        m.body_text_preview.as_deref().unwrap_or("")
-                                    );
-                                    let score = classifier.classify(&check_text);
-                                    if score.is_spam {
-                                        tracing::warn!(id = %m.id, prob = score.probability, "incoming message classified as spam/junk");
-                                    }
-                                }
-                                m
-                            } else {
-                                vespetrel_core::Message::new(
-                                    &self.account_id,
-                                    &folder_db_id,
-                                    sync_msg.remote_uid,
-                                    format!("Message {}", sync_msg.remote_uid),
-                                    "unknown@sender.com",
-                                    vec![self.account_id.clone()],
-                                )
+                                continue;
                             }
-                        } else {
-                            vespetrel_core::Message::new(
-                                &self.account_id,
-                                &folder_db_id,
-                                sync_msg.remote_uid,
-                                format!("Message {}", sync_msg.remote_uid),
-                                "unknown@sender.com",
-                                vec![self.account_id.clone()],
-                            )
                         };
+
+                        let parsed = match MessageParser::default().parse(&raw_bytes) {
+                            Some(p) => p,
+                            None => {
+                                warn!(
+                                    remote_uid = sync_msg.remote_uid,
+                                    "failed to parse RFC822 message, skipping unparseable message"
+                                );
+                                continue;
+                            }
+                        };
+
+                        let from_addr = match parsed
+                            .from()
+                            .and_then(|f| f.first())
+                            .and_then(|a| a.address.as_deref())
+                        {
+                            Some(a) if !a.is_empty() => a.to_string(),
+                            _ => {
+                                warn!(
+                                    remote_uid = sync_msg.remote_uid,
+                                    "message has no From address, skipping"
+                                );
+                                continue;
+                            }
+                        };
+
+                        let from_name = parsed
+                            .from()
+                            .and_then(|f| f.first())
+                            .and_then(|a| a.name.as_deref())
+                            .map(|s| s.to_string());
+                        let to_addrs = parsed
+                            .to()
+                            .map(|t| {
+                                t.iter()
+                                    .filter_map(|a| a.address.as_deref())
+                                    .map(|s| s.to_string())
+                                    .collect::<Vec<_>>()
+                            })
+                            .unwrap_or_default();
+
+                        let subject = parsed.subject().unwrap_or("No Subject").to_string();
+
+                        let mut msg = vespetrel_core::Message::new(
+                            &self.account_id,
+                            &folder_db_id,
+                            sync_msg.remote_uid,
+                            &subject,
+                            from_addr,
+                            to_addrs,
+                        );
+                        msg.remote_id = sync_msg.remote_id.clone();
+                        msg.from_name = from_name;
+                        msg.message_id_header = parsed.message_id().map(|s| s.to_string());
+                        msg.in_reply_to = parsed.in_reply_to().as_text().map(|s| s.to_string());
+                        msg.references = parsed.references().as_text().map(|s| s.to_string());
+                        msg.body_snippet = parsed
+                            .body_text(0)
+                            .map(|t| t.chars().take(200).collect::<String>());
+                        msg.body_text_preview = parsed.body_text(0).map(|t| t.to_string());
+                        msg.size_bytes = raw_bytes.len() as i64;
+                        let shard = &msg.id[..2.min(msg.id.len())];
+                        msg.blob_path = format!("{shard}/{}.lz4", msg.id);
+
+                        // Compute deterministic thread ID from In-Reply-To, References, or normalized Subject
+                        use sha2::Digest;
+                        let thread_id = if let Some(ref reply_to) = msg.in_reply_to {
+                            let clean = reply_to.trim().trim_matches(['<', '>']);
+                            let mut hasher = sha2::Sha256::new();
+                            hasher.update(clean.as_bytes());
+                            format!("th_{:x}", hasher.finalize())
+                        } else {
+                            let norm = vespetrel_core::normalize_subject(&subject);
+                            let mut hasher = sha2::Sha256::new();
+                            hasher.update(norm.as_bytes());
+                            format!("th_{:x}", hasher.finalize())
+                        };
+                        msg.thread_id = Some(thread_id.clone());
+
+                        // Upsert thread record in storage
+                        if let Some(conn) = &storage_conn {
+                            let th = vespetrel_core::thread::Thread {
+                                id: thread_id,
+                                account_id: self.account_id.clone(),
+                                subject: Some(subject.clone()),
+                                last_message_at: msg.received_at,
+                                message_count: 1,
+                                unread_count: if sync_msg
+                                    .flags
+                                    .contains(&vespetrel_core::Flag::Seen)
+                                {
+                                    0
+                                } else {
+                                    1
+                                },
+                                snippet: msg.body_snippet.clone(),
+                            };
+                            let _ = conn
+                                .interact(move |c| vespetrel_storage::repo::upsert_thread(c, &th))
+                                .await;
+                        }
+
+                        if let Some(ref classifier) = self.classifier {
+                            let check_text = format!(
+                                "{} {}",
+                                msg.subject.as_deref().unwrap_or(""),
+                                msg.body_text_preview.as_deref().unwrap_or("")
+                            );
+                            let score = classifier.classify(&check_text);
+                            if score.is_spam {
+                                tracing::warn!(id = %msg.id, prob = score.probability, "incoming message classified as spam/junk");
+                            }
+                        }
 
                         // Apply synced flags
                         msg.is_read = sync_msg.flags.contains(&vespetrel_core::Flag::Seen);
                         msg.is_flagged = sync_msg.flags.contains(&vespetrel_core::Flag::Flagged);
                         msg.is_draft = sync_msg.flags.contains(&vespetrel_core::Flag::Draft);
 
-                        if let Some(raw) = raw_bytes_opt.as_ref().filter(|r| !r.is_empty()) {
-                            blobs_to_write.push((msg.id.clone(), raw.clone()));
-                        }
-
+                        blobs_to_write.push((msg.id.clone(), raw_bytes));
                         summaries.push(msg.summary());
                         msgs_to_store.push(msg);
                     }
@@ -379,6 +505,52 @@ impl AccountWorker {
 
                     if !summaries.is_empty() {
                         self.emit(SyncEvent::MessagesInserted(summaries));
+                    }
+
+                    // Process updated message flags from delta.updated
+                    if !delta.updated.is_empty() {
+                        let updated_sync_msgs = delta.updated.clone();
+                        let fid = folder_db_id.clone();
+                        if let Some(conn) = &storage_conn {
+                            let updated_events = conn.interact(move |c| -> anyhow::Result<Vec<SyncEvent>> {
+                                let mut events = Vec::new();
+                                let mut stmt = c.prepare(
+                                    "SELECT id, is_read, is_flagged FROM messages WHERE folder_id = ?1 AND remote_uid = ?2"
+                                )?;
+                                for umsg in &updated_sync_msgs {
+                                    let new_read = umsg.flags.contains(&vespetrel_core::Flag::Seen);
+                                    let new_flagged = umsg.flags.contains(&vespetrel_core::Flag::Flagged);
+                                    if let Ok(mut rows) = stmt.query(rusqlite::params![fid, umsg.remote_uid as i64]) {
+                                        if let Ok(Some(row)) = rows.next() {
+                                            let id: String = row.get(0)?;
+                                            let cur_read: i64 = row.get(1)?;
+                                            let cur_flagged: i64 = row.get(2)?;
+                                            let is_read_changed = (cur_read != 0) != new_read;
+                                            let is_flagged_changed = (cur_flagged != 0) != new_flagged;
+                                            if is_read_changed || is_flagged_changed {
+                                                let _ = vespetrel_storage::repo::update_message_flags(
+                                                    c,
+                                                    &id,
+                                                    if is_read_changed { Some(new_read) } else { None },
+                                                    if is_flagged_changed { Some(new_flagged) } else { None },
+                                                );
+                                                events.push(SyncEvent::MessageFlagsUpdated {
+                                                    id,
+                                                    is_read: new_read,
+                                                    is_flagged: new_flagged,
+                                                });
+                                            }
+                                        }
+                                    }
+                                }
+                                Ok(events)
+                            }).await;
+                            if let Ok(Ok(events)) = updated_events {
+                                for ev in events {
+                                    self.emit(ev);
+                                }
+                            }
+                        }
                     }
 
                     if !delta.deleted_uids.is_empty() {
@@ -434,6 +606,24 @@ impl AccountWorker {
                             .await;
                         }
                         self.emit(SyncEvent::MessagesDeleted(deleted_message_ids));
+                    }
+
+                    // Persist updated folder uid_validity and highest_mod_seq back to folders table
+                    if rf.uid_validity.is_some() || rf.highest_mod_seq.is_some() {
+                        if let Some(conn) = &storage_conn {
+                            let mut updated_folder = folder_record.clone();
+                            if let Some(uv) = rf.uid_validity {
+                                updated_folder.uid_validity = Some(uv);
+                            }
+                            if let Some(hms) = rf.highest_mod_seq {
+                                updated_folder.highest_mod_seq = Some(hms);
+                            }
+                            let _ = conn
+                                .interact(move |c| {
+                                    vespetrel_storage::repo::upsert_folder(c, &updated_folder)
+                                })
+                                .await;
+                        }
                     }
 
                     // Persist updated delta tokens and folder modseqs back to accounts table only when changed

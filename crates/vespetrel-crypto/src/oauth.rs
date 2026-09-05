@@ -1,7 +1,7 @@
 use oauth2::{CsrfToken, PkceCodeChallenge, PkceCodeVerifier};
 use tracing::{debug, info};
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct OAuth2Config {
     pub client_id: String,
     pub client_secret: Option<String>, // None for PKCE public clients
@@ -9,6 +9,22 @@ pub struct OAuth2Config {
     pub token_url: String,
     pub redirect_uri: String, // http://127.0.0.1:8989/callback
     pub scopes: Vec<String>,
+}
+
+impl std::fmt::Debug for OAuth2Config {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("OAuth2Config")
+            .field("client_id", &self.client_id)
+            .field(
+                "client_secret",
+                &self.client_secret.as_ref().map(|_| "[REDACTED]"),
+            )
+            .field("auth_url", &self.auth_url)
+            .field("token_url", &self.token_url)
+            .field("redirect_uri", &self.redirect_uri)
+            .field("scopes", &self.scopes)
+            .finish()
+    }
 }
 
 impl OAuth2Config {

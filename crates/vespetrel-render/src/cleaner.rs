@@ -45,60 +45,143 @@ pub enum PhishingRisk {
         display_domain: String,
         target_domain: String,
     },
-    /// URL targets a raw IP address (e.g., `http://192.168.1.1/login`)
+    /// URL targets a raw IP address (e.g., `http://192.168.1.1/login`, or hex `0x7f000001`, or decimal IP)
     RawIpAddress {
         ip: String,
     },
-    /// Internationalized Domain Name (IDN) with potential Cyrillic/homograph spoofing
+    /// Internationalized Domain Name (IDN) or mixed-script homograph spoofing
     PunycodeHomograph {
         domain: String,
     },
+    /// Embedded userinfo spoofing destination (e.g. `http://paypal.com@evil.com/`)
+    UserInfoSpoofing {
+        user_info: String,
+        target_domain: String,
+    },
 }
 
-/// Strip common analytics and privacy-violating tracker query parameters from a URL
+/// Strip common analytics and privacy-violating tracker query parameters from a URL,
+/// including matrix parameters, fragment trackers, percent-encoded keys, and unwrapping redirectors.
 pub fn clean_tracking_url(raw_url: &str) -> String {
-    let bytes = raw_url.as_bytes();
-    let qmark_pos = match memchr::memchr(b'?', bytes) {
-        Some(pos) => pos,
-        None => return raw_url.to_string(),
-    };
-
-    let base = &raw_url[..qmark_pos];
-    let query_and_fragment = &raw_url[qmark_pos + 1..];
-
-    let (query, fragment) = match memchr::memchr(b'#', query_and_fragment.as_bytes()) {
-        Some(hash_pos) => (
-            &query_and_fragment[..hash_pos],
-            Some(&query_and_fragment[hash_pos + 1..]),
-        ),
-        None => (query_and_fragment, None),
-    };
-
-    let cleaned_pairs: Vec<&str> = query
-        .split('&')
-        .filter(|pair| {
-            if pair.is_empty() {
-                return false;
+    let unwrap_redirect = |url: &str| -> Option<String> {
+        if let Ok(parsed) = url::Url::parse(url) {
+            let host = parsed.host_str().unwrap_or_default();
+            if host.ends_with("google.com") && parsed.path() == "/url" {
+                for (k, v) in parsed.query_pairs() {
+                    if k == "q" || k == "url" {
+                        return Some(v.into_owned());
+                    }
+                }
+            } else if host.ends_with("safelinks.protection.outlook.com") {
+                for (k, v) in parsed.query_pairs() {
+                    if k == "url" {
+                        return Some(v.into_owned());
+                    }
+                }
             }
-            let key = match memchr::memchr(b'=', pair.as_bytes()) {
-                Some(eq_pos) => &pair[..eq_pos],
-                None => *pair,
-            };
-            !TRACKING_SET
-                .iter()
-                .any(|&track| track.eq_ignore_ascii_case(key))
-        })
-        .collect();
+        }
+        None
+    };
 
-    let mut result = base.to_string();
-    if !cleaned_pairs.is_empty() {
+    let target_url = unwrap_redirect(raw_url).unwrap_or_else(|| raw_url.to_string());
+
+    let bytes = target_url.as_bytes();
+    let qmark_pos = memchr::memchr(b'?', bytes);
+    let hash_pos = memchr::memchr(b'#', bytes);
+
+    let (base_and_matrix, query_and_frag) = match (qmark_pos, hash_pos) {
+        (Some(qp), Some(hp)) if qp < hp => (
+            &target_url[..qp],
+            Some((&target_url[qp + 1..hp], Some(&target_url[hp + 1..]))),
+        ),
+        (Some(qp), None) => (&target_url[..qp], Some((&target_url[qp + 1..], None))),
+        (None, Some(hp)) => (&target_url[..hp], Some(("", Some(&target_url[hp + 1..])))),
+        (Some(qp), Some(hp)) => (
+            &target_url[..qp],
+            Some((&target_url[qp + 1..], Some(&target_url[hp + 1..]))),
+        ),
+        (None, None) => (&target_url[..], None),
+    };
+
+    // Clean matrix parameters in path (e.g. /path;utm_source=foo)
+    let cleaned_base = if base_and_matrix.contains(';') {
+        let parts: Vec<&str> = base_and_matrix.split(';').collect();
+        let mut base_res = parts[0].to_string();
+        for &param in &parts[1..] {
+            let key = match memchr::memchr(b'=', param.as_bytes()) {
+                Some(eq) => &param[..eq],
+                None => param,
+            };
+            let decoded_key = urlencoding::decode(key).unwrap_or_else(|_| key.into());
+            if !TRACKING_SET
+                .iter()
+                .any(|&track| track.eq_ignore_ascii_case(decoded_key.as_ref()))
+            {
+                base_res.push(';');
+                base_res.push_str(param);
+            }
+        }
+        base_res
+    } else {
+        base_and_matrix.to_string()
+    };
+
+    let (query_str, frag_str) = match query_and_frag {
+        Some((q, f)) => (q, f),
+        None => return cleaned_base,
+    };
+
+    let cleaned_query_pairs: Vec<&str> = if !query_str.is_empty() {
+        query_str
+            .split('&')
+            .filter(|pair| {
+                if pair.is_empty() {
+                    return false;
+                }
+                let key = match memchr::memchr(b'=', pair.as_bytes()) {
+                    Some(eq_pos) => &pair[..eq_pos],
+                    None => *pair,
+                };
+                let decoded_key = urlencoding::decode(key).unwrap_or_else(|_| key.into());
+                !TRACKING_SET
+                    .iter()
+                    .any(|&track| track.eq_ignore_ascii_case(decoded_key.as_ref()))
+            })
+            .collect()
+    } else {
+        Vec::new()
+    };
+
+    let cleaned_frag_pairs: Vec<&str> = if let Some(frag) = frag_str {
+        if frag.contains('&') || frag.contains('=') {
+            frag.split('&')
+                .filter(|pair| {
+                    let key = match memchr::memchr(b'=', pair.as_bytes()) {
+                        Some(eq_pos) => &pair[..eq_pos],
+                        None => *pair,
+                    };
+                    let decoded_key = urlencoding::decode(key).unwrap_or_else(|_| key.into());
+                    !TRACKING_SET
+                        .iter()
+                        .any(|&track| track.eq_ignore_ascii_case(decoded_key.as_ref()))
+                })
+                .collect()
+        } else {
+            vec![frag]
+        }
+    } else {
+        Vec::new()
+    };
+
+    let mut result = cleaned_base;
+    if !cleaned_query_pairs.is_empty() {
         result.push('?');
-        result.push_str(&cleaned_pairs.join("&"));
+        result.push_str(&cleaned_query_pairs.join("&"));
     }
 
-    if let Some(f) = fragment {
+    if let Some(_) = frag_str {
         result.push('#');
-        result.push_str(f);
+        result.push_str(&cleaned_frag_pairs.join("&"));
     }
 
     result
@@ -116,17 +199,62 @@ pub fn analyze_phishing_risk(href: &str, display_text: &str) -> PhishingRisk {
     let href_lower = href_clean.to_lowercase();
     let text_lower = text_clean.to_lowercase();
 
-    // 1. Check for raw IP address target (IPv4 or IPv6)
+    // Check for userinfo spoofing (e.g. http://paypal.com@evil.com)
+    let url_without_scheme = if let Some(s) = href_lower.strip_prefix("https://") {
+        s
+    } else if let Some(s) = href_lower.strip_prefix("http://") {
+        s
+    } else {
+        &href_lower
+    };
+
+    let authority = url_without_scheme
+        .split(&['/', '?', '#'][..])
+        .next()
+        .unwrap_or("");
+    if let Some((user_info, host_part)) = authority.split_once('@') {
+        if !user_info.is_empty() {
+            let actual_host = host_part.split(':').next().unwrap_or(host_part);
+            return PhishingRisk::UserInfoSpoofing {
+                user_info: user_info.to_string(),
+                target_domain: actual_host.to_string(),
+            };
+        }
+    }
+
+    // Check for host indicators
     if let Some(host) = extract_host(&href_lower) {
         let clean_host = host.trim_matches('[').trim_matches(']');
+
+        // 1. Raw IP address target (IPv4 or IPv6)
         if IpAddr::from_str(clean_host).is_ok() {
             return PhishingRisk::RawIpAddress {
                 ip: host.to_string(),
             };
         }
 
-        // 2. Check for Punycode homograph
-        if host.split('.').any(|part| part.starts_with("xn--")) {
+        // Check for integer / hex / octal IP address representations
+        if clean_host.chars().all(|c| c.is_ascii_digit()) && clean_host.parse::<u64>().is_ok() {
+            return PhishingRisk::RawIpAddress {
+                ip: host.to_string(),
+            };
+        }
+        if (clean_host.starts_with("0x") || clean_host.starts_with("0X"))
+            && u64::from_str_radix(
+                clean_host.trim_start_matches("0x").trim_start_matches("0X"),
+                16,
+            )
+            .is_ok()
+        {
+            return PhishingRisk::RawIpAddress {
+                ip: host.to_string(),
+            };
+        }
+
+        // 2. Punycode homograph or non-ASCII Cyrillic / mixed scripts
+        if host.split('.').any(|part| part.starts_with("xn--"))
+            || host.chars().any(|c| ('\u{0400}'..='\u{04FF}').contains(&c))
+        {
             return PhishingRisk::PunycodeHomograph {
                 domain: host.to_string(),
             };
@@ -135,7 +263,7 @@ pub fn analyze_phishing_risk(href: &str, display_text: &str) -> PhishingRisk {
         // 3. Check for deceptive display domain
         let looks_like_url = text_lower.starts_with("http://")
             || text_lower.starts_with("https://")
-            || text_lower.contains('.') && !text_lower.contains(' ');
+            || (text_lower.contains('.') && !text_lower.contains(' '));
 
         let mismatched_host = if looks_like_url {
             extract_host(&text_lower).filter(|dh| !domains_match(dh, host))
@@ -164,11 +292,13 @@ fn extract_host(url: &str) -> Option<&str> {
     };
 
     let without_path = stripped.split(&['/', '?', '#', ':'][..]).next()?;
-    if without_path.is_empty() {
-        None
+    let host = if let Some((_, h)) = without_path.split_once('@') {
+        h
     } else {
-        Some(without_path)
-    }
+        without_path
+    };
+
+    if host.is_empty() { None } else { Some(host) }
 }
 
 fn domains_match(d1: &str, d2: &str) -> bool {
@@ -177,8 +307,16 @@ fn domains_match(d1: &str, d2: &str) -> bool {
     if clean1 == clean2 {
         return true;
     }
-    if clean1.ends_with(&format!(".{clean2}")) || clean2.ends_with(&format!(".{clean1}")) {
+    // Display text may be subdomain of target (e.g. login.example.com -> example.com)
+    if clean1.ends_with(&format!(".{clean2}")) {
         return true;
+    }
+    // Target being subdomain of display is only valid if exactly 1 level (e.g. mail.google.com -> google.com)
+    if clean2.ends_with(&format!(".{clean1}")) {
+        let prefix = &clean2[..clean2.len() - clean1.len() - 1];
+        if !prefix.contains('.') {
+            return true;
+        }
     }
     false
 }

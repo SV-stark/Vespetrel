@@ -72,6 +72,8 @@ pub struct Message {
     pub body_text_preview: Option<String>,
     pub blob_path: String,
     pub size_bytes: i64,
+    #[serde(default)]
+    pub remote_id: Option<String>,
 }
 
 impl Message {
@@ -90,6 +92,7 @@ impl Message {
             folder_id: folder_id.into(),
             thread_id: None,
             remote_uid,
+            remote_id: None,
             message_id_header: None,
             in_reply_to: None,
             references: None,

@@ -3,16 +3,156 @@ pub mod gpui_app {
     use crate::views::{
         calendar::CalendarView,
         contacts::ContactsView,
-        login_wizard::{LoginWizardState, WizardStep},
+        login_wizard::{AuthModeChoice, LoginWizardState, WizardStep},
         message_list::ListFilter,
         navigation::NavigationTree,
         tasks::TaskListView,
     };
-    use gpui::*;
+    pub use gpui_kit::base;
+    pub use gpui_kit::component;
+    pub use gpui_kit::gpui;
+    pub use gpui_kit::gpui::*;
     use vespetrel_core::{
         Account, CalendarEvent, Contact, Folder, FolderRole, MessageSummary, ProviderType,
         TaskItem, UserSettings, provider::SyncEvent,
     };
+
+    /// Interactive input field handles for the Login Setup Wizard
+    pub struct WizardInputEntities {
+        pub email: Entity<component::input::InputState>,
+        pub password: Entity<component::input::InputState>,
+        pub name: Entity<component::input::InputState>,
+        pub incoming_host: Entity<component::input::InputState>,
+        pub incoming_port: Entity<component::input::InputState>,
+        pub outgoing_host: Entity<component::input::InputState>,
+        pub outgoing_port: Entity<component::input::InputState>,
+        pub client_id: Entity<component::input::InputState>,
+    }
+
+    impl WizardInputEntities {
+        pub fn new(
+            window: &mut Window,
+            cx: &mut Context<MainWindow>,
+            wizard: &LoginWizardState,
+        ) -> Self {
+            let email_val = wizard.email.clone();
+            let pass_val = wizard.password_or_token.clone();
+            let name_val = wizard.name.clone();
+            let in_host_val = if wizard.incoming_host.is_empty() {
+                match wizard.provider_type {
+                    ProviderType::Gmail => "imap.gmail.com".to_string(),
+                    ProviderType::Graph => "graph.microsoft.com".to_string(),
+                    ProviderType::Jmap => "api.fastmail.com".to_string(),
+                    ProviderType::Imap => "".to_string(),
+                }
+            } else {
+                wizard.incoming_host.clone()
+            };
+            let in_port_val = wizard.incoming_port.to_string();
+            let out_host_val = if wizard.outgoing_host.is_empty() {
+                match wizard.provider_type {
+                    ProviderType::Gmail => "smtp.gmail.com".to_string(),
+                    ProviderType::Graph => "graph.microsoft.com".to_string(),
+                    ProviderType::Jmap => "api.fastmail.com".to_string(),
+                    ProviderType::Imap => "".to_string(),
+                }
+            } else {
+                wizard.outgoing_host.clone()
+            };
+            let out_port_val = wizard.outgoing_port.to_string();
+            let client_id_val =
+                wizard
+                    .client_id
+                    .clone()
+                    .unwrap_or_else(|| match wizard.provider_type {
+                        ProviderType::Gmail => {
+                            std::env::var("VESPETREL_GOOGLE_CLIENT_ID").unwrap_or_default()
+                        }
+                        ProviderType::Graph => {
+                            std::env::var("VESPETREL_MICROSOFT_CLIENT_ID").unwrap_or_default()
+                        }
+                        _ => String::new(),
+                    });
+
+            let email = cx.new(|cx| {
+                let mut st =
+                    component::input::InputState::new(window, cx).placeholder("user@example.com");
+                if !email_val.is_empty() {
+                    st = st.default_value(email_val);
+                }
+                st
+            });
+
+            let password = cx.new(|cx| {
+                let mut st = component::input::InputState::new(window, cx)
+                    .placeholder("Password or 16-character App Password")
+                    .masked(true);
+                if !pass_val.is_empty() {
+                    st = st.default_value(pass_val);
+                }
+                st
+            });
+
+            let name = cx.new(|cx| {
+                let mut st = component::input::InputState::new(window, cx)
+                    .placeholder("Display Name (e.g. Alex Smith)");
+                if !name_val.is_empty() {
+                    st = st.default_value(name_val);
+                }
+                st
+            });
+
+            let incoming_host = cx.new(|cx| {
+                let mut st =
+                    component::input::InputState::new(window, cx).placeholder("imap.example.com");
+                if !in_host_val.is_empty() {
+                    st = st.default_value(in_host_val);
+                }
+                st
+            });
+
+            let incoming_port = cx.new(|cx| {
+                component::input::InputState::new(window, cx)
+                    .placeholder("993")
+                    .default_value(in_port_val)
+            });
+
+            let outgoing_host = cx.new(|cx| {
+                let mut st =
+                    component::input::InputState::new(window, cx).placeholder("smtp.example.com");
+                if !out_host_val.is_empty() {
+                    st = st.default_value(out_host_val);
+                }
+                st
+            });
+
+            let outgoing_port = cx.new(|cx| {
+                component::input::InputState::new(window, cx)
+                    .placeholder("587")
+                    .default_value(out_port_val)
+            });
+
+            let client_id = cx.new(|cx| {
+                let mut st = component::input::InputState::new(window, cx)
+                    .placeholder("OAuth Client ID (e.g. 12345.apps.googleusercontent.com)");
+                if !client_id_val.is_empty() {
+                    st = st.default_value(client_id_val);
+                }
+                st
+            });
+
+            Self {
+                email,
+                password,
+                name,
+                incoming_host,
+                incoming_port,
+                outgoing_host,
+                outgoing_port,
+                client_id,
+            }
+        }
+    }
 
     /// Active top-level navigation view
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -56,11 +196,13 @@ pub mod gpui_app {
         pub compose_body: String,
         // Command Palette
         pub palette_query: String,
+        pub command_palette: crate::command_palette::CommandPalette,
         // Event channel from Tokio sync engine
         pub sync_sender: flume::Sender<SyncEvent>,
         pub status_message: String,
         pub storage_pool: Option<vespetrel_storage::db::StoragePool>,
         pub login_wizard: LoginWizardState,
+        pub wizard_inputs: Option<WizardInputEntities>,
     }
 
     impl MainWindow {
@@ -251,10 +393,12 @@ pub mod gpui_app {
                 compose_subject: "Hello from Pure Rust GPUI Mail".into(),
                 compose_body: "Hi team,\n\nWriting this from the pure Rust GPUI mail client.\n\nBest regards,\nVespetrel User".into(),
                 palette_query: String::new(),
+                command_palette: crate::command_palette::CommandPalette::new(),
                 sync_sender: sync_tx,
                 status_message: "All mailboxes synchronized".into(),
                 storage_pool,
                 login_wizard: LoginWizardState::new(),
+                wizard_inputs: None,
             }
         }
 
@@ -339,23 +483,109 @@ pub mod gpui_app {
 
         pub fn trigger_sync(&mut self, cx: &mut Context<Self>) {
             self.status_message = "Syncing mailboxes...".into();
+            let _pool_opt = self.storage_pool.clone();
             let tx = self.sync_sender.clone();
+            let accounts = self.accounts.clone();
             cx.spawn(async move |this, cx| {
-                tokio::time::sleep(std::time::Duration::from_millis(400)).await;
-                let _ = tx.send(SyncEvent::FolderListUpdated(vec![]));
+                if accounts.is_empty() {
+                    let _ = this.update(cx, |view, cx| {
+                        view.status_message = "No accounts configured".into();
+                        cx.notify();
+                    });
+                    return;
+                }
+                for acct in accounts {
+                    let provider = vespetrel_engine::make_provider(&acct);
+                    match provider.sync_folder_list().await {
+                        Ok(folders) => {
+                            let _ = tx.send(SyncEvent::FolderListUpdated(folders.clone()));
+                            for f in &folders {
+                                let fld = vespetrel_core::Folder::new(
+                                    &acct.id,
+                                    &f.remote_id,
+                                    &f.name,
+                                    &f.path,
+                                );
+                                if let Ok(delta) =
+                                    provider.sync_messages(&fld, Default::default()).await
+                                {
+                                    let summaries: Vec<MessageSummary> = delta
+                                        .inserted
+                                        .iter()
+                                        .map(|sm| MessageSummary {
+                                            id: sm
+                                                .remote_id
+                                                .clone()
+                                                .unwrap_or_else(|| sm.remote_uid.to_string()),
+                                            thread_id: None,
+                                            subject: Some(format!("Message {}", sm.remote_uid)),
+                                            from_address: acct.email.clone(),
+                                            from_name: None,
+                                            snippet: None,
+                                            sent_at: chrono::Utc::now(),
+                                            is_read: sm
+                                                .flags
+                                                .contains(&vespetrel_core::message::Flag::Seen),
+                                            is_flagged: sm
+                                                .flags
+                                                .contains(&vespetrel_core::message::Flag::Flagged),
+                                            has_attachments: false,
+                                        })
+                                        .collect();
+                                    if !summaries.is_empty() {
+                                        let _ = tx.send(SyncEvent::MessagesInserted(summaries));
+                                    }
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            let _ = tx.send(SyncEvent::SyncError {
+                                folder: "ALL".into(),
+                                error: e.to_string(),
+                            });
+                        }
+                    }
+                }
                 let _ = this.update(cx, |view, cx| {
-                    view.status_message = "Mailboxes up to date".into();
+                    view.status_message = "Mailbox sync complete".into();
                     cx.notify();
                 });
             })
             .detach();
-            cx.notify();
         }
 
-        pub fn toggle_flag(&mut self, id: String, cx: &mut Context<Self>) {
-            if let Some(m) = self.messages.iter_mut().find(|m| m.id == id) {
-                m.is_flagged = !m.is_flagged;
-                cx.notify();
+        pub fn toggle_flag(&mut self, cx: &mut Context<Self>) {
+            if let Some(id) = self.selected_message_id.clone() {
+                if let Some(m) = self.messages.iter_mut().find(|m| m.id == id) {
+                    m.is_flagged = !m.is_flagged;
+                    let is_flagged = m.is_flagged;
+                    let is_read = m.is_read;
+                    cx.notify();
+
+                    if let Some(pool) = &self.storage_pool {
+                        let pool = pool.clone();
+                        let msg_id = id.clone();
+                        cx.spawn(async move |_this, _cx| {
+                            if let Ok(conn) = pool.get().await {
+                                let _ = conn
+                                    .interact(move |c| {
+                                        c.execute(
+                                            "UPDATE messages SET is_flagged = ?1 WHERE id = ?2",
+                                            rusqlite::params![is_flagged, msg_id],
+                                        )
+                                    })
+                                    .await;
+                            }
+                        })
+                        .detach();
+                    }
+
+                    let _ = self.sync_sender.send(SyncEvent::MessageFlagsUpdated {
+                        id,
+                        is_read,
+                        is_flagged,
+                    });
+                }
             }
         }
 
@@ -363,8 +593,25 @@ pub mod gpui_app {
             if let Some(id) = self.selected_message_id.clone() {
                 self.messages.retain(|m| m.id != id);
                 self.selected_message_id = self.messages.first().map(|m| m.id.clone());
-                self.status_message = "Message moved to Trash".into();
+                self.status_message = "Message deleted".into();
                 cx.notify();
+
+                if let Some(pool) = &self.storage_pool {
+                    let pool = pool.clone();
+                    let msg_id = id.clone();
+                    cx.spawn(async move |_this, _cx| {
+                        if let Ok(conn) = pool.get().await {
+                            let _ = conn
+                                .interact(move |c| {
+                                    vespetrel_storage::repo::delete_message(c, &msg_id)
+                                })
+                                .await;
+                        }
+                    })
+                    .detach();
+                }
+
+                let _ = self.sync_sender.send(SyncEvent::MessagesDeleted(vec![id]));
             }
         }
 
@@ -374,6 +621,34 @@ pub mod gpui_app {
                 self.selected_message_id = self.messages.first().map(|m| m.id.clone());
                 self.status_message = "Message archived".into();
                 cx.notify();
+
+                if let Some(pool) = &self.storage_pool {
+                    let pool = pool.clone();
+                    let msg_id = id.clone();
+                    cx.spawn(async move |_this, _cx| {
+                        if let Ok(conn) = pool.get().await {
+                            let _ = conn
+                                .interact(move |c| {
+                                    let archive_id: Option<String> = c
+                                        .query_row(
+                                            "SELECT id FROM folders WHERE role = 'archive' LIMIT 1",
+                                            [],
+                                            |r| r.get(0),
+                                        )
+                                        .ok();
+                                    if let Some(arch_id) = archive_id {
+                                        c.execute(
+                                            "UPDATE messages SET folder_id = ?1 WHERE id = ?2",
+                                            rusqlite::params![arch_id, msg_id],
+                                        )?;
+                                    }
+                                    Ok::<(), vespetrel_storage::StorageError>(())
+                                })
+                                .await;
+                        }
+                    })
+                    .detach();
+                }
             }
         }
 
@@ -384,26 +659,150 @@ pub mod gpui_app {
                 return;
             }
 
-            let new_msg = MessageSummary {
-                id: format!("msg-sent-{}", uuid::Uuid::new_v4()),
-                thread_id: None,
-                subject: Some(self.compose_subject.clone()),
-                from_address: "user@vespetrel.example".into(),
-                from_name: Some("Me".into()),
-                snippet: Some(self.compose_body.chars().take(120).collect()),
-                sent_at: chrono::Utc::now(),
-                is_read: true,
-                is_flagged: false,
-                has_attachments: false,
+            let from_email = self
+                .accounts
+                .first()
+                .map(|a| a.email.clone())
+                .unwrap_or_else(|| "me@localhost".into());
+            let from_name = self.accounts.first().and_then(|a| {
+                if a.name.is_empty() {
+                    None
+                } else {
+                    Some(a.name.clone())
+                }
+            });
+            let composed = vespetrel_core::ComposedMessage {
+                from: vespetrel_core::Address {
+                    name: from_name.clone(),
+                    email: from_email.clone(),
+                },
+                to: vec![vespetrel_core::Address {
+                    name: None,
+                    email: self.compose_to.trim().to_string(),
+                }],
+                cc: vec![],
+                bcc: vec![],
+                subject: self.compose_subject.clone(),
+                body_text: self.compose_body.clone(),
+                body_html: None,
+                in_reply_to: None,
+                references: vec![],
+                attachments: vec![],
             };
 
-            self.messages.insert(0, new_msg);
-            self.status_message = format!("Message sent to {}", self.compose_to);
+            let outbox_id = format!("outbox-{}", uuid::Uuid::new_v4());
+            let now_ts = chrono::Utc::now().timestamp();
+            let account_opt = self.accounts.first().cloned();
+            let pool_opt = self.storage_pool.clone();
+            let to_dest = self.compose_to.trim().to_string();
+
+            // Persist to SQLite Outbox for durability
+            if let Some(pool) = &self.storage_pool {
+                let pool = pool.clone();
+                let entry = vespetrel_storage::repo::OutboxEntry {
+                    id: outbox_id.clone(),
+                    account_id: account_opt
+                        .as_ref()
+                        .map(|a| a.id.clone())
+                        .unwrap_or_else(|| "default".into()),
+                    composed_message: composed.clone(),
+                    scheduled_at: now_ts,
+                    send_at: now_ts,
+                    is_cancelled: false,
+                    attempts: 0,
+                    last_error: None,
+                };
+                cx.spawn(async move |_this, _cx| {
+                    if let Ok(conn) = pool.get().await {
+                        let _ = conn
+                            .interact(move |c| vespetrel_storage::repo::enqueue_outbox(c, &entry))
+                            .await;
+                    }
+                })
+                .detach();
+            }
+
+            self.status_message = format!("Sending message to {to_dest}...");
             self.active_modal = ActiveModal::None;
             self.compose_to.clear();
             self.compose_subject.clear();
             self.compose_body.clear();
             cx.notify();
+
+            // Asynchronously transmit via SMTP
+            let outbox_id_clone = outbox_id.clone();
+            cx.spawn(async move |this, cx| {
+                let send_res: Result<(), String> = if let Some(acct) = account_opt {
+                    let auth_token = if let Some(ref k) = acct.auth_config.keyring_key {
+                        keyring::Entry::new("vespetrel", k)
+                            .and_then(|e| e.get_password())
+                            .unwrap_or_default()
+                    } else {
+                        keyring::Entry::new("vespetrel", &acct.id)
+                            .and_then(|e| e.get_password())
+                            .unwrap_or_default()
+                    };
+
+                    let domain = acct.email.split('@').nth(1).unwrap_or("localhost");
+                    let host = match domain {
+                        "gmail.com" => "smtp.gmail.com",
+                        "outlook.com" | "hotmail.com" | "live.com" | "office365.com" => {
+                            "smtp.office365.com"
+                        }
+                        "yahoo.com" => "smtp.mail.yahoo.com",
+                        "icloud.com" => "smtp.mail.me.com",
+                        other => other,
+                    };
+                    let port = if domain == "gmail.com" || domain == "yahoo.com" {
+                        465
+                    } else {
+                        587
+                    };
+                    let mut smtp_cfg =
+                        vespetrel_smtp::SmtpConfig::new(host, port, &acct.email, auth_token);
+                    if acct.provider_type == ProviderType::Gmail {
+                        smtp_cfg = smtp_cfg.with_xoauth2();
+                    }
+                    let client = vespetrel_smtp::SmtpClient::new(smtp_cfg);
+                    client.send(&composed).await.map_err(|e| e.to_string())
+                } else {
+                    Err("No account available for sending".into())
+                };
+
+                // Update outbox status in SQLite
+                if let Some(pool) = pool_opt {
+                    let out_id = outbox_id_clone.clone();
+                    let success = send_res.is_ok();
+                    let err_copy = send_res.as_ref().err().cloned();
+                    if let Ok(conn) = pool.get().await {
+                        let _ = conn
+                            .interact(move |c| {
+                                if success {
+                                    let _ =
+                                        vespetrel_storage::repo::delete_outbox_entry(c, &out_id);
+                                } else if let Some(err) = err_copy {
+                                    let _ = vespetrel_storage::repo::mark_outbox_failed(
+                                        c, &out_id, &err,
+                                    );
+                                }
+                            })
+                            .await;
+                    }
+                }
+
+                let _ = this.update(cx, |view, cx| {
+                    match send_res {
+                        Ok(()) => {
+                            view.status_message = format!("Message sent successfully to {to_dest}");
+                        }
+                        Err(e) => {
+                            view.status_message = format!("Failed to send message: {e}");
+                        }
+                    }
+                    cx.notify();
+                });
+            })
+            .detach();
         }
     }
 
@@ -434,7 +833,11 @@ pub mod gpui_app {
     }
 
     impl Render for MainWindow {
-        fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+            if self.active_modal == ActiveModal::AddAccount && self.wizard_inputs.is_none() {
+                self.wizard_inputs = Some(WizardInputEntities::new(window, cx, &self.login_wizard));
+            }
+
             div()
                 .flex()
                 .flex_col()
@@ -504,6 +907,7 @@ pub mod gpui_app {
                 )
                 .child(
                     div()
+                        .id("header-search-bar")
                         .flex()
                         .flex_row()
                         .items_center()
@@ -515,6 +919,12 @@ pub mod gpui_app {
                         .border_1()
                         .border_color(rgb(0x2d3748))
                         .gap(px(8.0))
+                        .cursor_pointer()
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.command_palette.open();
+                            this.active_modal = ActiveModal::CommandPalette;
+                            cx.notify();
+                        }))
                         .child(div().text_xs().text_color(rgb(0x94a3b8)).child("🔍"))
                         .child(
                             div()
@@ -566,10 +976,7 @@ pub mod gpui_app {
                                 .text_xs()
                                 .cursor_pointer()
                                 .on_click(cx.listener(|this, _, _, cx| {
-                                    this.status_message = "Synchronizing all accounts...".into();
-                                    let _ =
-                                        this.sync_sender.send(SyncEvent::FolderListUpdated(vec![]));
-                                    cx.notify();
+                                    this.trigger_sync(cx);
                                 }))
                                 .child("🔄 Sync"),
                         )
@@ -676,7 +1083,7 @@ pub mod gpui_app {
                 .overflow_hidden()
                 .child(self.render_folder_tree(cx))
                 .child(self.render_message_list_pane(cx))
-                .child(self.render_message_reader_pane())
+                .child(self.render_message_reader_pane(cx))
         }
 
         fn render_folder_tree(&self, cx: &Context<Self>) -> impl IntoElement {
@@ -711,6 +1118,7 @@ pub mod gpui_app {
                                 .cursor_pointer()
                                 .on_click(cx.listener(|this, _, _, cx| {
                                     this.login_wizard = LoginWizardState::new();
+                                    this.wizard_inputs = None;
                                     this.active_modal = ActiveModal::AddAccount;
                                     cx.notify();
                                 }))
@@ -729,6 +1137,7 @@ pub mod gpui_app {
                             .cursor_pointer()
                             .on_click(cx.listener(|this, _, _, cx| {
                                 this.login_wizard = LoginWizardState::new();
+                                this.wizard_inputs = None;
                                 this.active_modal = ActiveModal::AddAccount;
                                 cx.notify();
                             }))
@@ -858,7 +1267,7 @@ pub mod gpui_app {
         }
 
         fn render_message_list_pane(&self, cx: &Context<Self>) -> impl IntoElement {
-            let filtered = self.filtered_messages();
+            let visible_msgs: Vec<&MessageSummary> = self.filtered_messages().take(100).collect();
 
             div()
                 .flex()
@@ -891,7 +1300,7 @@ pub mod gpui_app {
                         .flex()
                         .flex_col()
                         .flex_1()
-                        .children(filtered.into_iter().map(|msg| {
+                        .children(visible_msgs.into_iter().map(|msg| {
                             let is_selected = self.selected_message_id.as_deref() == Some(&msg.id);
                             let sender = msg.from_name.as_deref().unwrap_or(&msg.from_address);
                             let subject = msg.subject.as_deref().unwrap_or("(No Subject)");
@@ -1033,7 +1442,7 @@ pub mod gpui_app {
                 .child(label)
         }
 
-        fn render_message_reader_pane(&self) -> impl IntoElement {
+        fn render_message_reader_pane(&self, cx: &Context<Self>) -> impl IntoElement {
             let msg_opt = self.selected_message();
 
             div()
@@ -1069,9 +1478,62 @@ pub mod gpui_app {
                                         .flex_row()
                                         .items_center()
                                         .gap(px(8.0))
-                                        .child(div().px(px(10.0)).py(px(5.0)).rounded_md().bg(rgb(0x2563eb)).text_color(rgb(0xffffff)).text_xs().cursor_pointer().child("↩ Reply"))
-                                        .child(div().px(px(10.0)).py(px(5.0)).rounded_md().bg(rgb(0x1e293b)).text_color(rgb(0xcbd5e1)).text_xs().cursor_pointer().child("📦 Archive"))
-                                        .child(div().px(px(10.0)).py(px(5.0)).rounded_md().bg(rgb(0x1e293b)).text_color(rgb(0xf87171)).text_xs().cursor_pointer().child("🗑️ Delete"))
+                                        .child(
+                                            div()
+                                                .id("btn-reply-message")
+                                                .px(px(10.0))
+                                                .py(px(5.0))
+                                                .rounded_md()
+                                                .bg(rgb(0x2563eb))
+                                                .text_color(rgb(0xffffff))
+                                                .text_xs()
+                                                .cursor_pointer()
+                                                .on_click(cx.listener({
+                                                    let reply_to = msg.from_address.clone();
+                                                    let reply_subj = if msg.subject.as_deref().unwrap_or("").to_lowercase().starts_with("re:") {
+                                                        msg.subject.clone().unwrap_or_default()
+                                                    } else {
+                                                        format!("Re: {}", msg.subject.as_deref().unwrap_or(""))
+                                                    };
+                                                    move |this, _, _, cx| {
+                                                        this.compose_to = reply_to.clone();
+                                                        this.compose_subject = reply_subj.clone();
+                                                        this.active_modal = ActiveModal::Compose;
+                                                        cx.notify();
+                                                    }
+                                                }))
+                                                .child("↩ Reply"),
+                                        )
+                                        .child(
+                                            div()
+                                                .id("btn-archive-message")
+                                                .px(px(10.0))
+                                                .py(px(5.0))
+                                                .rounded_md()
+                                                .bg(rgb(0x1e293b))
+                                                .text_color(rgb(0xcbd5e1))
+                                                .text_xs()
+                                                .cursor_pointer()
+                                                .on_click(cx.listener(|this, _, _, cx| {
+                                                    this.archive_selected_message(cx);
+                                                }))
+                                                .child("📦 Archive"),
+                                        )
+                                        .child(
+                                            div()
+                                                .id("btn-delete-message")
+                                                .px(px(10.0))
+                                                .py(px(5.0))
+                                                .rounded_md()
+                                                .bg(rgb(0x1e293b))
+                                                .text_color(rgb(0xf87171))
+                                                .text_xs()
+                                                .cursor_pointer()
+                                                .on_click(cx.listener(|this, _, _, cx| {
+                                                    this.delete_selected_message(cx);
+                                                }))
+                                                .child("🗑️ Delete"),
+                                        )
                                 )
                                 .child(
                                     div()
@@ -1154,7 +1616,18 @@ pub mod gpui_app {
                                 .border_b_1()
                                 .border_color(rgb(0x1f293d))
                                 .child(div().text_xs().text_color(rgb(0x94a3b8)).child("🛡️ Remote trackers and pixel beacons blocked by ammonia + lol_html sanitizer."))
-                                .child(div().text_xs().text_color(rgb(0x60a5fa)).cursor_pointer().child(if self.block_remote_images { "Load Remote Images" } else { "Block Images" }))
+                                .child(
+                                    div()
+                                        .id("btn-toggle-images")
+                                        .text_xs()
+                                        .text_color(rgb(0x60a5fa))
+                                        .cursor_pointer()
+                                        .on_click(cx.listener(|this, _, _, cx| {
+                                            this.block_remote_images = !this.block_remote_images;
+                                            cx.notify();
+                                        }))
+                                        .child(if self.block_remote_images { "Load Remote Images" } else { "Block Images" }),
+                                )
                         )
                         .child(
                             div()
@@ -1679,12 +2152,7 @@ pub mod gpui_app {
                                                 .font_weight(FontWeight::BOLD)
                                                 .cursor_pointer()
                                                 .on_click(cx.listener(|this, _, _, cx| {
-                                                    this.status_message = format!(
-                                                        "Message sent to {}",
-                                                        this.compose_to
-                                                    );
-                                                    this.active_modal = ActiveModal::None;
-                                                    cx.notify();
+                                                    this.send_composed_message(cx);
                                                 }))
                                                 .child("Send 🚀"),
                                         ),
@@ -1694,16 +2162,12 @@ pub mod gpui_app {
         }
 
         fn render_command_palette_modal(&self, cx: &Context<Self>) -> impl IntoElement {
-            let actions = [
-                ("✍️ Compose New Email", "c"),
-                ("📥 Go to Inbox", "g i"),
-                ("★ Go to Starred", "g s"),
-                ("🔄 Sync All Mailboxes", "Ctrl+R"),
-                ("📅 Switch to Calendar View", "Alt+2"),
-                ("👥 Switch to Contacts View", "Alt+3"),
-                ("✅ Switch to Tasks View", "Alt+4"),
-                ("⚙️ Open Settings", "Ctrl+,"),
-            ];
+            let actions: Vec<(String, String, Option<String>)> = self
+                .command_palette
+                .filtered_actions()
+                .into_iter()
+                .map(|a| (a.id.clone(), a.title.clone(), a.shortcut.clone()))
+                .collect();
 
             div()
                 .id("modal-palette-overlay")
@@ -1739,78 +2203,112 @@ pub mod gpui_app {
                                 .child(
                                     div()
                                         .text_xs()
-                                        .text_color(rgb(0x94a3b8))
-                                        .child("Type a command or search action..."),
+                                        .text_color(if self.command_palette.query.is_empty() {
+                                            rgb(0x94a3b8)
+                                        } else {
+                                            rgb(0xf1f5f9)
+                                        })
+                                        .child(if self.command_palette.query.is_empty() {
+                                            "Type a command or search action...".to_string()
+                                        } else {
+                                            self.command_palette.query.clone()
+                                        }),
                                 ),
                         )
-                        .child(
-                            div().flex().flex_col().gap(px(4.0)).children(
-                                actions
-                                    .into_iter()
-                                    .enumerate()
-                                    .map(|(idx, (title, shortcut))| {
-                                        div()
-                                            .id(ElementId::Name(
-                                                format!("palette-action-{}", idx).into(),
-                                            ))
-                                            .flex()
-                                            .flex_row()
-                                            .items_center()
-                                            .justify_between()
-                                            .px(px(12.0))
-                                            .py(px(8.0))
-                                            .rounded_md()
-                                            .bg(if idx == 0 {
-                                                rgb(0x1e293b)
-                                            } else {
-                                                rgb(0x00000000)
-                                            })
-                                            .cursor_pointer()
-                                            .on_click(cx.listener(move |this, _, _, cx| {
-                                                match idx {
-                                                    0 => this.active_modal = ActiveModal::Compose,
-                                                    1 => this.active_tab = ActiveViewTab::Mail,
-                                                    2 => this.list_filter = ListFilter::Flagged,
-                                                    3 => {
-                                                        let _ = this.sync_sender.send(
-                                                            SyncEvent::FolderListUpdated(vec![]),
-                                                        );
+                        .child(div().flex().flex_col().gap(px(4.0)).children(
+                            actions.into_iter().enumerate().map(
+                                |(idx, (act_id, title, shortcut))| {
+                                    let act_id_clone = act_id.clone();
+                                    div()
+                                        .id(ElementId::Name(
+                                            format!("palette-action-{}", idx).into(),
+                                        ))
+                                        .flex()
+                                        .flex_row()
+                                        .items_center()
+                                        .justify_between()
+                                        .px(px(12.0))
+                                        .py(px(8.0))
+                                        .rounded_md()
+                                        .bg(if idx == 0 {
+                                            rgb(0x1e293b)
+                                        } else {
+                                            rgb(0x00000000)
+                                        })
+                                        .cursor_pointer()
+                                        .on_click(cx.listener(move |this, _, _, cx| {
+                                            match act_id_clone.as_str() {
+                                                "mail.compose" => {
+                                                    this.active_modal = ActiveModal::Compose;
+                                                }
+                                                "nav.inbox" => {
+                                                    this.active_tab = ActiveViewTab::Mail;
+                                                    if let Some(inbox) = this
+                                                        .folders
+                                                        .iter()
+                                                        .find(|f| f.role == FolderRole::Inbox)
+                                                    {
+                                                        this.selected_folder_id =
+                                                            Some(inbox.id.clone());
                                                     }
-                                                    4 => this.active_tab = ActiveViewTab::Calendar,
-                                                    5 => this.active_tab = ActiveViewTab::Contacts,
-                                                    6 => this.active_tab = ActiveViewTab::Tasks,
-                                                    7 => this.active_tab = ActiveViewTab::Settings,
-                                                    _ => {}
-                                                };
-                                                if idx != 0 {
                                                     this.active_modal = ActiveModal::None;
                                                 }
-                                                cx.notify();
-                                            }))
-                                            .child(
-                                                div()
-                                                    .text_xs()
-                                                    .text_color(rgb(0xf1f5f9))
-                                                    .child(title),
-                                            )
-                                            .child(
-                                                div()
-                                                    .px(px(6.0))
-                                                    .py(px(2.0))
-                                                    .rounded_md()
-                                                    .bg(rgb(0x111622))
-                                                    .text_xs()
-                                                    .text_color(rgb(0x94a3b8))
-                                                    .child(shortcut),
-                                            )
-                                    }),
+                                                "nav.flagged" => {
+                                                    this.active_tab = ActiveViewTab::Mail;
+                                                    this.list_filter = ListFilter::Flagged;
+                                                    this.active_modal = ActiveModal::None;
+                                                }
+                                                "mail.sync" => {
+                                                    this.active_modal = ActiveModal::None;
+                                                    this.trigger_sync(cx);
+                                                }
+                                                "view.calendar" => {
+                                                    this.active_tab = ActiveViewTab::Calendar;
+                                                    this.active_modal = ActiveModal::None;
+                                                }
+                                                "view.contacts" => {
+                                                    this.active_tab = ActiveViewTab::Contacts;
+                                                    this.active_modal = ActiveModal::None;
+                                                }
+                                                "view.tasks" => {
+                                                    this.active_tab = ActiveViewTab::Tasks;
+                                                    this.active_modal = ActiveModal::None;
+                                                }
+                                                "settings.keybindings" => {
+                                                    this.active_tab = ActiveViewTab::Settings;
+                                                    this.active_modal = ActiveModal::None;
+                                                }
+                                                _ => {
+                                                    this.active_modal = ActiveModal::None;
+                                                }
+                                            }
+                                            this.command_palette.close();
+                                            cx.notify();
+                                        }))
+                                        .child(
+                                            div().text_xs().text_color(rgb(0xf1f5f9)).child(title),
+                                        )
+                                        .child(
+                                            div()
+                                                .px(px(6.0))
+                                                .py(px(2.0))
+                                                .rounded_md()
+                                                .bg(rgb(0x111622))
+                                                .text_xs()
+                                                .text_color(rgb(0x94a3b8))
+                                                .child(shortcut.unwrap_or_default()),
+                                        )
+                                },
                             ),
-                        ),
+                        )),
                 )
         }
 
         fn render_add_account_modal(&self, cx: &Context<Self>) -> impl IntoElement {
             let selected_p = self.login_wizard.provider_type.clone();
+            let is_oauth = self.login_wizard.auth_mode == AuthModeChoice::OAuth2
+                && (selected_p == ProviderType::Gmail || selected_p == ProviderType::Graph);
+
             let providers = [
                 (
                     ProviderType::Gmail,
@@ -1855,19 +2353,7 @@ pub mod gpui_app {
                 &self.login_wizard.name
             };
 
-            let incoming_info = match selected_p {
-                ProviderType::Gmail => "imap.gmail.com:993 (SSL/TLS)",
-                ProviderType::Graph => "graph.microsoft.com:443 (HTTPS)",
-                ProviderType::Jmap => "api.fastmail.com:443 (JMAP RFC8620)",
-                ProviderType::Imap => "mail.example.com:993 (IMAP TLS 1.3)",
-            };
-
-            let outgoing_info = match selected_p {
-                ProviderType::Gmail => "smtp.gmail.com:587 (STARTTLS)",
-                ProviderType::Graph => "graph.microsoft.com (OAuth2 Bearer)",
-                ProviderType::Jmap => "api.fastmail.com (EmailSubmission)",
-                ProviderType::Imap => "smtp.example.com:587 (Submission TLS)",
-            };
+            let inputs_opt = self.wizard_inputs.as_ref();
 
             div()
                 .id("modal-add-account-overlay")
@@ -1881,13 +2367,15 @@ pub mod gpui_app {
                         .id("modal-add-account-box")
                         .flex()
                         .flex_col()
-                        .w(px(560.0))
+                        .w(px(580.0))
+                        .max_h(px(720.0))
+                        .overflow_y_scroll()
                         .rounded_xl()
                         .bg(rgb(0x131722))
                         .border_1()
                         .border_color(rgb(0x283347))
                         .p(px(24.0))
-                        .gap(px(16.0))
+                        .gap(px(14.0))
                         // Wizard Header
                         .child(
                             div()
@@ -1922,12 +2410,13 @@ pub mod gpui_app {
                                         .cursor_pointer()
                                         .on_click(cx.listener(|this, _, _, cx| {
                                             this.active_modal = ActiveModal::None;
+                                            this.wizard_inputs = None;
                                             cx.notify();
                                         }))
                                         .child("✕"),
                                 ),
                         )
-                        // Provider Selection Grid
+                        // Step 1: Provider Selection Grid
                         .child(
                             div()
                                 .flex()
@@ -1953,15 +2442,21 @@ pub mod gpui_app {
                                                 .id(ElementId::Name(format!("prov-choice-{:?}", p).into()))
                                                 .flex()
                                                 .flex_col()
-                                                .w(px(248.0))
+                                                .w(px(258.0))
                                                 .p(px(10.0))
                                                 .rounded_lg()
                                                 .bg(if is_sel { rgb(0x1e293b) } else { rgb(0x181f2f) })
                                                 .border_1()
                                                 .border_color(if is_sel { rgb(0x3b82f6) } else { rgb(0x232d42) })
                                                 .cursor_pointer()
-                                                .on_click(cx.listener(move |this, _, _, cx| {
+                                                .on_click(cx.listener(move |this, _, window, cx| {
                                                     this.login_wizard.select_provider(p_choice.clone());
+                                                    if let Some(inputs) = &this.wizard_inputs {
+                                                        inputs.incoming_host.update(cx, |inp, cx| inp.set_value(this.login_wizard.incoming_host.clone(), window, cx));
+                                                        inputs.incoming_port.update(cx, |inp, cx| inp.set_value(this.login_wizard.incoming_port.to_string(), window, cx));
+                                                        inputs.outgoing_host.update(cx, |inp, cx| inp.set_value(this.login_wizard.outgoing_host.clone(), window, cx));
+                                                        inputs.outgoing_port.update(cx, |inp, cx| inp.set_value(this.login_wizard.outgoing_port.to_string(), window, cx));
+                                                    }
                                                     cx.notify();
                                                 }))
                                                 .child(
@@ -1988,7 +2483,7 @@ pub mod gpui_app {
                                         })),
                                 ),
                         )
-                        // Step 2: Account Details & Fast-Fill Presets
+                        // Step 2: Authentication & Account Configuration
                         .child(
                             div()
                                 .flex()
@@ -1996,57 +2491,391 @@ pub mod gpui_app {
                                 .gap(px(8.0))
                                 .child(
                                     div()
-                                        .text_xs()
-                                        .font_weight(FontWeight::SEMIBOLD)
-                                        .text_color(rgb(0xcbd5e1))
-                                        .child("2. Account Configuration"),
+                                        .flex()
+                                        .flex_row()
+                                        .items_center()
+                                        .justify_between()
+                                        .child(
+                                            div()
+                                                .text_xs()
+                                                .font_weight(FontWeight::SEMIBOLD)
+                                                .text_color(rgb(0xcbd5e1))
+                                                .child("2. Account Configuration"),
+                                        )
+                                        .child(
+                                            if selected_p == ProviderType::Gmail || selected_p == ProviderType::Graph {
+                                                let is_oauth_active = self.login_wizard.auth_mode == AuthModeChoice::OAuth2;
+                                                div()
+                                                    .flex()
+                                                    .flex_row()
+                                                    .gap(px(4.0))
+                                                    .bg(rgb(0x181f2f))
+                                                    .p(px(2.0))
+                                                    .rounded_md()
+                                                    .child(
+                                                        div()
+                                                            .id("auth-mode-oauth2")
+                                                            .px(px(8.0))
+                                                            .py(px(3.0))
+                                                            .rounded_sm()
+                                                            .bg(if is_oauth_active { rgb(0x2563eb) } else { rgb(0x00000000) })
+                                                            .text_xs()
+                                                            .font_weight(if is_oauth_active { FontWeight::BOLD } else { FontWeight::NORMAL })
+                                                            .text_color(if is_oauth_active { rgb(0xffffff) } else { rgb(0x94a3b8) })
+                                                            .cursor_pointer()
+                                                            .on_click(cx.listener(|this, _, _, cx| {
+                                                                this.login_wizard.auth_mode = AuthModeChoice::OAuth2;
+                                                                cx.notify();
+                                                            }))
+                                                            .child("🌐 Browser OAuth2"),
+                                                    )
+                                                    .child(
+                                                        div()
+                                                            .id("auth-mode-password")
+                                                            .px(px(8.0))
+                                                            .py(px(3.0))
+                                                            .rounded_sm()
+                                                            .bg(if !is_oauth_active { rgb(0x2563eb) } else { rgb(0x00000000) })
+                                                            .text_xs()
+                                                            .font_weight(if !is_oauth_active { FontWeight::BOLD } else { FontWeight::NORMAL })
+                                                            .text_color(if !is_oauth_active { rgb(0xffffff) } else { rgb(0x94a3b8) })
+                                                            .cursor_pointer()
+                                                            .on_click(cx.listener(|this, _, _, cx| {
+                                                                this.login_wizard.auth_mode = AuthModeChoice::Password;
+                                                                cx.notify();
+                                                            }))
+                                                            .child(if selected_p == ProviderType::Gmail { "🔑 App Password (IMAP)" } else { "🔑 Password / IMAP" }),
+                                                    )
+                                            } else {
+                                                div()
+                                            }
+                                        ),
                                 )
                                 .child(
-                                    div()
-                                        .flex()
-                                        .flex_col()
-                                        .gap(px(6.0))
-                                        .p(px(12.0))
-                                        .rounded_lg()
-                                        .bg(rgb(0x161c28))
-                                        .border_1()
-                                        .border_color(rgb(0x232c3f))
-                                        .child(
-                                            div()
-                                                .flex()
-                                                .flex_row()
-                                                .items_center()
-                                                .justify_between()
-                                                .child(div().text_xs().text_color(rgb(0x94a3b8)).child("Email Address:"))
-                                                .child(div().text_xs().font_weight(FontWeight::BOLD).text_color(rgb(0x38bdf8)).child(display_email.to_string())),
-                                        )
-                                        .child(
-                                            div()
-                                                .flex()
-                                                .flex_row()
-                                                .items_center()
-                                                .justify_between()
-                                                .child(div().text_xs().text_color(rgb(0x94a3b8)).child("Display Name:"))
-                                                .child(div().text_xs().text_color(rgb(0xe2e8f0)).child(display_name.to_string())),
-                                        )
-                                        .child(
-                                            div()
-                                                .flex()
-                                                .flex_row()
-                                                .items_center()
-                                                .justify_between()
-                                                .child(div().text_xs().text_color(rgb(0x94a3b8)).child("Incoming Server:"))
-                                                .child(div().text_xs().text_color(rgb(0x94a3b8)).child(incoming_info.to_string())),
-                                        )
-                                        .child(
-                                            div()
-                                                .flex()
-                                                .flex_row()
-                                                .items_center()
-                                                .justify_between()
-                                                .child(div().text_xs().text_color(rgb(0x94a3b8)).child("Outgoing Server:"))
-                                                .child(div().text_xs().text_color(rgb(0x94a3b8)).child(outgoing_info.to_string())),
-                                        ),
+                                    // Conditional form body based on provider and auth_mode
+                                    if is_oauth {
+                                        // OAuth2 Flow Card
+                                        div()
+                                            .flex()
+                                            .flex_col()
+                                            .gap(px(10.0))
+                                            .p(px(12.0))
+                                            .rounded_lg()
+                                            .bg(rgb(0x161c28))
+                                            .border_1()
+                                            .border_color(rgb(0x232c3f))
+                                            .child(
+                                                div()
+                                                    .flex()
+                                                    .flex_row()
+                                                    .items_center()
+                                                    .gap(px(10.0))
+                                                    .child(div().text_lg().child(if selected_p == ProviderType::Gmail { "🌐" } else { "🏢" }))
+                                                    .child(
+                                                        div()
+                                                            .flex()
+                                                            .flex_col()
+                                                            .gap(px(2.0))
+                                                            .child(
+                                                                div()
+                                                                    .text_xs()
+                                                                    .font_weight(FontWeight::BOLD)
+                                                                    .text_color(rgb(0xf1f5f9))
+                                                                    .child(if selected_p == ProviderType::Gmail { "Google Browser OAuth2 (PKCE)" } else { "Microsoft 365 OAuth2" }),
+                                                            )
+                                                            .child(
+                                                                div()
+                                                                    .text_xs()
+                                                                    .text_color(rgb(0x94a3b8))
+                                                                    .child("Vespetrel will launch your web browser to securely authenticate. No passwords are stored; tokens are kept in the OS keyring."),
+                                                            ),
+                                                    ),
+                                            )
+                                            .child(
+                                                div()
+                                                    .flex()
+                                                    .flex_col()
+                                                    .gap(px(4.0))
+                                                    .child(
+                                                        div()
+                                                            .flex()
+                                                            .flex_row()
+                                                            .items_center()
+                                                            .justify_between()
+                                                            .child(div().text_xs().font_weight(FontWeight::SEMIBOLD).text_color(rgb(0x94a3b8)).child("OAuth Client ID:"))
+                                                            .child(div().text_xs().text_color(rgb(0x64748b)).child("Optional (env: VESPETREL_GOOGLE_CLIENT_ID)")),
+                                                    )
+                                                    .child(if let Some(inputs) = inputs_opt {
+                                                        component::input::Input::new(&inputs.client_id).cleanable(true).into_any_element()
+                                                    } else {
+                                                        div().text_xs().text_color(rgb(0x64748b)).child("OAuth Client ID").into_any_element()
+                                                    }),
+                                            )
+                                            .child(
+                                                div()
+                                                    .flex()
+                                                    .flex_col()
+                                                    .gap(px(4.0))
+                                                    .child(
+                                                        div()
+                                                            .flex()
+                                                            .flex_row()
+                                                            .items_center()
+                                                            .justify_between()
+                                                            .child(div().text_xs().font_weight(FontWeight::SEMIBOLD).text_color(rgb(0x94a3b8)).child("Email Address (Optional hint):"))
+                                                            .child(div().text_xs().text_color(rgb(0x64748b)).child("Auto-discovered from Google if blank")),
+                                                    )
+                                                    .child(if let Some(inputs) = inputs_opt {
+                                                        component::input::Input::new(&inputs.email).cleanable(true).into_any_element()
+                                                    } else {
+                                                        div().text_xs().text_color(rgb(0x64748b)).child("user@gmail.com").into_any_element()
+                                                    }),
+                                            )
+                                            .child(
+                                                if let Some(status_str) = &self.login_wizard.oauth_status {
+                                                    div()
+                                                        .flex()
+                                                        .p(px(8.0))
+                                                        .rounded_md()
+                                                        .bg(rgb(0x1e3a8a))
+                                                        .border_1()
+                                                        .border_color(rgb(0x3b82f6))
+                                                        .text_xs()
+                                                        .text_color(rgb(0x93c5fd))
+                                                        .child(format!("⏳ {}", status_str))
+                                                } else {
+                                                    div()
+                                                },
+                                            )
+                                    } else if selected_p == ProviderType::Gmail {
+                                        // Gmail with App Password (IMAP) Form
+                                        div()
+                                            .flex()
+                                            .flex_col()
+                                            .gap(px(8.0))
+                                            .p(px(12.0))
+                                            .rounded_lg()
+                                            .bg(rgb(0x161c28))
+                                            .border_1()
+                                            .border_color(rgb(0x232c3f))
+                                            .child(
+                                                div()
+                                                    .flex()
+                                                    .p(px(8.0))
+                                                    .rounded_md()
+                                                    .bg(rgb(0x1e293b))
+                                                    .border_1()
+                                                    .border_color(rgb(0x334155))
+                                                    .text_xs()
+                                                    .text_color(rgb(0x38bdf8))
+                                                    .child("💡 Google App Password: In your Google Account, go to Security → 2-Step Verification → App passwords. Generate a 16-character password and enter it below."),
+                                            )
+                                            .child(
+                                                div()
+                                                    .flex()
+                                                    .flex_col()
+                                                    .gap(px(4.0))
+                                                    .child(div().text_xs().font_weight(FontWeight::SEMIBOLD).text_color(rgb(0x94a3b8)).child("Gmail Address:"))
+                                                    .child(if let Some(inputs) = inputs_opt {
+                                                        component::input::Input::new(&inputs.email).cleanable(true).into_any_element()
+                                                    } else {
+                                                        div().text_xs().text_color(rgb(0xe2e8f0)).child(display_email.to_string()).into_any_element()
+                                                    }),
+                                            )
+                                            .child(
+                                                div()
+                                                    .flex()
+                                                    .flex_col()
+                                                    .gap(px(4.0))
+                                                    .child(div().text_xs().font_weight(FontWeight::SEMIBOLD).text_color(rgb(0x94a3b8)).child("16-character Google App Password:"))
+                                                    .child(if let Some(inputs) = inputs_opt {
+                                                        component::input::Input::new(&inputs.password).mask_toggle().cleanable(true).into_any_element()
+                                                    } else {
+                                                        div().text_xs().text_color(rgb(0x64748b)).child("••••••••••••••••").into_any_element()
+                                                    }),
+                                            )
+                                            .child(
+                                                div()
+                                                    .flex()
+                                                    .flex_col()
+                                                    .gap(px(4.0))
+                                                    .child(div().text_xs().font_weight(FontWeight::SEMIBOLD).text_color(rgb(0x94a3b8)).child("Display Name (optional):"))
+                                                    .child(if let Some(inputs) = inputs_opt {
+                                                        component::input::Input::new(&inputs.name).cleanable(true).into_any_element()
+                                                    } else {
+                                                        div().text_xs().text_color(rgb(0xe2e8f0)).child(display_name.to_string()).into_any_element()
+                                                    }),
+                                            )
+                                            .child(
+                                                div()
+                                                    .flex()
+                                                    .flex_row()
+                                                    .items_center()
+                                                    .justify_between()
+                                                    .text_xs()
+                                                    .text_color(rgb(0x64748b))
+                                                    .child("Incoming: imap.gmail.com:993 (SSL/TLS)")
+                                                    .child("Outgoing: smtp.gmail.com:587 (STARTTLS)"),
+                                            )
+                                    } else if selected_p == ProviderType::Imap {
+                                        // Custom IMAP Form
+                                        div()
+                                            .flex()
+                                            .flex_col()
+                                            .gap(px(8.0))
+                                            .p(px(12.0))
+                                            .rounded_lg()
+                                            .bg(rgb(0x161c28))
+                                            .border_1()
+                                            .border_color(rgb(0x232c3f))
+                                            .child(
+                                                div()
+                                                    .flex()
+                                                    .flex_col()
+                                                    .gap(px(4.0))
+                                                    .child(div().text_xs().font_weight(FontWeight::SEMIBOLD).text_color(rgb(0x94a3b8)).child("Email Address:"))
+                                                    .child(if let Some(inputs) = inputs_opt {
+                                                        component::input::Input::new(&inputs.email).cleanable(true).into_any_element()
+                                                    } else {
+                                                        div().text_xs().text_color(rgb(0xe2e8f0)).child(display_email.to_string()).into_any_element()
+                                                    }),
+                                            )
+                                            .child(
+                                                div()
+                                                    .flex()
+                                                    .flex_col()
+                                                    .gap(px(4.0))
+                                                    .child(div().text_xs().font_weight(FontWeight::SEMIBOLD).text_color(rgb(0x94a3b8)).child("Password / Token:"))
+                                                    .child(if let Some(inputs) = inputs_opt {
+                                                        component::input::Input::new(&inputs.password).mask_toggle().cleanable(true).into_any_element()
+                                                    } else {
+                                                        div().text_xs().text_color(rgb(0x64748b)).child("••••••••••••••••").into_any_element()
+                                                    }),
+                                            )
+                                            .child(
+                                                div()
+                                                    .flex()
+                                                    .flex_col()
+                                                    .gap(px(4.0))
+                                                    .child(div().text_xs().font_weight(FontWeight::SEMIBOLD).text_color(rgb(0x94a3b8)).child("Display Name (optional):"))
+                                                    .child(if let Some(inputs) = inputs_opt {
+                                                        component::input::Input::new(&inputs.name).cleanable(true).into_any_element()
+                                                    } else {
+                                                        div().text_xs().text_color(rgb(0xe2e8f0)).child(display_name.to_string()).into_any_element()
+                                                    }),
+                                            )
+                                            .child(
+                                                div()
+                                                    .flex()
+                                                    .flex_row()
+                                                    .gap(px(8.0))
+                                                    .child(
+                                                        div()
+                                                            .flex()
+                                                            .flex_col()
+                                                            .flex_1()
+                                                            .gap(px(4.0))
+                                                            .child(div().text_xs().font_weight(FontWeight::SEMIBOLD).text_color(rgb(0x94a3b8)).child("Incoming IMAP Host:"))
+                                                            .child(if let Some(inputs) = inputs_opt {
+                                                                component::input::Input::new(&inputs.incoming_host).cleanable(true).into_any_element()
+                                                            } else {
+                                                                div().text_xs().text_color(rgb(0x64748b)).child("imap.example.com").into_any_element()
+                                                            }),
+                                                    )
+                                                    .child(
+                                                        div()
+                                                            .flex()
+                                                            .flex_col()
+                                                            .w(px(80.0))
+                                                            .gap(px(4.0))
+                                                            .child(div().text_xs().font_weight(FontWeight::SEMIBOLD).text_color(rgb(0x94a3b8)).child("Port:"))
+                                                            .child(if let Some(inputs) = inputs_opt {
+                                                                component::input::Input::new(&inputs.incoming_port).into_any_element()
+                                                            } else {
+                                                                div().text_xs().text_color(rgb(0x64748b)).child("993").into_any_element()
+                                                            }),
+                                                    ),
+                                            )
+                                            .child(
+                                                div()
+                                                    .flex()
+                                                    .flex_row()
+                                                    .gap(px(8.0))
+                                                    .child(
+                                                        div()
+                                                            .flex()
+                                                            .flex_col()
+                                                            .flex_1()
+                                                            .gap(px(4.0))
+                                                            .child(div().text_xs().font_weight(FontWeight::SEMIBOLD).text_color(rgb(0x94a3b8)).child("Outgoing SMTP Host:"))
+                                                            .child(if let Some(inputs) = inputs_opt {
+                                                                component::input::Input::new(&inputs.outgoing_host).cleanable(true).into_any_element()
+                                                            } else {
+                                                                div().text_xs().text_color(rgb(0x64748b)).child("smtp.example.com").into_any_element()
+                                                            }),
+                                                    )
+                                                    .child(
+                                                        div()
+                                                            .flex()
+                                                            .flex_col()
+                                                            .w(px(80.0))
+                                                            .gap(px(4.0))
+                                                            .child(div().text_xs().font_weight(FontWeight::SEMIBOLD).text_color(rgb(0x94a3b8)).child("Port:"))
+                                                            .child(if let Some(inputs) = inputs_opt {
+                                                                component::input::Input::new(&inputs.outgoing_port).into_any_element()
+                                                            } else {
+                                                                div().text_xs().text_color(rgb(0x64748b)).child("587").into_any_element()
+                                                            }),
+                                                    ),
+                                            )
+                                    } else {
+                                        // Fastmail JMAP / Graph Password Form
+                                        div()
+                                            .flex()
+                                            .flex_col()
+                                            .gap(px(8.0))
+                                            .p(px(12.0))
+                                            .rounded_lg()
+                                            .bg(rgb(0x161c28))
+                                            .border_1()
+                                            .border_color(rgb(0x232c3f))
+                                            .child(
+                                                div()
+                                                    .flex()
+                                                    .flex_col()
+                                                    .gap(px(4.0))
+                                                    .child(div().text_xs().font_weight(FontWeight::SEMIBOLD).text_color(rgb(0x94a3b8)).child("Email Address:"))
+                                                    .child(if let Some(inputs) = inputs_opt {
+                                                        component::input::Input::new(&inputs.email).cleanable(true).into_any_element()
+                                                    } else {
+                                                        div().text_xs().text_color(rgb(0xe2e8f0)).child(display_email.to_string()).into_any_element()
+                                                    }),
+                                            )
+                                            .child(
+                                                div()
+                                                    .flex()
+                                                    .flex_col()
+                                                    .gap(px(4.0))
+                                                    .child(div().text_xs().font_weight(FontWeight::SEMIBOLD).text_color(rgb(0x94a3b8)).child("Password / API Token:"))
+                                                    .child(if let Some(inputs) = inputs_opt {
+                                                        component::input::Input::new(&inputs.password).mask_toggle().cleanable(true).into_any_element()
+                                                    } else {
+                                                        div().text_xs().text_color(rgb(0x64748b)).child("••••••••••••••••").into_any_element()
+                                                    }),
+                                            )
+                                            .child(
+                                                div()
+                                                    .flex()
+                                                    .flex_col()
+                                                    .gap(px(4.0))
+                                                    .child(div().text_xs().font_weight(FontWeight::SEMIBOLD).text_color(rgb(0x94a3b8)).child("Server Host:"))
+                                                    .child(if let Some(inputs) = inputs_opt {
+                                                        component::input::Input::new(&inputs.incoming_host).cleanable(true).into_any_element()
+                                                    } else {
+                                                        div().text_xs().text_color(rgb(0x64748b)).child("api.fastmail.com").into_any_element()
+                                                    }),
+                                            )
+                                    }
                                 ),
                         )
                         // Preset Quick-Select Chips
@@ -2071,16 +2900,24 @@ pub mod gpui_app {
                                                 .text_xs()
                                                 .text_color(rgb(0x94a3b8))
                                                 .cursor_pointer()
-                                                .on_click(cx.listener(move |this, _, _, cx| {
+                                                .on_click(cx.listener(move |this, _, window, cx| {
                                                     let suffix = match this.login_wizard.provider_type {
                                                         ProviderType::Gmail => "gmail.com",
                                                         ProviderType::Graph => "outlook.com",
                                                         ProviderType::Jmap => "fastmail.com",
                                                         ProviderType::Imap => "example.com",
                                                     };
-                                                    this.login_wizard.email = format!("personal@{}", suffix);
-                                                    this.login_wizard.name = "Personal Account".into();
-                                                    this.login_wizard.password_or_token = "secure_token_preset".into();
+                                                    let em = format!("personal@{}", suffix);
+                                                    let nm = "Personal Account".to_string();
+                                                    let pw = "secure_token_preset".to_string();
+                                                    this.login_wizard.email = em.clone();
+                                                    this.login_wizard.name = nm.clone();
+                                                    this.login_wizard.password_or_token = pw.clone();
+                                                    if let Some(inputs) = &this.wizard_inputs {
+                                                        inputs.email.update(cx, |inp, cx| inp.set_value(em, window, cx));
+                                                        inputs.name.update(cx, |inp, cx| inp.set_value(nm, window, cx));
+                                                        inputs.password.update(cx, |inp, cx| inp.set_value(pw, window, cx));
+                                                    }
                                                     cx.notify();
                                                 }))
                                                 .child("Personal"),
@@ -2095,16 +2932,24 @@ pub mod gpui_app {
                                                 .text_xs()
                                                 .text_color(rgb(0x94a3b8))
                                                 .cursor_pointer()
-                                                .on_click(cx.listener(move |this, _, _, cx| {
+                                                .on_click(cx.listener(move |this, _, window, cx| {
                                                     let suffix = match this.login_wizard.provider_type {
                                                         ProviderType::Gmail => "gmail.com",
                                                         ProviderType::Graph => "company.onmicrosoft.com",
                                                         ProviderType::Jmap => "fastmail.fm",
                                                         ProviderType::Imap => "corp.example.com",
                                                     };
-                                                    this.login_wizard.email = format!("work@{}", suffix);
-                                                    this.login_wizard.name = "Work Mailbox".into();
-                                                    this.login_wizard.password_or_token = "secure_token_preset".into();
+                                                    let em = format!("work@{}", suffix);
+                                                    let nm = "Work Mailbox".to_string();
+                                                    let pw = "secure_token_preset".to_string();
+                                                    this.login_wizard.email = em.clone();
+                                                    this.login_wizard.name = nm.clone();
+                                                    this.login_wizard.password_or_token = pw.clone();
+                                                    if let Some(inputs) = &this.wizard_inputs {
+                                                        inputs.email.update(cx, |inp, cx| inp.set_value(em, window, cx));
+                                                        inputs.name.update(cx, |inp, cx| inp.set_value(nm, window, cx));
+                                                        inputs.password.update(cx, |inp, cx| inp.set_value(pw, window, cx));
+                                                    }
                                                     cx.notify();
                                                 }))
                                                 .child("Work"),
@@ -2119,16 +2964,24 @@ pub mod gpui_app {
                                                 .text_xs()
                                                 .text_color(rgb(0x94a3b8))
                                                 .cursor_pointer()
-                                                .on_click(cx.listener(move |this, _, _, cx| {
+                                                .on_click(cx.listener(move |this, _, window, cx| {
                                                     let suffix = match this.login_wizard.provider_type {
                                                         ProviderType::Gmail => "gmail.com",
                                                         ProviderType::Graph => "outlook.com",
                                                         ProviderType::Jmap => "fastmail.com",
                                                         ProviderType::Imap => "vespetrel.org",
                                                     };
-                                                    this.login_wizard.email = format!("team@{}", suffix);
-                                                    this.login_wizard.name = "Vespetrel Team".into();
-                                                    this.login_wizard.password_or_token = "secure_token_preset".into();
+                                                    let em = format!("team@{}", suffix);
+                                                    let nm = "Vespetrel Team".to_string();
+                                                    let pw = "secure_token_preset".to_string();
+                                                    this.login_wizard.email = em.clone();
+                                                    this.login_wizard.name = nm.clone();
+                                                    this.login_wizard.password_or_token = pw.clone();
+                                                    if let Some(inputs) = &this.wizard_inputs {
+                                                        inputs.email.update(cx, |inp, cx| inp.set_value(em, window, cx));
+                                                        inputs.name.update(cx, |inp, cx| inp.set_value(nm, window, cx));
+                                                        inputs.password.update(cx, |inp, cx| inp.set_value(pw, window, cx));
+                                                    }
                                                     cx.notify();
                                                 }))
                                                 .child("Team / Support"),
@@ -2172,92 +3025,469 @@ pub mod gpui_app {
                                         .cursor_pointer()
                                         .on_click(cx.listener(|this, _, _, cx| {
                                             this.active_modal = ActiveModal::None;
+                                            this.wizard_inputs = None;
                                             cx.notify();
                                         }))
                                         .child("Cancel"),
                                 )
                                 .child(
-                                    div()
-                                        .id("wizard-btn-connect")
-                                        .px(px(18.0))
-                                        .py(px(7.0))
-                                        .rounded_md()
-                                        .bg(rgb(0x2563eb))
-                                        .text_xs()
-                                        .font_weight(FontWeight::BOLD)
-                                        .text_color(rgb(0xffffff))
-                                        .cursor_pointer()
-                                        .on_click(cx.listener(|this, _, _, cx| {
-                                            if this.login_wizard.email.trim().is_empty() {
-                                                let suffix = match this.login_wizard.provider_type {
-                                                    ProviderType::Gmail => "gmail.com",
-                                                    ProviderType::Graph => "outlook.com",
-                                                    ProviderType::Jmap => "fastmail.com",
-                                                    ProviderType::Imap => "example.com",
+                                    if is_oauth {
+                                        let btn_label = match selected_p {
+                                            ProviderType::Gmail => "Sign in with Google (Browser) 🌐",
+                                            ProviderType::Graph => "Sign in with Microsoft (Browser) 🏢",
+                                            _ => "Sign in with Browser 🌐",
+                                        };
+                                        div()
+                                            .id("wizard-btn-oauth")
+                                            .px(px(18.0))
+                                            .py(px(7.0))
+                                            .rounded_md()
+                                            .bg(rgb(0x2563eb))
+                                            .text_xs()
+                                            .font_weight(FontWeight::BOLD)
+                                            .text_color(rgb(0xffffff))
+                                            .cursor_pointer()
+                                            .on_click(cx.listener(|this, _, window, cx| {
+                                                this.start_oauth2_flow(window, cx);
+                                            }))
+                                            .child(btn_label)
+                                    } else {
+                                        div()
+                                            .id("wizard-btn-connect")
+                                            .px(px(18.0))
+                                            .py(px(7.0))
+                                            .rounded_md()
+                                            .bg(rgb(0x2563eb))
+                                            .text_xs()
+                                            .font_weight(FontWeight::BOLD)
+                                            .text_color(rgb(0xffffff))
+                                            .cursor_pointer()
+                                            .on_click(cx.listener(|this, _, _, cx| {
+                                                let (email, password, name, in_host, in_port, out_host, out_port) = if let Some(inputs) = &this.wizard_inputs {
+                                                    (
+                                                        inputs.email.read(cx).value().trim().to_string(),
+                                                        inputs.password.read(cx).value().trim().to_string(),
+                                                        inputs.name.read(cx).value().trim().to_string(),
+                                                        inputs.incoming_host.read(cx).value().trim().to_string(),
+                                                        inputs.incoming_port.read(cx).value().trim().parse::<u16>().unwrap_or(993),
+                                                        inputs.outgoing_host.read(cx).value().trim().to_string(),
+                                                        inputs.outgoing_port.read(cx).value().trim().parse::<u16>().unwrap_or(587),
+                                                    )
+                                                } else {
+                                                    (
+                                                        this.login_wizard.email.trim().to_string(),
+                                                        this.login_wizard.password_or_token.trim().to_string(),
+                                                        this.login_wizard.name.trim().to_string(),
+                                                        this.login_wizard.incoming_host.trim().to_string(),
+                                                        this.login_wizard.incoming_port,
+                                                        this.login_wizard.outgoing_host.trim().to_string(),
+                                                        this.login_wizard.outgoing_port,
+                                                    )
                                                 };
-                                                this.login_wizard.email = format!("user@{}", suffix);
-                                            }
-                                            if this.login_wizard.password_or_token.trim().is_empty() {
-                                                this.login_wizard.password_or_token = "app_token_auto".into();
-                                            }
 
-                                            match this.login_wizard.validate_and_build_account() {
-                                                Ok(acct) => {
-                                                    let acct_email = acct.email.clone();
-                                                    let acct_id = acct.id.clone();
-                                                    let p_type = acct.provider_type.clone();
+                                                if email.is_empty() || !email.contains('@') {
+                                                    this.login_wizard.step = WizardStep::Failed("Please provide a valid email address".into());
+                                                    cx.notify();
+                                                    return;
+                                                }
+                                                if password.is_empty() {
+                                                    this.login_wizard.step = WizardStep::Failed("Password or authentication token cannot be empty".into());
+                                                    cx.notify();
+                                                    return;
+                                                }
 
-                                                    let default_folders = vec![
-                                                        Folder::new(&acct_id, "INBOX", "INBOX", "INBOX").with_role(FolderRole::Inbox),
-                                                        Folder::new(&acct_id, "Drafts", "Drafts", "Drafts").with_role(FolderRole::Drafts),
-                                                        Folder::new(&acct_id, "Sent", "Sent", "Sent").with_role(FolderRole::Sent),
-                                                        Folder::new(&acct_id, "Archive", "Archive", "Archive").with_role(FolderRole::Archive),
-                                                        Folder::new(&acct_id, "Trash", "Trash", "Trash").with_role(FolderRole::Trash),
-                                                    ];
+                                                this.login_wizard.email = email.clone();
+                                                this.login_wizard.password_or_token = password.clone();
+                                                this.login_wizard.name = name;
+                                                this.login_wizard.incoming_host = in_host;
+                                                this.login_wizard.incoming_port = in_port;
+                                                this.login_wizard.outgoing_host = out_host;
+                                                this.login_wizard.outgoing_port = out_port;
 
-                                                    if let Some(pool) = &this.storage_pool {
-                                                        let pool_clone = pool.clone();
-                                                        let acct_clone = acct.clone();
-                                                        let folders_clone = default_folders.clone();
-                                                        cx.spawn(async move |_this, _cx| {
-                                                            if let Ok(conn) = pool_clone.get().await {
-                                                                let _ = conn.interact(move |c| {
-                                                                    let _ = vespetrel_storage::repo::upsert_account(c, &acct_clone);
-                                                                    for f in &folders_clone {
-                                                                        let _ = vespetrel_storage::repo::upsert_folder(c, f);
-                                                                    }
-                                                                }).await;
-                                                            }
-                                                        }).detach();
+                                                let acct = match this.login_wizard.validate_and_build_account() {
+                                                    Ok(a) => a,
+                                                    Err(e) => {
+                                                        this.login_wizard.step = WizardStep::Failed(e);
+                                                        cx.notify();
+                                                        return;
                                                     }
+                                                };
 
-                                                    this.selected_folder_id = Some("INBOX".into());
-                                                    this.folders.extend(default_folders.clone());
-                                                    this.accounts.push(acct);
-                                                    this.status_message = format!("✓ Successfully connected {} ({:?})", acct_email, p_type);
-                                                    this.active_modal = ActiveModal::None;
-                                                    let remote_folders = this.folders.iter().map(|f| vespetrel_core::provider::RemoteFolder {
-                                                        remote_id: f.remote_id.clone(),
-                                                        name: f.name.clone(),
-                                                        path: f.path.clone(),
-                                                        role_hint: Some(f.role.to_string()),
-                                                        uid_validity: f.uid_validity,
-                                                        highest_mod_seq: f.highest_mod_seq,
-                                                    }).collect();
-                                                    let _ = this.sync_sender.send(SyncEvent::FolderListUpdated(remote_folders));
-                                                    cx.notify();
+                                                this.login_wizard.step = WizardStep::Validating;
+                                                this.status_message = format!("Connecting to {}...", acct.email);
+                                                cx.notify();
+
+                                                // Persist credentials to native OS keyring
+                                                if let Some(ref k) = acct.auth_config.keyring_key {
+                                                    if let Ok(entry) = keyring::Entry::new("vespetrel", k) {
+                                                        let _ = entry.set_password(&password);
+                                                    }
                                                 }
-                                                Err(err) => {
-                                                    this.login_wizard.step = WizardStep::Failed(err);
-                                                    cx.notify();
-                                                }
-                                            }
-                                        }))
-                                        .child("Connect Account 🚀"),
+
+                                                let pool_opt = this.storage_pool.clone();
+                                                let acct_clone = acct.clone();
+                                                let password_clone = password.clone();
+                                                let sync_sender = this.sync_sender.clone();
+
+                                                cx.spawn(async move |this, cx| {
+                                                    let provider = vespetrel_engine::coordinator::make_provider_with_token(&acct_clone, password_clone);
+                                                    let folders_res = provider.sync_folder_list().await;
+                                                    match folders_res {
+                                                        Ok(remote_folders) => {
+                                                            let mut local_folders = Vec::new();
+                                                            if remote_folders.is_empty() {
+                                                                local_folders.push(Folder::new(&acct_clone.id, "INBOX", "INBOX", "INBOX").with_role(FolderRole::Inbox));
+                                                                local_folders.push(Folder::new(&acct_clone.id, "Drafts", "Drafts", "Drafts").with_role(FolderRole::Drafts));
+                                                                local_folders.push(Folder::new(&acct_clone.id, "Sent", "Sent", "Sent").with_role(FolderRole::Sent));
+                                                                local_folders.push(Folder::new(&acct_clone.id, "Trash", "Trash", "Trash").with_role(FolderRole::Trash));
+                                                            } else {
+                                                                for rf in &remote_folders {
+                                                                    let role = match rf.role_hint.as_deref().unwrap_or("") {
+                                                                        "inbox" | "Inbox" => FolderRole::Inbox,
+                                                                        "drafts" | "Drafts" => FolderRole::Drafts,
+                                                                        "sent" | "Sent" => FolderRole::Sent,
+                                                                        "trash" | "Trash" => FolderRole::Trash,
+                                                                        "archive" | "Archive" => FolderRole::Archive,
+                                                                        "spam" | "Spam" | "junk" | "Junk" => FolderRole::Junk,
+                                                                        _ => FolderRole::Custom,
+                                                                    };
+                                                                    let mut f = Folder::new(&acct_clone.id, &rf.remote_id, &rf.name, &rf.path).with_role(role);
+                                                                    f.uid_validity = rf.uid_validity;
+                                                                    f.highest_mod_seq = rf.highest_mod_seq;
+                                                                    local_folders.push(f);
+                                                                }
+                                                            }
+
+                                                            if let Some(pool) = pool_opt {
+                                                                let acct_save = acct_clone.clone();
+                                                                let f_save = local_folders.clone();
+                                                                if let Ok(conn) = pool.get().await {
+                                                                    let _ = conn.interact(move |c| {
+                                                                        let _ = vespetrel_storage::repo::upsert_account(c, &acct_save);
+                                                                        for f in &f_save {
+                                                                            let _ = vespetrel_storage::repo::upsert_folder(c, f);
+                                                                        }
+                                                                    }).await;
+                                                                }
+                                                            }
+
+                                                            let _ = this.update(cx, |view, cx| {
+                                                                view.selected_folder_id = local_folders.first().map(|f| f.id.clone());
+                                                                view.folders.extend(local_folders);
+                                                                view.accounts.push(acct_clone.clone());
+                                                                view.status_message = format!("✓ Successfully connected {} ({:?})", acct_clone.email, acct_clone.provider_type);
+                                                                view.active_modal = ActiveModal::None;
+                                                                view.wizard_inputs = None;
+                                                                view.login_wizard.step = WizardStep::Completed;
+                                                                let _ = sync_sender.send(SyncEvent::FolderListUpdated(remote_folders));
+                                                                cx.notify();
+                                                            });
+                                                        }
+                                                        Err(e) => {
+                                                            let _ = this.update(cx, |view, cx| {
+                                                                view.status_message = format!("⚠️ Connection error: {e}");
+                                                                view.login_wizard.step = WizardStep::Failed(format!("{e}"));
+                                                                cx.notify();
+                                                            });
+                                                        }
+                                                    }
+                                                }).detach();
+                                            }))
+                                            .child("Connect Account 🚀")
+                                    },
                                 ),
                         ),
                 )
         }
+
+        /// Initiates the OAuth2 PKCE authorization flow via system default web browser
+        pub fn start_oauth2_flow(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
+            let provider_type = self.login_wizard.provider_type.clone();
+            let mut client_id = if let Some(inputs) = &self.wizard_inputs {
+                inputs.client_id.read(cx).value().trim().to_string()
+            } else {
+                String::new()
+            };
+            if client_id.is_empty() {
+                client_id = match provider_type {
+                    ProviderType::Gmail => {
+                        std::env::var("VESPETREL_GOOGLE_CLIENT_ID").unwrap_or_default()
+                    }
+                    ProviderType::Graph => {
+                        std::env::var("VESPETREL_MICROSOFT_CLIENT_ID").unwrap_or_default()
+                    }
+                    _ => String::new(),
+                };
+            }
+
+            if client_id.is_empty() {
+                self.login_wizard.step = WizardStep::Failed(format!(
+                    "OAuth2 requires a Client ID. Please enter your {} OAuth Client ID or switch to the 'App Password' tab.",
+                    match provider_type {
+                        ProviderType::Gmail => "Google Cloud",
+                        ProviderType::Graph => "Microsoft Entra / Azure",
+                        _ => "Provider",
+                    }
+                ));
+                cx.notify();
+                return;
+            }
+
+            let user_email = if let Some(inputs) = &self.wizard_inputs {
+                inputs.email.read(cx).value().trim().to_string()
+            } else {
+                String::new()
+            };
+            let user_name = if let Some(inputs) = &self.wizard_inputs {
+                inputs.name.read(cx).value().trim().to_string()
+            } else {
+                String::new()
+            };
+
+            self.login_wizard.step = WizardStep::OAuth2Waiting;
+            self.login_wizard.oauth_status = Some("Starting browser authorization...".into());
+            self.status_message = "Waiting for browser OAuth2 authorization...".into();
+            cx.notify();
+
+            let pool_opt = self.storage_pool.clone();
+            let sync_sender = self.sync_sender.clone();
+
+            cx.spawn(async move |this, cx| {
+                let (listener, port) = match vespetrel_crypto::OAuth2Engine::bind_loopback().await {
+                    Ok(res) => res,
+                    Err(e) => {
+                        let _ = this.update(cx, |view, cx| {
+                            view.login_wizard.step = WizardStep::Failed(format!("Failed to bind loopback listener: {e}"));
+                            cx.notify();
+                        });
+                        return;
+                    }
+                };
+
+                let mut oauth_cfg = match provider_type {
+                    ProviderType::Gmail => vespetrel_crypto::OAuth2Config::google(&client_id),
+                    ProviderType::Graph => vespetrel_crypto::OAuth2Config::microsoft(&client_id),
+                    _ => return,
+                };
+                oauth_cfg.redirect_uri = format!("http://127.0.0.1:{port}/callback");
+                let engine = vespetrel_crypto::OAuth2Engine::new(oauth_cfg.clone());
+                let (auth_url, csrf_token, verifier) = engine.auth_url();
+
+                tracing::info!(auth_url=%auth_url, "Launching system browser for OAuth2 authorization");
+                #[cfg(windows)]
+                {
+                    let spawn_res = std::process::Command::new("rundll32")
+                        .args(["url.dll,FileProtocolHandler", &auth_url])
+                        .spawn();
+                    if spawn_res.is_err() {
+                        let _ = std::process::Command::new("cmd")
+                            .args(["/c", "start", "", &auth_url])
+                            .spawn();
+                    }
+                }
+                #[cfg(not(windows))]
+                {
+                    let _ = std::process::Command::new("xdg-open")
+                        .arg(&auth_url)
+                        .spawn();
+                }
+
+                let _ = this.update(cx, |view, cx| {
+                    view.login_wizard.oauth_status = Some(format!(
+                        "Browser opened! Complete sign-in in your browser (loopback port {port})..."
+                    ));
+                    cx.notify();
+                });
+
+                let code_res = engine.wait_for_callback_on_listener(listener, 180, Some(csrf_token.secret())).await;
+                let code = match code_res {
+                    Ok(c) => c,
+                    Err(e) => {
+                        let _ = this.update(cx, |view, cx| {
+                            view.login_wizard.step = WizardStep::Failed(format!("OAuth2 callback failed: {e}"));
+                            cx.notify();
+                        });
+                        return;
+                    }
+                };
+
+                let _ = this.update(cx, |view, cx| {
+                    view.login_wizard.step = WizardStep::Validating;
+                    view.status_message = "Exchanging authorization code for tokens...".into();
+                    cx.notify();
+                });
+
+                let token_bundle = match engine.exchange_code(code, verifier.secret().to_string()).await {
+                    Ok(b) => b,
+                    Err(e) => {
+                        let _ = this.update(cx, |view, cx| {
+                            view.login_wizard.step = WizardStep::Failed(format!("Token exchange failed: {e}"));
+                            cx.notify();
+                        });
+                        return;
+                    }
+                };
+
+                let (final_email, final_name) = if user_email.is_empty() {
+                    match provider_type {
+                        ProviderType::Gmail => fetch_google_userinfo(&token_bundle.access_token).await.unwrap_or((user_email, user_name)),
+                        ProviderType::Graph => fetch_microsoft_userinfo(&token_bundle.access_token).await.unwrap_or((user_email, user_name)),
+                        _ => (user_email, user_name),
+                    }
+                } else {
+                    (user_email, user_name)
+                };
+
+                if final_email.is_empty() || !final_email.contains('@') {
+                    let _ = this.update(cx, |view, cx| {
+                        view.login_wizard.step = WizardStep::Failed("Could not determine user email address from OAuth2 token".into());
+                        cx.notify();
+                    });
+                    return;
+                }
+
+                let display_name = if final_name.is_empty() { final_email.clone() } else { final_name };
+
+                let ak_key = format!("vespetrel_oauth_{final_email}");
+                if let Ok(entry) = keyring::Entry::new("vespetrel", &ak_key) {
+                    let _ = entry.set_password(&token_bundle.access_token);
+                }
+                let mut rk_key = None;
+                if let Some(ref rt) = token_bundle.refresh_token {
+                    let k = format!("vespetrel_refresh_{final_email}");
+                    if let Ok(entry) = keyring::Entry::new("vespetrel", &k) {
+                        let _ = entry.set_password(rt);
+                    }
+                    rk_key = Some(k);
+                }
+
+                let expires_at = chrono::Utc::now().timestamp() + token_bundle.expires_in as i64;
+
+                let mut acct = Account::new(display_name, final_email.clone(), provider_type.clone());
+                acct.auth_config.auth_method = vespetrel_core::account::AuthMethod::OAuth2;
+                acct.auth_config.username = Some(final_email.clone());
+                acct.auth_config.keyring_key = Some(ak_key);
+                acct.auth_config.refresh_token_keyring_key = rk_key;
+                acct.auth_config.expires_at = Some(expires_at);
+                acct.auth_config.oauth = Some(vespetrel_core::account::OAuthConfig {
+                    client_id: oauth_cfg.client_id.clone(),
+                    auth_url: oauth_cfg.auth_url.clone(),
+                    token_url: oauth_cfg.token_url.clone(),
+                    redirect_uri: oauth_cfg.redirect_uri.clone(),
+                    scopes: oauth_cfg.scopes.clone(),
+                });
+
+                let provider = vespetrel_engine::coordinator::make_provider_with_token(&acct, token_bundle.access_token.clone());
+                let folders_res = provider.sync_folder_list().await;
+                match folders_res {
+                    Ok(remote_folders) => {
+                        let mut local_folders = Vec::new();
+                        if remote_folders.is_empty() {
+                            local_folders.push(Folder::new(&acct.id, "INBOX", "INBOX", "INBOX").with_role(FolderRole::Inbox));
+                            local_folders.push(Folder::new(&acct.id, "Drafts", "Drafts", "Drafts").with_role(FolderRole::Drafts));
+                            local_folders.push(Folder::new(&acct.id, "Sent", "Sent", "Sent").with_role(FolderRole::Sent));
+                            local_folders.push(Folder::new(&acct.id, "Trash", "Trash", "Trash").with_role(FolderRole::Trash));
+                        } else {
+                            for rf in &remote_folders {
+                                let role = match rf.role_hint.as_deref().unwrap_or("") {
+                                    "inbox" | "Inbox" => FolderRole::Inbox,
+                                    "drafts" | "Drafts" => FolderRole::Drafts,
+                                    "sent" | "Sent" => FolderRole::Sent,
+                                    "trash" | "Trash" => FolderRole::Trash,
+                                    "archive" | "Archive" => FolderRole::Archive,
+                                    "spam" | "Spam" | "junk" | "Junk" => FolderRole::Junk,
+                                    _ => FolderRole::Custom,
+                                };
+                                let mut f = Folder::new(&acct.id, &rf.remote_id, &rf.name, &rf.path).with_role(role);
+                                f.uid_validity = rf.uid_validity;
+                                f.highest_mod_seq = rf.highest_mod_seq;
+                                local_folders.push(f);
+                            }
+                        }
+
+                        if let Some(pool) = pool_opt {
+                            let acct_save = acct.clone();
+                            let f_save = local_folders.clone();
+                            if let Ok(conn) = pool.get().await {
+                                let _ = conn.interact(move |c| {
+                                    let _ = vespetrel_storage::repo::upsert_account(c, &acct_save);
+                                    for f in &f_save {
+                                        let _ = vespetrel_storage::repo::upsert_folder(c, f);
+                                    }
+                                }).await;
+                            }
+                        }
+
+                        let _ = this.update(cx, |view, cx| {
+                            view.selected_folder_id = local_folders.first().map(|f| f.id.clone());
+                            view.folders.extend(local_folders);
+                            view.accounts.push(acct.clone());
+                            view.status_message = format!("✓ Successfully connected {} via OAuth2", acct.email);
+                            view.active_modal = ActiveModal::None;
+                            view.wizard_inputs = None;
+                            view.login_wizard.step = WizardStep::Completed;
+                            let _ = sync_sender.send(SyncEvent::FolderListUpdated(remote_folders));
+                            cx.notify();
+                        });
+                    }
+                    Err(e) => {
+                        let _ = this.update(cx, |view, cx| {
+                            view.status_message = format!("⚠️ Connection error: {e}");
+                            view.login_wizard.step = WizardStep::Failed(format!("{e}"));
+                            cx.notify();
+                        });
+                    }
+                }
+            }).detach();
+        }
+    }
+
+    async fn fetch_google_userinfo(access_token: &str) -> anyhow::Result<(String, String)> {
+        let client = reqwest::Client::builder()
+            .user_agent("Vespetrel/0.1")
+            .timeout(std::time::Duration::from_secs(10))
+            .build()?;
+        let resp = client
+            .get("https://openidconnect.googleapis.com/v1/userinfo")
+            .bearer_auth(access_token)
+            .send()
+            .await?;
+        if !resp.status().is_success() {
+            anyhow::bail!("Google userinfo request failed: {}", resp.status());
+        }
+        let val: serde_json::Value = resp.json().await?;
+        let email = val["email"].as_str().unwrap_or("").to_string();
+        let name = val["name"].as_str().unwrap_or(&email).to_string();
+        if email.is_empty() {
+            anyhow::bail!("missing email in Google userinfo response");
+        }
+        Ok((email, name))
+    }
+
+    async fn fetch_microsoft_userinfo(access_token: &str) -> anyhow::Result<(String, String)> {
+        let client = reqwest::Client::builder()
+            .user_agent("Vespetrel/0.1")
+            .timeout(std::time::Duration::from_secs(10))
+            .build()?;
+        let resp = client
+            .get("https://graph.microsoft.com/v1.0/me")
+            .bearer_auth(access_token)
+            .send()
+            .await?;
+        if !resp.status().is_success() {
+            anyhow::bail!("Microsoft Graph me request failed: {}", resp.status());
+        }
+        let val: serde_json::Value = resp.json().await?;
+        let email = val["mail"]
+            .as_str()
+            .or_else(|| val["userPrincipalName"].as_str())
+            .unwrap_or("")
+            .to_string();
+        let name = val["displayName"].as_str().unwrap_or(&email).to_string();
+        if email.is_empty() {
+            anyhow::bail!("missing email in Microsoft Graph me response");
+        }
+        Ok((email, name))
     }
 
     /// Launch the GPUI Desktop Application
@@ -2266,7 +3496,8 @@ pub mod gpui_app {
         sync_tx: flume::Sender<SyncEvent>,
         storage_pool: Option<vespetrel_storage::db::StoragePool>,
     ) {
-        Application::new().run(move |cx: &mut App| {
+        gpui_kit::application().run(move |cx: &mut App| {
+            gpui_kit::init(cx);
             let rx = sync_rx.clone();
             let tx = sync_tx.clone();
             let pool = storage_pool.clone();
@@ -2280,7 +3511,10 @@ pub mod gpui_app {
                     window_min_size: Some(size(px(900.0), px(600.0))),
                     ..Default::default()
                 },
-                move |_window, cx| cx.new(|cx| MainWindow::from_storage(cx, rx, tx, pool)),
+                move |window, cx| {
+                    let view = cx.new(|cx| MainWindow::from_storage(cx, rx, tx, pool));
+                    cx.new(|cx| gpui_kit::component::Root::new(view, window, cx))
+                },
             );
         });
     }

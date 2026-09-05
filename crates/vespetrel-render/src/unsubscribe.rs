@@ -24,14 +24,17 @@ impl ListUnsubscribe {
     /// Parse RFC 2369 `List-Unsubscribe` and RFC 8058 `List-Unsubscribe-Post` headers
     pub fn parse(list_unsub_header: &str, unsub_post_header: Option<&str>) -> Option<Self> {
         let is_one_click = unsub_post_header
-            .map(|h| h.to_lowercase().contains("list-unsubscribe=one-click"))
+            .map(|h| {
+                let clean: String = h.chars().filter(|c| !c.is_whitespace()).collect();
+                clean.eq_ignore_ascii_case("list-unsubscribe=one-click")
+            })
             .unwrap_or(false);
 
         let mut actions = Vec::new();
 
         for part in list_unsub_header.split(',') {
             let trimmed = part.trim().trim_matches('<').trim_matches('>');
-            if trimmed.starts_with("https://") || trimmed.starts_with("http://") {
+            if trimmed.starts_with("https://") {
                 if is_one_click {
                     actions.push(UnsubscribeAction::OneClickPost {
                         url: trimmed.to_string(),
@@ -41,6 +44,11 @@ impl ListUnsubscribe {
                         url: trimmed.to_string(),
                     });
                 }
+            } else if trimmed.starts_with("http://") {
+                // RFC 8058 §3.1: The POST method MUST use the HTTPS scheme.
+                actions.push(UnsubscribeAction::WebUrl {
+                    url: trimmed.to_string(),
+                });
             } else if let Some(mailto_str) = trimmed.strip_prefix("mailto:") {
                 let (email, subject) = if let Some((e, query)) = mailto_str.split_once('?') {
                     let mut subj = None;

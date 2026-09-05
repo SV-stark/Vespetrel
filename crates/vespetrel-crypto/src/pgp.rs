@@ -16,6 +16,13 @@ pub enum PgpError {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PgpVerifyResult {
+    pub is_valid: bool,
+    pub signer_fingerprint: Option<String>,
+    pub message_content: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AutocryptHeader {
     pub addr: String,
     pub prefer_encrypt: String,
@@ -25,11 +32,13 @@ pub struct AutocryptHeader {
 impl AutocryptHeader {
     /// Parse RFC-compliant Autocrypt 1.1 header (e.g. `addr=alice@example.com; prefer-encrypt=mutual; keydata=mQEN...`)
     pub fn parse(header_val: &str) -> Result<Self, PgpError> {
+        // Unfold RFC 2822 multiline headers
+        let unfolded = header_val.replace("\r\n ", " ").replace("\r\n\t", " ");
         let mut addr = None;
         let mut prefer_encrypt = "nopreference".to_string();
         let mut keydata = None;
 
-        for part in header_val.split(';') {
+        for part in unfolded.split(';') {
             let part = part.trim();
             if let Some((k, v)) = part.split_once('=') {
                 let k = k.trim();
@@ -43,19 +52,67 @@ impl AutocryptHeader {
             }
         }
 
-        match (addr, keydata) {
-            (Some(addr), Some(keydata)) => Ok(Self {
-                addr,
-                prefer_encrypt,
-                keydata,
-            }),
-            (None, _) => Err(PgpError::InvalidArmor(
-                "missing addr in Autocrypt header".into(),
-            )),
-            (_, None) => Err(PgpError::InvalidArmor(
-                "missing keydata in Autocrypt header".into(),
-            )),
+        let (addr, keydata) = match (addr, keydata) {
+            (Some(addr), Some(keydata)) => (addr, keydata),
+            (None, _) => {
+                return Err(PgpError::InvalidArmor(
+                    "missing addr in Autocrypt header".into(),
+                ));
+            }
+            (_, None) => {
+                return Err(PgpError::InvalidArmor(
+                    "missing keydata in Autocrypt header".into(),
+                ));
+            }
+        };
+
+        if !addr.contains('@') {
+            return Err(PgpError::InvalidArmor(format!(
+                "invalid email address '{addr}' in Autocrypt header"
+            )));
         }
+
+        // Validate that keydata contains valid base64 characters
+        let clean_key: String = keydata
+            .chars()
+            .filter(|c| !c.is_ascii_whitespace())
+            .collect();
+        if clean_key.is_empty()
+            || !clean_key.chars().all(|c| {
+                c.is_ascii_alphanumeric()
+                    || c == '+'
+                    || c == '/'
+                    || c == '='
+                    || c == '-'
+                    || c == '_'
+            })
+        {
+            return Err(PgpError::InvalidArmor(
+                "invalid or empty base64 in Autocrypt keydata".into(),
+            ));
+        }
+
+        Ok(Self {
+            addr,
+            prefer_encrypt,
+            keydata,
+        })
+    }
+
+    /// Bind and validate that the Autocrypt header's address matches the sender From address
+    pub fn validate_against_from(&self, from_email: &str) -> Result<(), PgpError> {
+        let clean_from = from_email.trim().to_ascii_lowercase();
+        let clean_addr = self.addr.trim().to_ascii_lowercase();
+        if clean_from != clean_addr
+            && !clean_from.contains(&format!("<{clean_addr}>"))
+            && !clean_from.starts_with(&format!("{clean_addr} "))
+        {
+            return Err(PgpError::InvalidArmor(format!(
+                "Autocrypt address '{}' does not match From sender '{}'",
+                self.addr, from_email
+            )));
+        }
+        Ok(())
     }
 
     /// Format as standard Autocrypt RFC header string
@@ -64,6 +121,38 @@ impl AutocryptHeader {
             "addr={}; prefer-encrypt={}; keydata={}",
             self.addr, self.prefer_encrypt, self.keydata
         )
+    }
+}
+
+/// Trust-On-First-Use (TOFU) in-memory store for Autocrypt peer public keys
+#[derive(Debug, Clone, Default)]
+pub struct AutocryptKeyStore {
+    keys: std::collections::HashMap<String, (String, chrono::DateTime<chrono::Utc>)>,
+}
+
+impl AutocryptKeyStore {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Record peer key under TOFU rule. Returns true if key is accepted/unchanged, false if key substitution detected.
+    pub fn record_peer_key(&mut self, addr: &str, keydata: &str) -> Result<bool, PgpError> {
+        let clean_addr = addr.trim().to_ascii_lowercase();
+        if let Some((existing_key, _)) = self.keys.get(&clean_addr) {
+            if existing_key != keydata {
+                return Ok(false); // Potential key substitution
+            }
+            return Ok(true);
+        }
+        self.keys
+            .insert(clean_addr, (keydata.to_string(), chrono::Utc::now()));
+        Ok(true)
+    }
+
+    pub fn get_key(&self, addr: &str) -> Option<&str> {
+        self.keys
+            .get(&addr.trim().to_ascii_lowercase())
+            .map(|(k, _)| k.as_str())
     }
 }
 
@@ -147,28 +236,66 @@ impl PgpEngine {
             return Ok(s);
         }
 
-        // If cleartext signed or armored payload
         if armored.contains("-----BEGIN PGP SIGNED MESSAGE-----") {
-            // Extract cleartext message
-            let mut message = Vec::new();
-            let mut recording = false;
-            for line in armored.lines() {
-                if line.starts_with("-----BEGIN PGP SIGNATURE-----") {
-                    break;
-                }
-                if recording {
-                    message.push(line);
-                }
-                if line.trim().is_empty() && !recording {
-                    recording = true;
-                }
-            }
-            if !message.is_empty() {
-                return Ok(message.join("\n"));
-            }
+            return Err(PgpError::Decrypt(
+                "Payload is a cleartext-signed OpenPGP message, not encrypted ciphertext; use verify()".into(),
+            ));
         }
         Err(PgpError::Decrypt(
             "failed to decrypt OpenPGP packet: invalid ciphertext or missing secret key".into(),
+        ))
+    }
+
+    /// Verify an OpenPGP cleartext signed message or signed message against sender public key
+    pub fn verify(&self, armored: &str, sender_pubkey: &str) -> Result<PgpVerifyResult, PgpError> {
+        use rpgp::types::PublicKeyTrait;
+        if !self.is_armored_pgp(armored) {
+            return Err(PgpError::InvalidArmor("not an armored pgp block".into()));
+        }
+
+        let (pub_key, _) =
+            rpgp::composed::SignedPublicKey::from_armor_single(sender_pubkey.as_bytes())
+                .map_err(|e| PgpError::KeyNotFound(format!("invalid sender public key: {e}")))?;
+        let fingerprint = pub_key
+            .fingerprint()
+            .as_bytes()
+            .iter()
+            .map(|b| format!("{b:02X}"))
+            .collect::<String>();
+
+        if armored.contains("-----BEGIN PGP SIGNED MESSAGE-----") {
+            let (signed_msg, _) = rpgp::composed::cleartext::CleartextSignedMessage::from_string(
+                armored,
+            )
+            .map_err(|e| {
+                PgpError::InvalidArmor(format!("failed to parse cleartext signed message: {e}"))
+            })?;
+            let text = signed_msg.signed_text();
+            let is_valid = signed_msg.verify(&pub_key).is_ok();
+            return Ok(PgpVerifyResult {
+                is_valid,
+                signer_fingerprint: Some(fingerprint),
+                message_content: text,
+            });
+        }
+
+        if let Ok((msg, _)) = rpgp::composed::Message::from_armor_single(armored.as_bytes()) {
+            let is_valid = msg.verify(&pub_key).is_ok();
+            let content = msg
+                .get_content()
+                .ok()
+                .flatten()
+                .and_then(|b| String::from_utf8(b).ok())
+                .unwrap_or_default();
+            return Ok(PgpVerifyResult {
+                is_valid,
+                signer_fingerprint: Some(fingerprint),
+                message_content: content,
+            });
+        }
+
+        Err(PgpError::InvalidArmor(
+            "unrecognized or unsupported signed OpenPGP message format".into(),
         ))
     }
 
@@ -197,7 +324,7 @@ impl PgpEngine {
         }
 
         let lit_msg = rpgp::composed::Message::new_literal("", plaintext);
-        let mut rng = rand::thread_rng();
+        let mut rng = rand::rngs::OsRng;
         let key_refs: Vec<&rpgp::composed::SignedPublicKey> = parsed_keys.iter().collect();
         match lit_msg.encrypt_to_keys_seipdv1(
             &mut rng,

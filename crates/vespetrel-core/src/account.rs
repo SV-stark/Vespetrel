@@ -42,8 +42,14 @@ pub struct AuthConfig {
     #[serde(default)]
     pub auth_method: AuthMethod,
     pub username: Option<String>,
-    /// Keyring service key for password / refresh token lookup
+    /// Keyring service key for password / access token lookup
     pub keyring_key: Option<String>,
+    /// Keyring service key for refresh token lookup
+    #[serde(default)]
+    pub refresh_token_keyring_key: Option<String>,
+    /// Token expiration timestamp in seconds since UNIX epoch
+    #[serde(default)]
+    pub expires_at: Option<i64>,
     /// OAuth2 client info (non-secret)
     pub oauth: Option<OAuthConfig>,
 }
@@ -72,6 +78,8 @@ impl Default for AuthConfig {
             auth_method: AuthMethod::Password,
             username: None,
             keyring_key: None,
+            refresh_token_keyring_key: None,
+            expires_at: None,
             oauth: None,
         }
     }

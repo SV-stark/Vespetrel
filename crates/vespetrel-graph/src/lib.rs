@@ -11,10 +11,19 @@ use vespetrel_core::provider::{MailProvider, RemoteFolder, SyncDelta};
 
 const GRAPH_BASE: &str = "https://graph.microsoft.com/v1.0";
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct GraphConfig {
     pub access_token: String,
     pub base_url: String,
+}
+
+impl std::fmt::Debug for GraphConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("GraphConfig")
+            .field("base_url", &self.base_url)
+            .field("access_token", &"[REDACTED]")
+            .finish()
+    }
 }
 
 impl GraphConfig {
@@ -187,7 +196,7 @@ impl MailProvider for GraphProvider {
         &self,
     ) -> Result<Vec<RemoteFolder>, vespetrel_core::provider::ProviderError> {
         debug!(url=%self.config.folders_url(), "Graph sync_folder_list");
-        if !self.config.access_token.is_empty() && !self.config.access_token.starts_with("mock_") {
+        if !self.config.access_token.is_empty() {
             let resp = self
                 .http
                 .get(self.config.folders_url())
@@ -243,31 +252,38 @@ impl MailProvider for GraphProvider {
         folder: &Folder,
         state: SyncState,
     ) -> Result<SyncDelta, vespetrel_core::provider::ProviderError> {
-        let url = self
-            .config
-            .delta_url(&folder.remote_id, state.graph_delta_token.as_deref());
-        debug!(folder=%folder.name, url=%url, "Graph delta query");
+        debug!(folder=%folder.name, "Graph delta query");
 
         if !self.config.access_token.is_empty() {
-            let resp = self
-                .http
-                .get(&url)
-                .bearer_auth(&self.config.access_token)
-                .send()
-                .await
-                .map_err(|e| vespetrel_core::provider::ProviderError::Protocol(e.to_string()))?;
-            let json = resp
-                .error_for_status()
-                .map_err(|e| vespetrel_core::provider::ProviderError::Protocol(e.to_string()))?
-                .json::<serde_json::Value>()
-                .await
-                .map_err(|e| vespetrel_core::provider::ProviderError::Protocol(e.to_string()))?;
+            let mut delta = SyncDelta::default();
+            let mut next_url = Some(
+                self.config
+                    .delta_url(&folder.remote_id, state.graph_delta_token.as_deref()),
+            );
+            let mut final_delta_token = state.graph_delta_token.clone();
 
-            let next_token = json
-                .get("@odata.deltaLink")
-                .and_then(|v| v.as_str())
-                .and_then(|link| {
-                    if let Ok(parsed_url) = url::Url::parse(link) {
+            while let Some(current_url) = next_url {
+                debug!(url=%current_url, "fetching Graph messages delta page");
+                let resp = self
+                    .http
+                    .get(&current_url)
+                    .bearer_auth(&self.config.access_token)
+                    .send()
+                    .await
+                    .map_err(|e| {
+                        vespetrel_core::provider::ProviderError::Protocol(e.to_string())
+                    })?;
+                let json = resp
+                    .error_for_status()
+                    .map_err(|e| vespetrel_core::provider::ProviderError::Protocol(e.to_string()))?
+                    .json::<serde_json::Value>()
+                    .await
+                    .map_err(|e| {
+                        vespetrel_core::provider::ProviderError::Protocol(e.to_string())
+                    })?;
+
+                if let Some(link) = json.get("@odata.deltaLink").and_then(|v| v.as_str()) {
+                    let extracted = if let Ok(parsed_url) = url::Url::parse(link) {
                         parsed_url
                             .query_pairs()
                             .find(|(k, _)| k == "$deltatoken" || k == "deltatoken")
@@ -277,71 +293,82 @@ impl MailProvider for GraphProvider {
                             .nth(1)
                             .and_then(|s| s.split('&').next())
                             .map(|s| s.to_string())
-                    }
-                })
-                .or(state.graph_delta_token.clone());
-
-            let mut delta = SyncDelta {
-                new_sync_state: SyncState {
-                    graph_delta_token: next_token,
-                    ..state
-                },
-                ..Default::default()
-            };
-
-            if let Some(items) = json.get("value").and_then(|v| v.as_array()) {
-                for item in items {
-                    let mut flags = Vec::new();
-                    if item
-                        .get("isRead")
-                        .and_then(|v| v.as_bool())
-                        .unwrap_or(false)
-                    {
-                        flags.push(Flag::Seen);
-                    }
-                    if item
-                        .get("flag")
-                        .and_then(|f| f.get("flagStatus"))
-                        .and_then(|s| s.as_str())
-                        == Some("flagged")
-                    {
-                        flags.push(Flag::Flagged);
-                    }
-                    let id = item.get("id").and_then(|s| s.as_str()).unwrap_or_default();
-                    let remote_uid = vespetrel_core::stable_uid_from_id(id);
-
-                    let subject = item.get("subject").and_then(|s| s.as_str()).unwrap_or("");
-                    let body_preview = item
-                        .get("bodyPreview")
-                        .and_then(|s| s.as_str())
-                        .unwrap_or("");
-                    let sender = item
-                        .pointer("/from/emailAddress/address")
-                        .and_then(|s| s.as_str())
-                        .unwrap_or("graph@example.com");
-                    let date = item
-                        .get("receivedDateTime")
-                        .and_then(|s| s.as_str())
-                        .unwrap_or("");
-                    let date_hdr = if !date.is_empty() {
-                        format!("Date: {date}\r\n")
-                    } else {
-                        format!("Date: {}\r\n", chrono::Utc::now().to_rfc2822())
                     };
+                    final_delta_token = extracted.or(final_delta_token);
+                    next_url = None;
+                } else if let Some(next_link) = json.get("@odata.nextLink").and_then(|v| v.as_str())
+                {
+                    next_url = Some(next_link.to_string());
+                } else {
+                    next_url = None;
+                }
 
-                    let mime_data = format!(
-                        "From: {sender}\r\nTo: me@example.com\r\nSubject: {subject}\r\n{date_hdr}Message-ID: <{id}@graph.microsoft.com>\r\nMIME-Version: 1.0\r\nContent-Type: text/plain; charset=utf-8\r\n\r\n{body_preview}"
-                    )
-                    .into_bytes();
+                if let Some(items) = json.get("value").and_then(|v| v.as_array()) {
+                    for item in items {
+                        let id = item.get("id").and_then(|s| s.as_str()).unwrap_or_default();
+                        if item.get("@removed").is_some() {
+                            let remote_uid = vespetrel_core::stable_uid_from_id(id);
+                            delta.deleted_uids.push(remote_uid);
+                            continue;
+                        }
 
-                    delta.inserted.push(vespetrel_core::provider::SyncMessage {
-                        remote_uid,
-                        flags,
-                        raw_rfc822: Some(mime_data),
-                        mod_seq: None,
-                    });
+                        let mut flags = Vec::new();
+                        if item
+                            .get("isRead")
+                            .and_then(|v| v.as_bool())
+                            .unwrap_or(false)
+                        {
+                            flags.push(Flag::Seen);
+                        }
+                        if item
+                            .get("flag")
+                            .and_then(|f| f.get("flagStatus"))
+                            .and_then(|s| s.as_str())
+                            == Some("flagged")
+                        {
+                            flags.push(Flag::Flagged);
+                        }
+                        let remote_uid = vespetrel_core::stable_uid_from_id(id);
+
+                        let subject = item.get("subject").and_then(|s| s.as_str()).unwrap_or("");
+                        let body_preview = item
+                            .get("bodyPreview")
+                            .and_then(|s| s.as_str())
+                            .unwrap_or("");
+                        let sender = item
+                            .pointer("/from/emailAddress/address")
+                            .and_then(|s| s.as_str())
+                            .unwrap_or("graph@example.com");
+                        let date = item
+                            .get("receivedDateTime")
+                            .and_then(|s| s.as_str())
+                            .unwrap_or("");
+                        let date_hdr = if !date.is_empty() {
+                            format!("Date: {date}\r\n")
+                        } else {
+                            format!("Date: {}\r\n", chrono::Utc::now().to_rfc2822())
+                        };
+
+                        let mime_data = format!(
+                            "From: {sender}\r\nTo: me@example.com\r\nSubject: {subject}\r\n{date_hdr}Message-ID: <{id}@graph.microsoft.com>\r\nMIME-Version: 1.0\r\nContent-Type: text/plain; charset=utf-8\r\n\r\n{body_preview}"
+                        )
+                        .into_bytes();
+
+                        delta.inserted.push(vespetrel_core::provider::SyncMessage {
+                            remote_uid,
+                            remote_id: Some(id.to_string()),
+                            flags,
+                            raw_rfc822: Some(mime_data),
+                            mod_seq: None,
+                        });
+                    }
                 }
             }
+
+            delta.new_sync_state = SyncState {
+                graph_delta_token: final_delta_token,
+                ..state
+            };
             return Ok(delta);
         }
 
@@ -411,12 +438,12 @@ impl MailProvider for GraphProvider {
         msg: &ComposedMessage,
     ) -> Result<(), vespetrel_core::provider::ProviderError> {
         info!(subject=%msg.subject, "Graph sendMail");
-        if !self.config.access_token.is_empty() && !self.config.access_token.starts_with("mock_") {
+        if !self.config.access_token.is_empty() {
             let payload = self.build_send_mail_payload(msg);
-            let url = "https://graph.microsoft.com/v1.0/me/sendMail";
+            let url = format!("{}/me/sendMail", self.config.base_url);
             let resp = self
                 .http
-                .post(url)
+                .post(&url)
                 .bearer_auth(&self.config.access_token)
                 .json(&payload)
                 .send()
@@ -429,14 +456,14 @@ impl MailProvider for GraphProvider {
         Ok(())
     }
 
-    async fn update_flags(
+    async fn update_flags_by_remote_id(
         &self,
-        remote_ids: &[u32],
+        remote_ids: &[String],
         add: &[Flag],
         remove: &[Flag],
     ) -> Result<(), vespetrel_core::provider::ProviderError> {
-        debug!(uids=?remote_ids, "Graph PATCH isRead/flag");
-        if !self.config.access_token.is_empty() && !self.config.access_token.starts_with("mock_") {
+        debug!(remote_ids=?remote_ids, "Graph PATCH isRead/flag by string ID");
+        if !self.config.access_token.is_empty() {
             let is_read = if add.contains(&Flag::Seen) {
                 Some(true)
             } else if remove.contains(&Flag::Seen) {
@@ -462,8 +489,9 @@ impl MailProvider for GraphProvider {
 
             if !patch_map.is_empty() {
                 let body = serde_json::Value::Object(patch_map);
-                for uid in remote_ids {
-                    let url = format!("https://graph.microsoft.com/v1.0/me/messages/{uid}");
+                for id in remote_ids {
+                    let enc_id = urlencoding::encode(id);
+                    let url = format!("{}/me/messages/{enc_id}", self.config.base_url);
                     let resp = self
                         .http
                         .patch(&url)
@@ -481,6 +509,16 @@ impl MailProvider for GraphProvider {
             }
         }
         Ok(())
+    }
+
+    async fn update_flags(
+        &self,
+        remote_ids: &[u32],
+        add: &[Flag],
+        remove: &[Flag],
+    ) -> Result<(), vespetrel_core::provider::ProviderError> {
+        let ids: Vec<String> = remote_ids.iter().map(|u| u.to_string()).collect();
+        self.update_flags_by_remote_id(&ids, add, remove).await
     }
 }
 

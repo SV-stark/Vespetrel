@@ -9,6 +9,7 @@ pub mod repo;
 pub use blob::BlobStore;
 pub use db::{PRAGMAS, StoragePool, create_pool, init_connection, open_in_memory};
 pub use fts::{SearchResult, escape_fts5_query, search_messages};
+pub use repo::OutboxEntry;
 
 use thiserror::Error;
 
@@ -24,6 +25,8 @@ pub enum StorageError {
     Io(#[from] std::io::Error),
     #[error("not found: {0}")]
     NotFound(String),
+    #[error("corrupt data: {0}")]
+    CorruptData(String),
 }
 
 pub type StorageResult<T> = Result<T, StorageError>;

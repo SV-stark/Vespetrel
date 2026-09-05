@@ -76,14 +76,27 @@ impl MailProvider for ImapProvider {
             .await
             .map_err(|e| ProviderError::Protocol(e.to_string()))?;
 
-        // 1. SELECT mailbox
-        let select_cmd = conn.cmd_select(&folder.remote_id);
+        // 1. SELECT mailbox (with RFC 7162 QRESYNC parameters if supported)
+        let current_mod_seq = state
+            .folder_states
+            .get(&folder.remote_id)
+            .and_then(|s| s.highest_mod_seq)
+            .unwrap_or(0);
+        let uid_val = folder.uid_validity.unwrap_or(1);
+
+        let select_cmd = if current_mod_seq > 0 && conn.has_capability("QRESYNC") {
+            conn.cmd_select_qresync(&folder.remote_id, uid_val, current_mod_seq)
+        } else {
+            conn.cmd_select(&folder.remote_id)
+        };
         let select_lines = conn
             .execute_cmd(&select_cmd)
             .await
             .map_err(|e| ProviderError::Protocol(e.to_string()))?;
 
         let mut highest_mod_seq_found = None;
+        let mut delta = SyncDelta::default();
+
         for sl in &select_lines {
             if let Some(pos) = sl.to_uppercase().find("HIGHESTMODSEQ") {
                 let rest = &sl[pos + "HIGHESTMODSEQ".len()..];
@@ -93,6 +106,17 @@ impl MailProvider for ImapProvider {
                     .and_then(|s| s.parse::<u64>().ok())
                 {
                     highest_mod_seq_found = Some(seq);
+                }
+            }
+            let vanished = crate::client::parse_vanished_line(sl);
+            delta.deleted_uids.extend(vanished);
+            if sl.contains(" EXPUNGE") {
+                if let Some(seq) = sl
+                    .split_whitespace()
+                    .nth(1)
+                    .and_then(|s| s.parse::<u32>().ok())
+                {
+                    delta.deleted_uids.push(seq);
                 }
             }
         }
@@ -113,12 +137,6 @@ impl MailProvider for ImapProvider {
         }
 
         // 3. Build fetch query (QRESYNC / CONDSTORE or full UID FETCH)
-        let current_mod_seq = state
-            .folder_states
-            .get(&folder.remote_id)
-            .and_then(|s| s.highest_mod_seq)
-            .unwrap_or(0);
-
         let fetch_cmd = if conn.has_capability("QRESYNC") || conn.has_capability("CONDSTORE") {
             debug!(folder=%folder.name, mod_seq=current_mod_seq, "issuing CHANGEDSINCE query");
             conn.cmd_uid_fetch_changed_since(1, current_mod_seq)
@@ -133,8 +151,6 @@ impl MailProvider for ImapProvider {
             .await
             .map_err(|e| ProviderError::Protocol(e.to_string()))?;
 
-        let mut delta = SyncDelta::default();
-
         for line in &lines {
             if let Some((uid, flags, mod_seq, _size)) = parse_imap_fetch_line(line) {
                 if let Some(m) = mod_seq {
@@ -148,6 +164,7 @@ impl MailProvider for ImapProvider {
                 };
                 delta.inserted.push(SyncMessage {
                     remote_uid: uid,
+                    remote_id: Some(uid.to_string()),
                     flags,
                     raw_rfc822,
                     mod_seq,
@@ -155,6 +172,15 @@ impl MailProvider for ImapProvider {
             }
             let vanished = crate::client::parse_vanished_line(line);
             delta.deleted_uids.extend(vanished);
+            if line.contains(" EXPUNGE") {
+                if let Some(seq) = line
+                    .split_whitespace()
+                    .nth(1)
+                    .and_then(|s| s.parse::<u32>().ok())
+                {
+                    delta.deleted_uids.push(seq);
+                }
+            }
         }
 
         let next_mod_seq = highest_mod_seq_found.unwrap_or(current_mod_seq + 1);
@@ -195,6 +221,53 @@ impl MailProvider for ImapProvider {
 
     async fn send_message(&self, message: &ComposedMessage) -> Result<(), ProviderError> {
         info!(subject=%message.subject, to=?message.to, "imap send_message (append to Sent)");
+        let mut conn = self.conn();
+        conn.connect()
+            .await
+            .map_err(|e| ProviderError::Protocol(e.to_string()))?;
+
+        let to_list = message
+            .to
+            .iter()
+            .map(|a| a.to_string())
+            .collect::<Vec<_>>()
+            .join(", ");
+        let raw_mime = match message.body_html.as_ref() {
+            Some(html) => format!(
+                "From: {}\r\nTo: {}\r\nSubject: {}\r\nDate: {}\r\nContent-Type: text/html; charset=utf-8\r\n\r\n{}",
+                message.from,
+                to_list,
+                message.subject,
+                chrono::Utc::now().to_rfc2822(),
+                html
+            ).into_bytes(),
+            None => format!(
+                "From: {}\r\nTo: {}\r\nSubject: {}\r\nDate: {}\r\nContent-Type: text/plain; charset=utf-8\r\n\r\n{}",
+                message.from,
+                to_list,
+                message.subject,
+                chrono::Utc::now().to_rfc2822(),
+                message.body_text
+            ).into_bytes(),
+        };
+
+        let target_folders = ["Sent", "INBOX.Sent", "[Gmail]/Sent Mail"];
+        let mut appended = false;
+        for folder_name in target_folders {
+            if conn
+                .execute_append(folder_name, &[Flag::Seen], &raw_mime)
+                .await
+                .is_ok()
+            {
+                appended = true;
+                break;
+            }
+        }
+        if !appended {
+            conn.execute_append("Sent", &[Flag::Seen], &raw_mime)
+                .await
+                .map_err(|e| ProviderError::Protocol(e.to_string()))?;
+        }
         Ok(())
     }
 

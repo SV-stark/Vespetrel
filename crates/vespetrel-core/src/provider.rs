@@ -22,6 +22,16 @@ pub trait MailProvider: Send + Sync {
         add: &[Flag],
         remove: &[Flag],
     ) -> Result<(), ProviderError>;
+
+    async fn update_flags_by_remote_id(
+        &self,
+        remote_ids: &[String],
+        add: &[Flag],
+        remove: &[Flag],
+    ) -> Result<(), ProviderError> {
+        let numeric_uids: Vec<u32> = remote_ids.iter().filter_map(|s| s.parse().ok()).collect();
+        self.update_flags(&numeric_uids, add, remove).await
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -45,6 +55,8 @@ pub struct SyncDelta {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SyncMessage {
     pub remote_uid: u32,
+    #[serde(default)]
+    pub remote_id: Option<String>,
     pub flags: Vec<Flag>,
     pub raw_rfc822: Option<Vec<u8>>,
     pub mod_seq: Option<u64>,

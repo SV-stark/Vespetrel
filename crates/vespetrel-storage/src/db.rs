@@ -38,9 +38,19 @@ pub fn create_pool_with_key(
             .unwrap_or(8)
             .clamp(1, 64)
     };
-    let key_owned = encryption_key.map(|s| Zeroizing::new(s.to_string()));
     let mut cfg = PoolConfig::new(db_path);
     cfg.pool = Some(deadpool_sqlite::PoolConfig::new(pool_size));
+    // For file-backed databases, run migrations once on a dedicated connection before starting pool
+    if db_path != ":memory:" {
+        if let Some(parent) = std::path::Path::new(db_path).parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        let mut conn = Connection::open(db_path)?;
+        init_connection_with_key(&mut conn, encryption_key)?;
+    }
+
+    let is_memory = db_path == ":memory:";
+    let key_owned = encryption_key.map(|s| Zeroizing::new(s.to_string()));
     let pool = cfg
         .builder(Runtime::Tokio1)
         .map_err(|e| crate::StorageError::Pool(e.to_string()))?
@@ -48,7 +58,11 @@ pub fn create_pool_with_key(
             let key = key_owned.clone();
             Box::pin(async move {
                 conn.interact(move |c| {
-                    init_connection_with_key(c, key.as_deref().map(|z| z.as_str()))
+                    setup_connection_pragmas_with_key(c, key.as_deref().map(|z| z.as_str()))?;
+                    if is_memory {
+                        run_migrations(c)?;
+                    }
+                    Ok::<(), crate::StorageError>(())
                 })
                 .await
                 .map_err(|e| HookError::message(e.to_string()))?
@@ -65,8 +79,8 @@ pub fn init_connection(conn: &mut Connection) -> crate::StorageResult<()> {
     init_connection_with_key(conn, None)
 }
 
-/// Initialize connection with optional SQLCipher encryption key
-pub fn init_connection_with_key(
+/// Configure connection encryption and SQLite PRAGMAs
+pub fn setup_connection_pragmas_with_key(
     conn: &mut Connection,
     encryption_key: Option<&str>,
 ) -> crate::StorageResult<()> {
@@ -93,6 +107,15 @@ pub fn init_connection_with_key(
     if fk_enabled != 1 {
         conn.execute_batch("PRAGMA foreign_keys = ON")?;
     }
+    Ok(())
+}
+
+/// Initialize connection with optional SQLCipher encryption key and run migrations
+pub fn init_connection_with_key(
+    conn: &mut Connection,
+    encryption_key: Option<&str>,
+) -> crate::StorageResult<()> {
+    setup_connection_pragmas_with_key(conn, encryption_key)?;
     run_migrations(conn)?;
     Ok(())
 }

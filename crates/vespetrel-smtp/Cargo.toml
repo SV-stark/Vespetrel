@@ -21,4 +21,5 @@ sha2 = { workspace = true }
 base64 = { workspace = true }
 aws-lc-rs = { workspace = true }
 chrono = { workspace = true }
+uuid = { workspace = true }
 

@@ -40,8 +40,7 @@ pub fn safe_blob_path_with_ext(
     }
 
     let lz4_cand = can_shard_dir.join(format!("{id}.lz4"));
-    if lz4_cand.exists() {
-        let can_cand = lz4_cand.canonicalize()?;
+    if let Ok(can_cand) = lz4_cand.canonicalize() {
         if !can_cand.starts_with(&can_base) {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::PermissionDenied,
@@ -51,8 +50,7 @@ pub fn safe_blob_path_with_ext(
         return Ok(can_cand);
     }
     let zst_cand = can_shard_dir.join(format!("{id}.zst"));
-    if zst_cand.exists() {
-        let can_cand = zst_cand.canonicalize()?;
+    if let Ok(can_cand) = zst_cand.canonicalize() {
         if !can_cand.starts_with(&can_base) {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::PermissionDenied,
@@ -104,7 +102,7 @@ impl BlobStore {
         }
         let compressed = lz4_flex::compress_prepend_size(data);
 
-        // Atomic write via NamedTempFile in the same directory, then persist
+        // Atomic write via NamedTempFile in the same directory, sync to disk, then persist
         let parent = path.parent().unwrap_or(&self.base);
         let mut tmp = tempfile::Builder::new()
             .prefix("blob-")
@@ -112,7 +110,12 @@ impl BlobStore {
             .tempfile_in(parent)?;
         use std::io::Write;
         tmp.write_all(&compressed)?;
+        tmp.as_file().sync_all()?;
         tmp.persist(&path).map_err(|e| e.error)?;
+
+        if let Ok(dir) = std::fs::File::open(parent) {
+            let _ = dir.sync_all();
+        }
 
         self.cache
             .insert(id.to_string(), Bytes::copy_from_slice(data));
@@ -143,7 +146,15 @@ impl BlobStore {
     }
 
     pub fn read_path(&self, path: &Path) -> std::io::Result<Vec<u8>> {
-        let compressed = std::fs::read(path)?;
+        let can_base = self.base.canonicalize()?;
+        let can_path = path.canonicalize()?;
+        if !can_path.starts_with(&can_base) {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                "Blob path traversal escape detected",
+            ));
+        }
+        let compressed = std::fs::read(&can_path)?;
         if path.extension().and_then(|e| e.to_str()) == Some("zst") {
             use std::io::Read;
             let mut decoder = zstd::Decoder::new(&compressed[..])

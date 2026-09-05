@@ -38,11 +38,41 @@ pub struct EmailSecuritySummary {
 pub struct AuthBadgeParser;
 
 impl AuthBadgeParser {
-    /// Parse RFC 8601 `Authentication-Results` header
-    /// e.g. "mx.google.com; dkim=pass header.i=@github.com; spf=pass (google.com: domain of support@github.com designates 192.30.252.204 as permitted sender); dmarc=pass"
-    pub fn parse_authentication_results(header: &str) -> EmailSecuritySummary {
+    /// Parse RFC 8601 `Authentication-Results` header with domain alignment and authserv-id verification
+    pub fn parse_authentication_results_aligned(
+        header: &str,
+        from_email: Option<&str>,
+        expected_authserv_id: Option<&str>,
+    ) -> EmailSecuritySummary {
         let lower = header.to_lowercase();
         let segments: Vec<&str> = lower.split(';').map(|s| s.trim()).collect();
+
+        if segments.is_empty() {
+            return EmailSecuritySummary {
+                dkim: AuthStatus::None,
+                dkim_domain: None,
+                spf: AuthStatus::None,
+                dmarc: AuthStatus::None,
+                is_verified_sender: false,
+            };
+        }
+
+        // Validate authserv-id if expected
+        let header_authserv_id = segments[0].split_whitespace().next().unwrap_or_default();
+        if let Some(expected_id) = expected_authserv_id {
+            let clean_expected = expected_id.to_lowercase();
+            if !header_authserv_id.eq_ignore_ascii_case(&clean_expected)
+                && !header_authserv_id.ends_with(&clean_expected)
+            {
+                return EmailSecuritySummary {
+                    dkim: AuthStatus::None,
+                    dkim_domain: None,
+                    spf: AuthStatus::None,
+                    dmarc: AuthStatus::None,
+                    is_verified_sender: false,
+                };
+            }
+        }
 
         let mut dkim = AuthStatus::None;
         let mut spf = AuthStatus::None;
@@ -94,8 +124,25 @@ impl AuthBadgeParser {
                 })
             });
 
-        let is_verified_sender =
-            dkim == AuthStatus::Pass && (spf == AuthStatus::Pass || dmarc == AuthStatus::Pass);
+        // Verify domain alignment against From address
+        let domain_aligned = if let (Some(from), Some(dkim_d)) = (from_email, &dkim_domain) {
+            let from_domain = from
+                .split('@')
+                .nth(1)
+                .unwrap_or("")
+                .trim_matches('>')
+                .trim();
+            !from_domain.is_empty()
+                && (from_domain.eq_ignore_ascii_case(dkim_d)
+                    || from_domain.ends_with(&format!(".{dkim_d}"))
+                    || dkim_d.ends_with(&format!(".{from_domain}")))
+        } else {
+            dkim_domain.is_some()
+        };
+
+        let is_verified_sender = dkim == AuthStatus::Pass
+            && domain_aligned
+            && (spf == AuthStatus::Pass || dmarc == AuthStatus::Pass);
 
         EmailSecuritySummary {
             dkim,
@@ -104,6 +151,12 @@ impl AuthBadgeParser {
             dmarc,
             is_verified_sender,
         }
+    }
+
+    /// Parse RFC 8601 `Authentication-Results` header
+    /// e.g. "mx.google.com; dkim=pass header.i=@github.com; spf=pass (google.com: domain of support@github.com designates 192.30.252.204 as permitted sender); dmarc=pass"
+    pub fn parse_authentication_results(header: &str) -> EmailSecuritySummary {
+        Self::parse_authentication_results_aligned(header, None, None)
     }
 }
 

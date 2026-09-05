@@ -240,8 +240,8 @@ pub fn insert_message(conn: &Connection, msg: &Message) -> StorageResult<()> {
     let bcc_addresses_json = serde_json::to_string(&msg.bcc_addresses)?;
 
     conn.execute(
-        r#"INSERT INTO messages (id, account_id, folder_id, thread_id, remote_uid, message_id_header, in_reply_to, references_header, subject, from_address, from_name, to_addresses, cc_addresses, bcc_addresses, reply_to, sent_at, received_at, is_read, is_flagged, is_draft, has_attachments, body_snippet, body_text_preview, blob_path, size_bytes)
-           VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22,?23,?24,?25)
+        r#"INSERT INTO messages (id, account_id, folder_id, thread_id, remote_uid, message_id_header, in_reply_to, references_header, subject, from_address, from_name, to_addresses, cc_addresses, bcc_addresses, reply_to, sent_at, received_at, is_read, is_flagged, is_draft, has_attachments, body_snippet, body_text_preview, blob_path, size_bytes, remote_id)
+           VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22,?23,?24,?25,?26)
            ON CONFLICT(folder_id, remote_uid) DO UPDATE SET
              thread_id=excluded.thread_id,
              message_id_header=excluded.message_id_header,
@@ -263,7 +263,8 @@ pub fn insert_message(conn: &Connection, msg: &Message) -> StorageResult<()> {
              body_snippet=excluded.body_snippet,
              body_text_preview=excluded.body_text_preview,
              blob_path=excluded.blob_path,
-             size_bytes=excluded.size_bytes"#,
+             size_bytes=excluded.size_bytes,
+             remote_id=COALESCE(excluded.remote_id, messages.remote_id)"#,
         params![
             msg.id,
             msg.account_id,
@@ -290,6 +291,7 @@ pub fn insert_message(conn: &Connection, msg: &Message) -> StorageResult<()> {
             msg.body_text_preview,
             msg.blob_path,
             msg.size_bytes,
+            msg.remote_id,
         ],
     )?;
 
@@ -303,9 +305,62 @@ pub fn list_messages_in_folder(
     offset: usize,
 ) -> StorageResult<Vec<Message>> {
     let mut stmt = conn.prepare(
-        "SELECT id, account_id, folder_id, thread_id, remote_uid, message_id_header, in_reply_to, references_header, subject, from_address, from_name, to_addresses, cc_addresses, bcc_addresses, reply_to, sent_at, received_at, is_read, is_flagged, is_draft, has_attachments, body_snippet, body_text_preview, blob_path, size_bytes FROM messages WHERE folder_id = ?1 ORDER BY sent_at DESC LIMIT ?2 OFFSET ?3"
+        "SELECT id, account_id, folder_id, thread_id, remote_uid, message_id_header, in_reply_to, references_header, subject, from_address, from_name, to_addresses, cc_addresses, bcc_addresses, reply_to, sent_at, received_at, is_read, is_flagged, is_draft, has_attachments, body_snippet, body_text_preview, blob_path, size_bytes, remote_id FROM messages WHERE folder_id = ?1 ORDER BY sent_at DESC LIMIT ?2 OFFSET ?3"
     )?;
     let rows = stmt.query_map(params![folder_id, limit as i64, offset as i64], |row| {
+        let to_json: String = row.get(11)?;
+        let to_addresses = serde_json::from_str(&to_json).map_err(|e| {
+            rusqlite::Error::FromSqlConversionFailure(
+                11,
+                rusqlite::types::Type::Text,
+                Box::new(crate::StorageError::CorruptData(format!(
+                    "Corrupted to_addresses JSON: {e}"
+                ))),
+            )
+        })?;
+        let cc_json: String = row.get(12)?;
+        let cc_addresses = serde_json::from_str(&cc_json).map_err(|e| {
+            rusqlite::Error::FromSqlConversionFailure(
+                12,
+                rusqlite::types::Type::Text,
+                Box::new(crate::StorageError::CorruptData(format!(
+                    "Corrupted cc_addresses JSON: {e}"
+                ))),
+            )
+        })?;
+        let bcc_json: String = row.get(13)?;
+        let bcc_addresses = serde_json::from_str(&bcc_json).map_err(|e| {
+            rusqlite::Error::FromSqlConversionFailure(
+                13,
+                rusqlite::types::Type::Text,
+                Box::new(crate::StorageError::CorruptData(format!(
+                    "Corrupted bcc_addresses JSON: {e}"
+                ))),
+            )
+        })?;
+        let reply_to = row
+            .get::<_, Option<String>>(14)?
+            .and_then(|s| serde_json::from_str(&s).ok());
+        let sent_ts: i64 = row.get(15)?;
+        let sent_at = DateTime::from_timestamp(sent_ts, 0).ok_or_else(|| {
+            rusqlite::Error::FromSqlConversionFailure(
+                15,
+                rusqlite::types::Type::Integer,
+                Box::new(crate::StorageError::CorruptData(format!(
+                    "Invalid sent_at timestamp: {sent_ts}"
+                ))),
+            )
+        })?;
+        let recv_ts: i64 = row.get(16)?;
+        let received_at = DateTime::from_timestamp(recv_ts, 0).ok_or_else(|| {
+            rusqlite::Error::FromSqlConversionFailure(
+                16,
+                rusqlite::types::Type::Integer,
+                Box::new(crate::StorageError::CorruptData(format!(
+                    "Invalid received_at timestamp: {recv_ts}"
+                ))),
+            )
+        })?;
         Ok(Message {
             id: row.get(0)?,
             account_id: row.get(1)?,
@@ -318,15 +373,12 @@ pub fn list_messages_in_folder(
             subject: row.get(8)?,
             from_address: row.get(9)?,
             from_name: row.get(10)?,
-            to_addresses: serde_json::from_str(&row.get::<_, String>(11)?).unwrap_or_default(),
-            cc_addresses: serde_json::from_str(&row.get::<_, String>(12)?).unwrap_or_default(),
-            bcc_addresses: serde_json::from_str(&row.get::<_, String>(13)?).unwrap_or_default(),
-            reply_to: row
-                .get::<_, Option<String>>(14)?
-                .and_then(|s| serde_json::from_str(&s).ok()),
-            sent_at: DateTime::from_timestamp(row.get::<_, i64>(15)?, 0).unwrap_or_else(Utc::now),
-            received_at: DateTime::from_timestamp(row.get::<_, i64>(16)?, 0)
-                .unwrap_or_else(Utc::now),
+            to_addresses,
+            cc_addresses,
+            bcc_addresses,
+            reply_to,
+            sent_at,
+            received_at,
             is_read: row.get::<_, i64>(17)? != 0,
             is_flagged: row.get::<_, i64>(18)? != 0,
             is_draft: row.get::<_, i64>(19)? != 0,
@@ -335,6 +387,7 @@ pub fn list_messages_in_folder(
             body_text_preview: row.get(22)?,
             blob_path: row.get(23)?,
             size_bytes: row.get(24)?,
+            remote_id: row.get(25).ok(),
         })
     })?;
     rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
@@ -395,12 +448,21 @@ pub fn list_threads(
 ) -> StorageResult<Vec<vespetrel_core::Thread>> {
     let mut stmt = conn.prepare("SELECT id, account_id, subject, last_message_at, message_count, unread_count, snippet FROM threads WHERE account_id = ?1 ORDER BY last_message_at DESC")?;
     let rows = stmt.query_map(params![account_id], |row| {
+        let last_ts: i64 = row.get(3)?;
+        let last_message_at = DateTime::from_timestamp(last_ts, 0).ok_or_else(|| {
+            rusqlite::Error::FromSqlConversionFailure(
+                3,
+                rusqlite::types::Type::Integer,
+                Box::new(crate::StorageError::CorruptData(format!(
+                    "Invalid last_message_at timestamp: {last_ts}"
+                ))),
+            )
+        })?;
         Ok(vespetrel_core::Thread {
             id: row.get(0)?,
             account_id: row.get(1)?,
             subject: row.get(2)?,
-            last_message_at: DateTime::from_timestamp(row.get::<_, i64>(3)?, 0)
-                .unwrap_or_else(Utc::now),
+            last_message_at,
             message_count: row.get(4)?,
             unread_count: row.get(5)?,
             snippet: row.get(6)?,
@@ -479,14 +541,34 @@ pub fn list_calendar_events(
 ) -> StorageResult<Vec<vespetrel_core::CalendarEvent>> {
     let mut stmt = conn.prepare("SELECT id, calendar_id, ical_uid, title, description, start_at, end_at, location, raw_ical FROM calendar_events WHERE calendar_id = ?1 ORDER BY start_at ASC")?;
     let rows = stmt.query_map(params![calendar_id], |row| {
+        let start_ts: i64 = row.get(5)?;
+        let start = DateTime::from_timestamp(start_ts, 0).ok_or_else(|| {
+            rusqlite::Error::FromSqlConversionFailure(
+                5,
+                rusqlite::types::Type::Integer,
+                Box::new(crate::StorageError::CorruptData(format!(
+                    "Invalid start_at timestamp: {start_ts}"
+                ))),
+            )
+        })?;
+        let end_ts: i64 = row.get(6)?;
+        let end = DateTime::from_timestamp(end_ts, 0).ok_or_else(|| {
+            rusqlite::Error::FromSqlConversionFailure(
+                6,
+                rusqlite::types::Type::Integer,
+                Box::new(crate::StorageError::CorruptData(format!(
+                    "Invalid end_at timestamp: {end_ts}"
+                ))),
+            )
+        })?;
         Ok(vespetrel_core::CalendarEvent {
             id: row.get(0)?,
             calendar_id: row.get(1)?,
             ical_uid: row.get(2)?,
             title: row.get(3)?,
             description: row.get(4)?,
-            start: DateTime::from_timestamp(row.get::<_, i64>(5)?, 0).unwrap_or_else(Utc::now),
-            end: DateTime::from_timestamp(row.get::<_, i64>(6)?, 0).unwrap_or_else(Utc::now),
+            start,
+            end,
             location: row.get(7)?,
             raw_ical: row.get(8)?,
         })
@@ -626,6 +708,24 @@ pub fn list_signatures_for_account(
         let created_ts: i64 = row.get(7)?;
         let updated_ts: i64 = row.get(8)?;
 
+        let created_at = DateTime::from_timestamp(created_ts, 0).ok_or_else(|| {
+            rusqlite::Error::FromSqlConversionFailure(
+                7,
+                rusqlite::types::Type::Integer,
+                Box::new(crate::StorageError::CorruptData(format!(
+                    "Invalid created_at timestamp: {created_ts}"
+                ))),
+            )
+        })?;
+        let updated_at = DateTime::from_timestamp(updated_ts, 0).ok_or_else(|| {
+            rusqlite::Error::FromSqlConversionFailure(
+                8,
+                rusqlite::types::Type::Integer,
+                Box::new(crate::StorageError::CorruptData(format!(
+                    "Invalid updated_at timestamp: {updated_ts}"
+                ))),
+            )
+        })?;
         Ok(vespetrel_core::Signature {
             id: row.get(0)?,
             account_id: row.get(1)?,
@@ -634,8 +734,8 @@ pub fn list_signatures_for_account(
             plain_text: row.get(4)?,
             is_default: is_def != 0,
             include_in_replies: inc_rep != 0,
-            created_at: DateTime::from_timestamp(created_ts, 0).unwrap_or_else(Utc::now),
-            updated_at: DateTime::from_timestamp(updated_ts, 0).unwrap_or_else(Utc::now),
+            created_at,
+            updated_at,
         })
     })?;
 
@@ -677,13 +777,122 @@ pub fn get_user_settings(conn: &Connection) -> StorageResult<vespetrel_core::Use
     match opt_json {
         Some(json) => match serde_json::from_str(&json) {
             Ok(settings) => Ok(settings),
-            Err(e) => {
-                warn!(error=%e, "corrupted user_settings JSON in DB, falling back to default");
-                Ok(vespetrel_core::UserSettings::default())
-            }
+            Err(e) => Err(crate::StorageError::CorruptData(format!(
+                "corrupted user_settings JSON in DB: {e}"
+            ))),
         },
         None => Ok(vespetrel_core::UserSettings::default()),
     }
+}
+
+// ---------------------------------------------------------------------------
+// Outbox Persistence
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct OutboxEntry {
+    pub id: String,
+    pub account_id: String,
+    pub composed_message: vespetrel_core::ComposedMessage,
+    pub scheduled_at: i64,
+    pub send_at: i64,
+    pub is_cancelled: bool,
+    pub attempts: i64,
+    pub last_error: Option<String>,
+}
+
+pub fn enqueue_outbox(conn: &Connection, entry: &OutboxEntry) -> StorageResult<()> {
+    let msg_json = serde_json::to_string(&entry.composed_message)?;
+    conn.execute(
+        r#"INSERT INTO outbox (id, account_id, composed_message, scheduled_at, send_at, is_cancelled, attempts, last_error)
+           VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+           ON CONFLICT(id) DO UPDATE SET
+             composed_message=excluded.composed_message,
+             scheduled_at=excluded.scheduled_at,
+             send_at=excluded.send_at,
+             is_cancelled=excluded.is_cancelled,
+             attempts=excluded.attempts,
+             last_error=excluded.last_error"#,
+        params![
+            entry.id,
+            entry.account_id,
+            msg_json,
+            entry.scheduled_at,
+            entry.send_at,
+            if entry.is_cancelled { 1 } else { 0 },
+            entry.attempts,
+            entry.last_error,
+        ],
+    )?;
+    Ok(())
+}
+
+pub fn cancel_outbox(conn: &Connection, id: &str) -> StorageResult<bool> {
+    let rows = conn.execute(
+        "UPDATE outbox SET is_cancelled = 1 WHERE id = ?1 AND is_cancelled = 0",
+        params![id],
+    )?;
+    Ok(rows > 0)
+}
+
+pub fn list_due_outbox(conn: &Connection, now: i64) -> StorageResult<Vec<OutboxEntry>> {
+    let mut stmt = conn.prepare(
+        "SELECT id, account_id, composed_message, scheduled_at, send_at, is_cancelled, attempts, last_error
+         FROM outbox
+         WHERE is_cancelled = 0 AND send_at <= ?1
+         ORDER BY send_at ASC",
+    )?;
+    let rows = stmt.query_map(params![now], |row| {
+        let id: String = row.get(0)?;
+        let account_id: String = row.get(1)?;
+        let msg_json: String = row.get(2)?;
+        let scheduled_at: i64 = row.get(3)?;
+        let send_at: i64 = row.get(4)?;
+        let is_cancelled: bool = row.get::<_, i64>(5)? != 0;
+        let attempts: i64 = row.get(6)?;
+        let last_error: Option<String> = row.get(7)?;
+
+        let composed_message = match serde_json::from_str(&msg_json) {
+            Ok(m) => m,
+            Err(e) => {
+                return Err(rusqlite::Error::FromSqlConversionFailure(
+                    2,
+                    rusqlite::types::Type::Text,
+                    Box::new(e),
+                ));
+            }
+        };
+
+        Ok(OutboxEntry {
+            id,
+            account_id,
+            composed_message,
+            scheduled_at,
+            send_at,
+            is_cancelled,
+            attempts,
+            last_error,
+        })
+    })?;
+
+    let mut result = Vec::new();
+    for row in rows {
+        result.push(row?);
+    }
+    Ok(result)
+}
+
+pub fn delete_outbox_entry(conn: &Connection, id: &str) -> StorageResult<()> {
+    conn.execute("DELETE FROM outbox WHERE id = ?1", params![id])?;
+    Ok(())
+}
+
+pub fn mark_outbox_failed(conn: &Connection, id: &str, error: &str) -> StorageResult<()> {
+    conn.execute(
+        "UPDATE outbox SET attempts = attempts + 1, last_error = ?2 WHERE id = ?1",
+        params![id, error],
+    )?;
+    Ok(())
 }
 
 #[cfg(test)]
@@ -823,5 +1032,55 @@ mod tests {
         assert_eq!(loaded.layout, vespetrel_core::PaneLayout::ClassicHorizontal);
         assert_eq!(loaded.accent_color, "#cba6f7");
         assert_eq!(loaded.undo_send_seconds, 15);
+
+        // 10. Outbox Persistence
+        let outbox_msg = vespetrel_core::ComposedMessage {
+            from: vespetrel_core::Address {
+                name: Some("Alice".into()),
+                email: "alice@example.com".into(),
+            },
+            to: vec![vespetrel_core::Address {
+                name: None,
+                email: "bob@example.com".into(),
+            }],
+            cc: vec![],
+            bcc: vec![],
+            subject: "Persistent Outbox Test".into(),
+            body_text: "Checking durability".into(),
+            body_html: None,
+            in_reply_to: None,
+            references: vec![],
+            attachments: vec![],
+        };
+        let entry = OutboxEntry {
+            id: "out-1".into(),
+            account_id: acct.id.clone(),
+            composed_message: outbox_msg,
+            scheduled_at: 1000,
+            send_at: 1010,
+            is_cancelled: false,
+            attempts: 0,
+            last_error: None,
+        };
+        enqueue_outbox(&conn, &entry).unwrap();
+
+        // Check list_due_outbox before send_at
+        let due_early = list_due_outbox(&conn, 1005).unwrap();
+        assert_eq!(due_early.len(), 0);
+
+        // Check list_due_outbox at or after send_at
+        let due = list_due_outbox(&conn, 1015).unwrap();
+        assert_eq!(due.len(), 1);
+        assert_eq!(due[0].id, "out-1");
+        assert_eq!(due[0].composed_message.subject, "Persistent Outbox Test");
+
+        // Cancel outbox
+        let cancelled = cancel_outbox(&conn, "out-1").unwrap();
+        assert!(cancelled);
+        let due_after_cancel = list_due_outbox(&conn, 1015).unwrap();
+        assert_eq!(due_after_cancel.len(), 0);
+
+        // Delete outbox entry
+        delete_outbox_entry(&conn, "out-1").unwrap();
     }
 }

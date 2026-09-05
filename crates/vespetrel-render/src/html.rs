@@ -1,12 +1,21 @@
 use ammonia::Builder;
 use lol_html::{HtmlRewriter, Settings, element};
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct RewriteOptions {
     /// Block external images (rewrite src -> data-blocked-src)
     pub block_remote_images: bool,
     /// Rewrite cid: URIs to blob://
     pub rewrite_cid: bool,
+}
+
+impl Default for RewriteOptions {
+    fn default() -> Self {
+        Self {
+            block_remote_images: true,
+            rewrite_cid: true,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Default)]
@@ -22,6 +31,11 @@ pub fn sanitize(html: &str, opts: &SanitizeOptions) -> anyhow::Result<String> {
 }
 
 const MAX_HTML_INPUT_BYTES: usize = 10 * 1024 * 1024; // 10MB safety limit
+
+fn is_remote_url(url: &str) -> bool {
+    let trimmed = url.trim();
+    trimmed.starts_with("http://") || trimmed.starts_with("https://") || trimmed.starts_with("//")
+}
 
 fn is_tracking_pixel(el: &lol_html::html_content::Element) -> bool {
     let width = el.get_attribute("width").unwrap_or_default().to_lowercase();
@@ -66,7 +80,7 @@ fn rewrite_html(input: &str, opts: &RewriteOptions) -> anyhow::Result<String> {
                 Ok(())
             }
         ))
-        .append_element_content_handler(element!("img, source, video", |el| {
+        .append_element_content_handler(element!("img, source, video, audio, track", |el| {
             // Remove tracking pixels
             if is_tracking_pixel(el) {
                 el.remove();
@@ -76,23 +90,21 @@ fn rewrite_html(input: &str, opts: &RewriteOptions) -> anyhow::Result<String> {
                 if src.starts_with("cid:") && opts.rewrite_cid {
                     let cid = src.trim_start_matches("cid:");
                     el.set_attribute("src", &format!("blob://{cid}"))?;
-                } else if (src.starts_with("http://") || src.starts_with("https://"))
-                    && opts.block_remote_images
-                {
+                } else if is_remote_url(&src) && opts.block_remote_images {
                     el.set_attribute("data-blocked-src", &src)?;
                     el.remove_attribute("src");
                 }
             }
             if let Some(srcset) = el.get_attribute("srcset")
                 && opts.block_remote_images
-                && (srcset.contains("http://") || srcset.contains("https://"))
+                && (srcset.contains("http://") || srcset.contains("https://") || srcset.contains("//"))
             {
                 el.set_attribute("data-blocked-srcset", &srcset)?;
                 el.remove_attribute("srcset");
             }
             if let Some(poster) = el.get_attribute("poster")
                 && opts.block_remote_images
-                && (poster.starts_with("http://") || poster.starts_with("https://"))
+                && is_remote_url(&poster)
             {
                 el.set_attribute("data-blocked-poster", &poster)?;
                 el.remove_attribute("poster");
@@ -103,6 +115,23 @@ fn rewrite_html(input: &str, opts: &RewriteOptions) -> anyhow::Result<String> {
         .append_element_content_handler(element!("a", |el| {
             el.set_attribute("rel", "noopener noreferrer")?;
             el.set_attribute("target", "_blank")?;
+            if let Some(href) = el.get_attribute("href") {
+                let cleaned_href = crate::cleaner::clean_tracking_url(&href);
+                if cleaned_href != href {
+                    el.set_attribute("href", &cleaned_href)?;
+                }
+                let risk = crate::cleaner::analyze_phishing_risk(&cleaned_href, &cleaned_href);
+                match risk {
+                    crate::cleaner::PhishingRisk::Safe => {}
+                    crate::cleaner::PhishingRisk::DeceptiveDisplayDomain { .. }
+                    | crate::cleaner::PhishingRisk::RawIpAddress { .. }
+                    | crate::cleaner::PhishingRisk::PunycodeHomograph { .. }
+                    | crate::cleaner::PhishingRisk::UserInfoSpoofing { .. } => {
+                        el.set_attribute("data-phishing-risk", "flagged")?;
+                        el.set_attribute("title", "Warning: Suspicious destination link")?;
+                    }
+                }
+            }
             Ok(())
         }));
 
@@ -120,8 +149,9 @@ fn rewrite_html(input: &str, opts: &RewriteOptions) -> anyhow::Result<String> {
     Ok(s.to_string())
 }
 
-static CSS_URL_REGEX: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
-    regex::Regex::new(r#"(?i)url\s*\(\s*['"]?https?://[^'")]*['"]?\s*\)"#).expect("valid regex")
+static CSS_DANGEROUS_REGEX: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
+    regex::Regex::new(r#"(?i)(@import\s+[^;]+;?|expression\s*\([^)]*\)|javascript\s*:[^;]+|url\s*\(\s*['"]?(?:https?:|//|data:)[^'")]*['"]?\s*\))"#)
+        .expect("valid regex")
 });
 
 fn ammonia_clean(html: &str) -> String {
@@ -133,11 +163,14 @@ fn ammonia_clean(html: &str) -> String {
             "data-blocked-src",
             "data-blocked-srcset",
             "data-blocked-poster",
+            "data-phishing-risk",
         ])
         .add_url_schemes(["blob", "cid"]);
 
     let cleaned = builder.clean(html).to_string();
-    CSS_URL_REGEX.replace_all(&cleaned, "none").to_string()
+    CSS_DANGEROUS_REGEX
+        .replace_all(&cleaned, "/* blocked */")
+        .to_string()
 }
 
 /// Wrap sanitized email HTML into a full sandboxed HTML document with Content Security Policy (CSP)
@@ -151,7 +184,7 @@ pub fn render_sandboxed_document(clean_body: &str, dark_mode: bool) -> String {
 <html>
 <head>
     <meta charset="utf-8">
-    <meta http-equiv="Content-Security-Policy" content="default-src 'none'; img-src 'self' blob: data:; style-src 'unsafe-inline'; font-src 'self' data:; form-action 'none'; base-uri 'none';">
+    <meta http-equiv="Content-Security-Policy" content="default-src 'none'; img-src blob: data: cid:; style-src 'unsafe-inline'; font-src data:; form-action 'none'; base-uri 'none'; frame-src 'none'; object-src 'none'; script-src 'none';">
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <style>
         body {{

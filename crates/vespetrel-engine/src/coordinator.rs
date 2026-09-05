@@ -222,6 +222,128 @@ pub fn make_provider_with_token(
     }
 }
 
+#[derive(Debug, thiserror::Error)]
+pub enum AuthError {
+    #[error("Keyring entry missing or inaccessible: {0}")]
+    KeyringError(String),
+    #[error("OAuth token refresh failed for account {account_id}: {reason}")]
+    OAuthRefreshFailed { account_id: String, reason: String },
+    #[error("Missing authentication credentials for account {0}")]
+    MissingCredentials(String),
+}
+
+pub fn oauth_config_from_core(
+    cfg: &vespetrel_core::account::OAuthConfig,
+) -> vespetrel_crypto::OAuth2Config {
+    vespetrel_crypto::OAuth2Config {
+        client_id: cfg.client_id.clone(),
+        client_secret: None,
+        auth_url: cfg.auth_url.clone(),
+        token_url: cfg.token_url.clone(),
+        redirect_uri: cfg.redirect_uri.clone(),
+        scopes: cfg.scopes.clone(),
+    }
+}
+
+/// Resolves the auth token for an account, performing proactive OAuth2 token refresh
+/// if the token is expired or within 60s of expiring.
+pub async fn resolve_and_refresh_token(
+    account: &vespetrel_core::Account,
+    storage_pool: Option<&deadpool_sqlite::Pool>,
+) -> Result<String, AuthError> {
+    let now_ts = chrono::Utc::now().timestamp();
+    let is_expired = account
+        .auth_config
+        .expires_at
+        .map(|exp| now_ts >= exp - 60)
+        .unwrap_or(false);
+
+    if is_expired {
+        if let (Some(rk), Some(oauth_cfg)) = (
+            &account.auth_config.refresh_token_keyring_key,
+            &account.auth_config.oauth,
+        ) {
+            let rk_owned = rk.clone();
+            let refresh_token = tokio::task::spawn_blocking(move || {
+                keyring::Entry::new("vespetrel", &rk_owned)
+                    .and_then(|e| e.get_password())
+                    .ok()
+            })
+            .await
+            .unwrap_or(None);
+
+            if let Some(ref rt) = refresh_token {
+                let engine = vespetrel_crypto::OAuth2Engine::new(oauth_config_from_core(oauth_cfg));
+                match engine.refresh_access_token(rt).await {
+                    Ok(bundle) => {
+                        info!(account_id=%account.id, "successfully refreshed OAuth2 access token");
+                        let new_access = bundle.access_token.clone();
+                        let new_refresh = bundle.refresh_token.clone();
+                        let new_expires_at = now_ts + bundle.expires_in as i64;
+
+                        let ak_key = account
+                            .auth_config
+                            .keyring_key
+                            .clone()
+                            .unwrap_or_else(|| account.id.clone());
+                        let rk_key = rk.clone();
+                        let access_copy = new_access.clone();
+                        tokio::task::spawn_blocking(move || {
+                            if let Ok(entry) = keyring::Entry::new("vespetrel", &ak_key) {
+                                let _ = entry.set_password(&access_copy);
+                            }
+                            if let (Some(new_rt), rk) = (new_refresh, rk_key) {
+                                if let Ok(entry) = keyring::Entry::new("vespetrel", &rk) {
+                                    let _ = entry.set_password(&new_rt);
+                                }
+                            }
+                        })
+                        .await
+                        .map_err(|e| AuthError::KeyringError(e.to_string()))?;
+
+                        if let Some(pool) = storage_pool {
+                            if let Ok(conn) = pool.get().await {
+                                let mut updated = account.clone();
+                                updated.auth_config.expires_at = Some(new_expires_at);
+                                let _ = conn
+                                    .interact(move |c| {
+                                        vespetrel_storage::repo::upsert_account(c, &updated)
+                                    })
+                                    .await;
+                            }
+                        }
+
+                        return Ok(new_access);
+                    }
+                    Err(e) => {
+                        tracing::warn!(account_id=%account.id, error=%e, "OAuth2 proactive refresh failed, falling back to cached token");
+                    }
+                }
+            }
+        }
+    }
+
+    let key_to_lookup = account
+        .auth_config
+        .keyring_key
+        .clone()
+        .unwrap_or_else(|| account.id.clone());
+    let token = tokio::task::spawn_blocking(move || {
+        keyring::Entry::new("vespetrel", &key_to_lookup)
+            .and_then(|e| e.get_password())
+            .map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| AuthError::KeyringError(e.to_string()))?
+    .map_err(|e| AuthError::KeyringError(format!("Account {}: {e}", account.id)))?;
+
+    if token.is_empty() {
+        return Err(AuthError::MissingCredentials(account.id.clone()));
+    }
+
+    Ok(token)
+}
+
 /// Factory function to instantiate the concrete MailProvider implementation for an account.
 pub fn make_provider(account: &vespetrel_core::Account) -> Arc<dyn MailProvider> {
     let auth_token = if let Some(ref k) = account.auth_config.keyring_key {
@@ -237,24 +359,10 @@ pub fn make_provider(account: &vespetrel_core::Account) -> Arc<dyn MailProvider>
     make_provider_with_token(account, auth_token)
 }
 
-/// Async factory function to instantiate MailProvider, offloading keyring lookups
-/// to a blocking thread to avoid stalling the Tokio reactor.
+/// Async factory function to instantiate MailProvider, resolving and refreshing credentials
 pub async fn make_provider_async(account: &vespetrel_core::Account) -> Arc<dyn MailProvider> {
-    let keyring_key = account.auth_config.keyring_key.clone();
-    let account_id = account.id.clone();
-    let auth_token = tokio::task::spawn_blocking(move || {
-        if let Some(ref k) = keyring_key {
-            keyring::Entry::new("vespetrel", k)
-                .and_then(|e| e.get_password())
-                .unwrap_or_default()
-        } else {
-            keyring::Entry::new("vespetrel", &account_id)
-                .and_then(|e| e.get_password())
-                .unwrap_or_default()
-        }
-    })
-    .await
-    .unwrap_or_default();
-
+    let auth_token = resolve_and_refresh_token(account, None)
+        .await
+        .unwrap_or_default();
     make_provider_with_token(account, auth_token)
 }

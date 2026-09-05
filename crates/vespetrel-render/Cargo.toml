@@ -16,5 +16,7 @@ simdutf8 = { workspace = true }
 memchr = { workspace = true }
 ahash = { workspace = true }
 regex = { workspace = true }
+url = { workspace = true }
+urlencoding = { workspace = true }
 
 

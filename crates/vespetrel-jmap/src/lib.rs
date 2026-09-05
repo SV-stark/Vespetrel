@@ -8,11 +8,21 @@ use vespetrel_core::folder::Folder;
 use vespetrel_core::message::{ComposedMessage, Flag};
 use vespetrel_core::provider::{MailProvider, RemoteFolder, SyncDelta};
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct JmapConfig {
     pub base_url: String,
     pub username: String,
     pub access_token: String,
+}
+
+impl std::fmt::Debug for JmapConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("JmapConfig")
+            .field("base_url", &self.base_url)
+            .field("username", &self.username)
+            .field("access_token", &"[REDACTED]")
+            .finish()
+    }
 }
 
 impl JmapConfig {
@@ -27,6 +37,18 @@ impl JmapConfig {
             access_token: access_token.into(),
         }
     }
+}
+
+#[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
+pub struct JmapSession {
+    #[serde(rename = "apiUrl")]
+    pub api_url: String,
+    #[serde(rename = "downloadUrl")]
+    pub download_url: String,
+    #[serde(rename = "uploadUrl")]
+    pub upload_url: String,
+    #[serde(rename = "primaryAccounts")]
+    pub primary_accounts: Option<std::collections::HashMap<String, String>>,
 }
 
 pub struct JmapProvider {
@@ -45,6 +67,39 @@ impl JmapProvider {
 
     pub fn client(&self) -> &reqwest::Client {
         &self.http
+    }
+
+    /// RFC 8620 §2 JMAP session discovery via /.well-known/jmap
+    pub async fn discover_session(
+        &self,
+    ) -> Result<JmapSession, vespetrel_core::provider::ProviderError> {
+        let session_url = if self.config.base_url.contains("/.well-known/jmap")
+            || self.config.base_url.ends_with("/session")
+        {
+            self.config.base_url.clone()
+        } else {
+            format!(
+                "{}/.well-known/jmap",
+                self.config.base_url.trim_end_matches('/')
+            )
+        };
+
+        let resp = self
+            .http
+            .get(&session_url)
+            .bearer_auth(&self.config.access_token)
+            .send()
+            .await
+            .map_err(|e| vespetrel_core::provider::ProviderError::Protocol(e.to_string()))?;
+
+        let session = resp
+            .error_for_status()
+            .map_err(|e| vespetrel_core::provider::ProviderError::Protocol(e.to_string()))?
+            .json::<JmapSession>()
+            .await
+            .map_err(|e| vespetrel_core::provider::ProviderError::Protocol(e.to_string()))?;
+
+        Ok(session)
     }
 
     /// Build JMAP request body - single roundtrip multi-call §4.3
@@ -170,10 +225,7 @@ impl MailProvider for JmapProvider {
         &self,
     ) -> Result<Vec<RemoteFolder>, vespetrel_core::provider::ProviderError> {
         debug!(url=%self.config.base_url, "JMAP sync_folder_list");
-        if self.config.base_url.starts_with("http")
-            && !self.config.access_token.is_empty()
-            && !self.config.access_token.starts_with("mock_")
-        {
+        if self.config.base_url.starts_with("http") && !self.config.access_token.is_empty() {
             let req = self.build_get_mailboxes_request();
             let resp = self
                 .http
@@ -234,6 +286,155 @@ impl MailProvider for JmapProvider {
         debug!(folder=%folder.name, state=?state.jmap_state, "JMAP sync_messages");
         if self.config.base_url.starts_with("http") && !self.config.access_token.is_empty() {
             let mut delta = SyncDelta::default();
+
+            // If sinceState is present, attempt incremental Email/changes first per RFC 8621 §5.2
+            if let Some(since) = &state.jmap_state {
+                let changes_req = serde_json::json!({
+                    "using": ["urn:ietf:params:jmap:core", "urn:ietf:params:jmap:mail"],
+                    "methodCalls": [
+                        ["Email/changes", {
+                            "accountId": self.config.username,
+                            "sinceState": since,
+                            "maxChanges": 100
+                        }, "0"]
+                    ]
+                });
+
+                if let Ok(resp) = self
+                    .http
+                    .post(&self.config.base_url)
+                    .bearer_auth(&self.config.access_token)
+                    .json(&changes_req)
+                    .send()
+                    .await
+                {
+                    if let Ok(json) = resp.json::<serde_json::Value>().await {
+                        if let Some(res_obj) = json.pointer("/methodResponses/0/1") {
+                            if let Some(new_state) =
+                                res_obj.get("newState").and_then(|v| v.as_str())
+                            {
+                                delta.new_sync_state = SyncState {
+                                    jmap_state: Some(new_state.to_string()),
+                                    ..state.clone()
+                                };
+
+                                if let Some(destroyed) =
+                                    res_obj.get("destroyed").and_then(|v| v.as_array())
+                                {
+                                    for id in destroyed.iter().filter_map(|v| v.as_str()) {
+                                        delta
+                                            .deleted_uids
+                                            .push(vespetrel_core::stable_uid_from_id(id));
+                                    }
+                                }
+
+                                let created = res_obj
+                                    .get("created")
+                                    .and_then(|v| v.as_array())
+                                    .map(|a| a.as_slice())
+                                    .unwrap_or_default();
+                                let updated = res_obj
+                                    .get("updated")
+                                    .and_then(|v| v.as_array())
+                                    .map(|a| a.as_slice())
+                                    .unwrap_or_default();
+
+                                let ids_to_fetch: Vec<String> = created
+                                    .iter()
+                                    .chain(updated.iter())
+                                    .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                                    .collect();
+
+                                if !ids_to_fetch.is_empty() {
+                                    let fetch_req = serde_json::json!({
+                                        "using": ["urn:ietf:params:jmap:core", "urn:ietf:params:jmap:mail"],
+                                        "methodCalls": [
+                                            ["Email/get", {
+                                                "accountId": self.config.username,
+                                                "ids": ids_to_fetch,
+                                                "properties": ["id", "blobId", "threadId", "mailboxIds", "keywords", "size", "receivedAt", "from", "to", "subject", "preview"]
+                                            }, "0"]
+                                        ]
+                                    });
+
+                                    if let Ok(fetch_resp) = self
+                                        .http
+                                        .post(&self.config.base_url)
+                                        .bearer_auth(&self.config.access_token)
+                                        .json(&fetch_req)
+                                        .send()
+                                        .await
+                                    {
+                                        if let Ok(fjson) =
+                                            fetch_resp.json::<serde_json::Value>().await
+                                        {
+                                            if let Some(items) = fjson
+                                                .pointer("/methodResponses/0/1/list")
+                                                .and_then(|v| v.as_array())
+                                            {
+                                                for item in items {
+                                                    let id = item
+                                                        .get("id")
+                                                        .and_then(|v| v.as_str())
+                                                        .unwrap_or_default();
+                                                    let subject = item
+                                                        .get("subject")
+                                                        .and_then(|v| v.as_str())
+                                                        .unwrap_or("No Subject");
+                                                    let from = item
+                                                        .pointer("/from/0/email")
+                                                        .and_then(|v| v.as_str())
+                                                        .unwrap_or("sender@jmap.example");
+                                                    let date_str = chrono::Utc::now().to_rfc2822();
+                                                    let raw = format!("From: {from}\r\nTo: {}\r\nSubject: {subject}\r\nDate: {date_str}\r\nMessage-ID: <{id}@jmap.example>\r\nMIME-Version: 1.0\r\nContent-Type: text/plain; charset=utf-8\r\n\r\nJMAP Message Content", self.config.username).into_bytes();
+                                                    let mut flags = Vec::new();
+                                                    if let Some(keywords) = item
+                                                        .get("keywords")
+                                                        .and_then(|k| k.as_object())
+                                                    {
+                                                        if keywords.contains_key("$seen") {
+                                                            flags.push(vespetrel_core::Flag::Seen);
+                                                        }
+                                                        if keywords.contains_key("$flagged") {
+                                                            flags.push(
+                                                                vespetrel_core::Flag::Flagged,
+                                                            );
+                                                        }
+                                                        if keywords.contains_key("$draft") {
+                                                            flags.push(vespetrel_core::Flag::Draft);
+                                                        }
+                                                    }
+                                                    let remote_uid =
+                                                        vespetrel_core::stable_uid_from_id(id);
+                                                    let sync_msg =
+                                                        vespetrel_core::provider::SyncMessage {
+                                                            remote_uid,
+                                                            remote_id: Some(id.to_string()),
+                                                            flags,
+                                                            raw_rfc822: Some(raw),
+                                                            mod_seq: None,
+                                                        };
+                                                    if created
+                                                        .iter()
+                                                        .any(|v| v.as_str() == Some(id))
+                                                    {
+                                                        delta.inserted.push(sync_msg);
+                                                    } else {
+                                                        delta.updated.push(sync_msg);
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                                return Ok(delta);
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Initial or full fallback query via Email/query + Email/get
             let mut position = 0;
             let page_size = 50;
 
@@ -257,6 +458,16 @@ impl MailProvider for JmapProvider {
                     .map_err(|e| {
                         vespetrel_core::provider::ProviderError::Protocol(e.to_string())
                     })?;
+
+                if let Some(q_state) = json
+                    .pointer("/methodResponses/0/1/queryState")
+                    .and_then(|v| v.as_str())
+                {
+                    delta.new_sync_state = SyncState {
+                        jmap_state: Some(q_state.to_string()),
+                        ..state.clone()
+                    };
+                }
 
                 let list = json
                     .pointer("/methodResponses/1/1/list")
@@ -292,8 +503,9 @@ impl MailProvider for JmapProvider {
 
                         delta.inserted.push(vespetrel_core::provider::SyncMessage {
                             remote_uid,
-                            raw_rfc822: Some(raw),
+                            remote_id: Some(id.to_string()),
                             flags,
+                            raw_rfc822: Some(raw),
                             mod_seq: None,
                         });
                     }
@@ -363,10 +575,7 @@ impl MailProvider for JmapProvider {
         msg: &ComposedMessage,
     ) -> Result<(), vespetrel_core::provider::ProviderError> {
         info!(subject=%msg.subject, "JMAP EmailSubmission");
-        if self.config.base_url.starts_with("http")
-            && !self.config.access_token.is_empty()
-            && !self.config.access_token.starts_with("mock_")
-        {
+        if self.config.base_url.starts_with("http") && !self.config.access_token.is_empty() {
             let req = serde_json::json!({
                 "using": ["urn:ietf:params:jmap:core", "urn:ietf:params:jmap:mail", "urn:ietf:params:jmap:submission"],
                 "methodCalls": [
@@ -417,17 +626,14 @@ impl MailProvider for JmapProvider {
         Ok(())
     }
 
-    async fn update_flags(
+    async fn update_flags_by_remote_id(
         &self,
-        remote_ids: &[u32],
+        remote_ids: &[String],
         add: &[Flag],
         remove: &[Flag],
     ) -> Result<(), vespetrel_core::provider::ProviderError> {
-        debug!(uids=?remote_ids, add=?add, remove=?remove, "JMAP Email/set keywords");
-        if self.config.base_url.starts_with("http")
-            && !self.config.access_token.is_empty()
-            && !self.config.access_token.starts_with("mock_")
-        {
+        debug!(remote_ids=?remote_ids, add=?add, remove=?remove, "JMAP Email/set keywords by string ID");
+        if self.config.base_url.starts_with("http") && !self.config.access_token.is_empty() {
             let mut patch_map = serde_json::Map::new();
             if add.contains(&Flag::Seen) {
                 patch_map.insert("keywords/$seen".into(), serde_json::Value::Bool(true));
@@ -444,11 +650,8 @@ impl MailProvider for JmapProvider {
 
             if !patch_map.is_empty() {
                 let mut update_obj = serde_json::Map::new();
-                for uid in remote_ids {
-                    update_obj.insert(
-                        uid.to_string(),
-                        serde_json::Value::Object(patch_map.clone()),
-                    );
+                for id in remote_ids {
+                    update_obj.insert(id.clone(), serde_json::Value::Object(patch_map.clone()));
                 }
 
                 let req = serde_json::json!({
@@ -480,6 +683,16 @@ impl MailProvider for JmapProvider {
             }
         }
         Ok(())
+    }
+
+    async fn update_flags(
+        &self,
+        remote_ids: &[u32],
+        add: &[Flag],
+        remove: &[Flag],
+    ) -> Result<(), vespetrel_core::provider::ProviderError> {
+        let ids: Vec<String> = remote_ids.iter().map(|u| u.to_string()).collect();
+        self.update_flags_by_remote_id(&ids, add, remove).await
     }
 }
 

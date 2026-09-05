@@ -1,11 +1,21 @@
 //! Vespetrel DAV - CalDAV / CardDAV sync §4 PIM
 use tracing::debug;
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct DavConfig {
     pub base_url: String,
     pub username: String,
     pub password_or_token: String,
+}
+
+impl std::fmt::Debug for DavConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("DavConfig")
+            .field("base_url", &self.base_url)
+            .field("username", &self.username)
+            .field("password_or_token", &"[REDACTED]")
+            .finish()
+    }
 }
 
 impl DavConfig {
@@ -54,11 +64,10 @@ impl DavClient {
         let url = self.config.calendar_home();
         debug!(url=%url, "PROPFIND calendars");
 
-        if self.config.base_url.starts_with("http")
-            && !self.config.password_or_token.is_empty()
-            && let propfind_method =
-                reqwest::Method::from_bytes(b"PROPFIND").unwrap_or(reqwest::Method::POST)
-            && let Ok(resp) = self
+        if self.config.base_url.starts_with("http") && !self.config.password_or_token.is_empty() {
+            let propfind_method =
+                reqwest::Method::from_bytes(b"PROPFIND").unwrap_or(reqwest::Method::POST);
+            let resp = self
                 .http
                 .request(propfind_method, &url)
                 .basic_auth(&self.config.username, Some(&self.config.password_or_token))
@@ -66,21 +75,15 @@ impl DavClient {
                 .header("Content-Type", "application/xml; charset=utf-8")
                 .body(Self::build_propfind_xml())
                 .send()
-                .await
-            && let Ok(xml) = resp.text().await
-        {
+                .await?;
+
+            let xml = resp.error_for_status()?.text().await?;
             let mut calendars = Vec::new();
-            for block in xml.split("<D:response>") {
-                let name = block
-                    .split("<D:displayname>")
-                    .nth(1)
-                    .and_then(|s| s.split("</D:displayname>").next())
-                    .unwrap_or("");
-                let href = block
-                    .split("<D:href>")
-                    .nth(1)
-                    .and_then(|s| s.split("</D:href>").next())
-                    .unwrap_or("");
+            for block in find_xml_elements(&xml, "response") {
+                let name = find_first_xml_element(block, "displayname")
+                    .unwrap_or("")
+                    .trim();
+                let href = find_first_xml_element(block, "href").unwrap_or("").trim();
                 if !name.is_empty() {
                     calendars.push(RemoteCalendar {
                         id: href.trim_matches('/').to_string(),
@@ -89,9 +92,7 @@ impl DavClient {
                     });
                 }
             }
-            if !calendars.is_empty() {
-                return Ok(calendars);
-            }
+            return Ok(calendars);
         }
 
         #[cfg(any(test, feature = "mock"))]
@@ -117,46 +118,39 @@ impl DavClient {
         let url = format!("{}/{}", self.config.calendar_home(), calendar_id);
         debug!(calendar_id, token=?sync_token, "CalDAV sync-collection REPORT");
 
-        if self.config.base_url.starts_with("http")
-            && !self.config.password_or_token.is_empty()
-            && let report_method =
-                reqwest::Method::from_bytes(b"REPORT").unwrap_or(reqwest::Method::POST)
-            && let body = Self::build_sync_report_xml(sync_token)
-            && let Ok(resp) = self
+        if self.config.base_url.starts_with("http") && !self.config.password_or_token.is_empty() {
+            let report_method =
+                reqwest::Method::from_bytes(b"REPORT").unwrap_or(reqwest::Method::POST);
+            let body = Self::build_sync_report_xml(sync_token);
+            let resp = self
                 .http
                 .request(report_method, &url)
                 .basic_auth(&self.config.username, Some(&self.config.password_or_token))
                 .header("Content-Type", "application/xml; charset=utf-8")
                 .body(body)
                 .send()
-                .await
-            && let Ok(xml) = resp.text().await
-        {
+                .await?;
+
+            let xml = resp.error_for_status()?.text().await?;
             let mut events = Vec::new();
-            for block in xml.split("<D:response>") {
-                let ical = block
-                    .split("<C:calendar-data>")
-                    .nth(1)
-                    .and_then(|s| s.split("</C:calendar-data>").next())
-                    .unwrap_or("");
-                let href = block
-                    .split("<D:href>")
-                    .nth(1)
-                    .and_then(|s| s.split("</D:href>").next())
-                    .unwrap_or("");
+            for block in find_xml_elements(&xml, "response") {
+                let ical = find_first_xml_element(block, "calendar-data")
+                    .unwrap_or("")
+                    .trim();
+                let href = find_first_xml_element(block, "href").unwrap_or("").trim();
+                let etag = find_first_xml_element(block, "getetag")
+                    .unwrap_or("1")
+                    .trim()
+                    .trim_matches('"');
                 if !ical.is_empty() {
                     events.push(CalendarEventRaw {
                         href: href.to_string(),
-                        etag: "1".into(),
+                        etag: etag.to_string(),
                         ical: ical.to_string(),
                     });
                 }
             }
-            let new_tok = xml
-                .split("<D:sync-token>")
-                .nth(1)
-                .and_then(|s| s.split("</D:sync-token>").next())
-                .map(|s| s.to_string());
+            let new_tok = find_first_xml_element(&xml, "sync-token").map(|s| s.trim().to_string());
             return Ok(CalendarSyncResult {
                 events,
                 new_sync_token: new_tok.or_else(|| Some("sync-token-active".into())),
@@ -181,12 +175,11 @@ impl DavClient {
         let url = self.config.addressbook_home();
         debug!(url=%url, "CardDAV addressbook-query");
 
-        if self.config.base_url.starts_with("http")
-            && !self.config.password_or_token.is_empty()
-            && let report_method =
-                reqwest::Method::from_bytes(b"REPORT").unwrap_or(reqwest::Method::POST)
-            && let body = Self::build_carddav_query_xml()
-            && let Ok(resp) = self
+        if self.config.base_url.starts_with("http") && !self.config.password_or_token.is_empty() {
+            let report_method =
+                reqwest::Method::from_bytes(b"REPORT").unwrap_or(reqwest::Method::POST);
+            let body = Self::build_carddav_query_xml();
+            let resp = self
                 .http
                 .request(report_method, &url)
                 .basic_auth(&self.config.username, Some(&self.config.password_or_token))
@@ -194,25 +187,23 @@ impl DavClient {
                 .header("Content-Type", "application/xml; charset=utf-8")
                 .body(body)
                 .send()
-                .await
-            && let Ok(xml) = resp.text().await
-        {
+                .await?;
+
+            let xml = resp.error_for_status()?.text().await?;
             let mut contacts = Vec::new();
-            for block in xml.split("<D:response>") {
-                let vcard = block
-                    .split("<C:address-data>")
-                    .nth(1)
-                    .and_then(|s| s.split("</C:address-data>").next())
-                    .unwrap_or("");
-                let href = block
-                    .split("<D:href>")
-                    .nth(1)
-                    .and_then(|s| s.split("</D:href>").next())
-                    .unwrap_or("");
+            for block in find_xml_elements(&xml, "response") {
+                let vcard = find_first_xml_element(block, "address-data")
+                    .unwrap_or("")
+                    .trim();
+                let href = find_first_xml_element(block, "href").unwrap_or("").trim();
+                let etag = find_first_xml_element(block, "getetag")
+                    .unwrap_or("1")
+                    .trim()
+                    .trim_matches('"');
                 if !vcard.is_empty() {
                     contacts.push(RemoteContact {
                         href: href.trim_matches('/').to_string(),
-                        etag: "1".into(),
+                        etag: etag.to_string(),
                         vcard: vcard.to_string(),
                     });
                 }
@@ -220,7 +211,114 @@ impl DavClient {
             return Ok(contacts);
         }
 
-        Ok(vec![])
+        #[cfg(any(test, feature = "mock"))]
+        {
+            Ok(vec![])
+        }
+
+        #[cfg(not(any(test, feature = "mock")))]
+        {
+            anyhow::bail!(
+                "CardDAV list_contacts failed: server unreachable or invalid credentials"
+            );
+        }
+    }
+
+    /// Create or update a VEVENT on the CalDAV server via HTTP PUT
+    pub async fn create_or_update_event(
+        &self,
+        calendar_id: &str,
+        event_uid: &str,
+        ical_data: &str,
+    ) -> anyhow::Result<()> {
+        let url = format!(
+            "{}/{}/{}.ics",
+            self.config.calendar_home(),
+            calendar_id,
+            event_uid
+        );
+        debug!(url=%url, "CalDAV PUT event");
+
+        if self.config.base_url.starts_with("http") && !self.config.password_or_token.is_empty() {
+            let resp = self
+                .http
+                .put(&url)
+                .basic_auth(&self.config.username, Some(&self.config.password_or_token))
+                .header("Content-Type", "text/calendar; charset=utf-8")
+                .body(ical_data.to_string())
+                .send()
+                .await?;
+            resp.error_for_status()?;
+        }
+        Ok(())
+    }
+
+    /// Delete an event from the CalDAV server via HTTP DELETE
+    pub async fn delete_event(&self, calendar_id: &str, event_uid: &str) -> anyhow::Result<()> {
+        let url = format!(
+            "{}/{}/{}.ics",
+            self.config.calendar_home(),
+            calendar_id,
+            event_uid
+        );
+        debug!(url=%url, "CalDAV DELETE event");
+
+        if self.config.base_url.starts_with("http") && !self.config.password_or_token.is_empty() {
+            let resp = self
+                .http
+                .delete(&url)
+                .basic_auth(&self.config.username, Some(&self.config.password_or_token))
+                .send()
+                .await?;
+            if resp.status().is_client_error() && resp.status() == reqwest::StatusCode::NOT_FOUND {
+                return Ok(());
+            }
+            resp.error_for_status()?;
+        }
+        Ok(())
+    }
+
+    /// Create or update a VCARD on the CardDAV server via HTTP PUT
+    pub async fn create_or_update_contact(
+        &self,
+        contact_uid: &str,
+        vcard_data: &str,
+    ) -> anyhow::Result<()> {
+        let url = format!("{}/{}.vcf", self.config.addressbook_home(), contact_uid);
+        debug!(url=%url, "CardDAV PUT contact");
+
+        if self.config.base_url.starts_with("http") && !self.config.password_or_token.is_empty() {
+            let resp = self
+                .http
+                .put(&url)
+                .basic_auth(&self.config.username, Some(&self.config.password_or_token))
+                .header("Content-Type", "text/vcard; charset=utf-8")
+                .body(vcard_data.to_string())
+                .send()
+                .await?;
+            resp.error_for_status()?;
+        }
+        Ok(())
+    }
+
+    /// Delete a contact from the CardDAV server via HTTP DELETE
+    pub async fn delete_contact(&self, contact_uid: &str) -> anyhow::Result<()> {
+        let url = format!("{}/{}.vcf", self.config.addressbook_home(), contact_uid);
+        debug!(url=%url, "CardDAV DELETE contact");
+
+        if self.config.base_url.starts_with("http") && !self.config.password_or_token.is_empty() {
+            let resp = self
+                .http
+                .delete(&url)
+                .basic_auth(&self.config.username, Some(&self.config.password_or_token))
+                .send()
+                .await?;
+            if resp.status().is_client_error() && resp.status() == reqwest::StatusCode::NOT_FOUND {
+                return Ok(());
+            }
+            resp.error_for_status()?;
+        }
+        Ok(())
     }
 
     /// Build CardDAV addressbook-query XML
@@ -273,6 +371,72 @@ fn xml_escape(s: &str) -> String {
         .replace('>', "&gt;")
         .replace('"', "&quot;")
         .replace('\'', "&apos;")
+}
+
+/// Finds all occurrences of an XML element with the given local tag name (ignoring any namespace prefix).
+/// Returns the inner content of each matching element.
+pub fn find_xml_elements<'a>(xml: &'a str, local_name: &str) -> Vec<&'a str> {
+    let mut results = Vec::new();
+    let mut cursor = 0;
+    while cursor < xml.len() {
+        let start_bracket = match xml[cursor..].find('<') {
+            Some(pos) => cursor + pos,
+            None => break,
+        };
+        if xml[start_bracket..].starts_with("</")
+            || xml[start_bracket..].starts_with("<?")
+            || xml[start_bracket..].starts_with("<!")
+        {
+            cursor = start_bracket + 2;
+            continue;
+        }
+        let end_bracket = match xml[start_bracket..].find('>') {
+            Some(pos) => start_bracket + pos,
+            None => break,
+        };
+        let tag_header = xml[start_bracket + 1..end_bracket].trim();
+        let tag_ident = tag_header.split_whitespace().next().unwrap_or("");
+        let tag_local = tag_ident.split(':').last().unwrap_or(tag_ident);
+
+        if tag_local.eq_ignore_ascii_case(local_name) {
+            if tag_header.ends_with('/') {
+                results.push("");
+                cursor = end_bracket + 1;
+                continue;
+            }
+            let mut search_pos = end_bracket + 1;
+            let mut found = false;
+            while let Some(close_start) = xml[search_pos..].find("</") {
+                let abs_close_start = search_pos + close_start;
+                if let Some(close_end) = xml[abs_close_start..].find('>') {
+                    let abs_close_end = abs_close_start + close_end;
+                    let close_header = xml[abs_close_start + 2..abs_close_end].trim();
+                    let close_local = close_header.split(':').last().unwrap_or(close_header);
+                    if close_local.eq_ignore_ascii_case(local_name) {
+                        results.push(&xml[end_bracket + 1..abs_close_start]);
+                        cursor = abs_close_end + 1;
+                        found = true;
+                        break;
+                    } else {
+                        search_pos = abs_close_end + 1;
+                    }
+                } else {
+                    break;
+                }
+            }
+            if !found {
+                cursor = end_bracket + 1;
+            }
+        } else {
+            cursor = end_bracket + 1;
+        }
+    }
+    results
+}
+
+/// Extract first element's inner text by local name
+pub fn find_first_xml_element<'a>(xml: &'a str, local_name: &str) -> Option<&'a str> {
+    find_xml_elements(xml, local_name).into_iter().next()
 }
 
 #[derive(Debug, Clone)]
@@ -479,5 +643,42 @@ END:VCALENDAR"#;
         let report = DavClient::build_sync_report_xml(Some("tok-42"));
         assert!(report.contains("D:sync-collection"));
         assert!(report.contains("<D:sync-token>tok-42</D:sync-token>"));
+    }
+
+    #[test]
+    fn test_find_xml_elements_namespace_agnostic() {
+        let sample_xml = r#"<?xml version="1.0" encoding="utf-8"?>
+<multistatus xmlns="DAV:" xmlns:C="urn:ietf:params:xml:ns:caldav">
+  <response>
+    <href>/calendars/user/work/</href>
+    <propstat>
+      <prop>
+        <displayname>Work Calendar</displayname>
+        <C:calendar-data>BEGIN:VCALENDAR...</C:calendar-data>
+        <getetag>"etag-12345"</getetag>
+      </prop>
+      <status>HTTP/1.1 200 OK</status>
+    </propstat>
+  </response>
+  <D:response xmlns:D="DAV:">
+    <D:href>/calendars/user/home/</D:href>
+    <D:displayname>Home</D:displayname>
+  </D:response>
+</multistatus>"#;
+
+        let responses = find_xml_elements(sample_xml, "response");
+        assert_eq!(responses.len(), 2);
+
+        let href0 = find_first_xml_element(responses[0], "href").unwrap();
+        assert_eq!(href0, "/calendars/user/work/");
+        let name0 = find_first_xml_element(responses[0], "displayname").unwrap();
+        assert_eq!(name0, "Work Calendar");
+        let cal_data = find_first_xml_element(responses[0], "calendar-data").unwrap();
+        assert_eq!(cal_data, "BEGIN:VCALENDAR...");
+
+        let href1 = find_first_xml_element(responses[1], "href").unwrap();
+        assert_eq!(href1, "/calendars/user/home/");
+        let name1 = find_first_xml_element(responses[1], "displayname").unwrap();
+        assert_eq!(name1, "Home");
     }
 }
