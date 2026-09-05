@@ -110,14 +110,13 @@ impl MailProvider for ImapProvider {
             }
             let vanished = crate::client::parse_vanished_line(sl);
             delta.deleted_uids.extend(vanished);
-            if sl.contains(" EXPUNGE") {
-                if let Some(seq) = sl
+            if sl.contains(" EXPUNGE")
+                && let Some(seq) = sl
                     .split_whitespace()
                     .nth(1)
                     .and_then(|s| s.parse::<u32>().ok())
-                {
-                    delta.deleted_uids.push(seq);
-                }
+            {
+                delta.deleted_uids.push(seq);
             }
         }
 
@@ -172,14 +171,13 @@ impl MailProvider for ImapProvider {
             }
             let vanished = crate::client::parse_vanished_line(line);
             delta.deleted_uids.extend(vanished);
-            if line.contains(" EXPUNGE") {
-                if let Some(seq) = line
+            if line.contains(" EXPUNGE")
+                && let Some(seq) = line
                     .split_whitespace()
                     .nth(1)
                     .and_then(|s| s.parse::<u32>().ok())
-                {
-                    delta.deleted_uids.push(seq);
-                }
+            {
+                delta.deleted_uids.push(seq);
             }
         }
 

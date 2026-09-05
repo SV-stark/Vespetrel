@@ -1,5 +1,7 @@
 use vespetrel_core::message::Address;
-use vespetrel_render::{RewriteOptions, SanitizeOptions, sanitize};
+use vespetrel_render::{
+    PhishingRisk, RewriteOptions, SanitizeOptions, sanitize, scan_content_for_phishing,
+};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SecurityStatus {
@@ -31,6 +33,7 @@ pub struct MessageViewer {
     pub security_status: SecurityStatus,
     pub block_remote_images: bool,
     pub attachments: Vec<AttachmentInfo>,
+    pub phishing_warning: Option<String>,
 }
 
 impl MessageViewer {
@@ -47,6 +50,7 @@ impl MessageViewer {
             security_status: SecurityStatus::Unencrypted,
             block_remote_images: true,
             attachments: Vec::new(),
+            phishing_warning: None,
         }
     }
 
@@ -54,6 +58,7 @@ impl MessageViewer {
         let html = html.into();
         self.raw_html = Some(html.clone());
         self.block_remote_images = block_remote;
+        self.check_phishing(&html);
         self.re_sanitize();
     }
 
@@ -75,10 +80,43 @@ impl MessageViewer {
     }
 
     pub fn load_text(&mut self, text: impl Into<String>) {
-        self.plain_text = Some(text.into());
+        let t = text.into();
+        self.check_phishing(&t);
+        self.plain_text = Some(t);
         // Plaintext rendered as native GPUI Markdown, not via wry
         self.raw_html = None;
         self.sanitized_html = None;
+    }
+
+    fn check_phishing(&mut self, content: &str) {
+        if let Some(risk) = scan_content_for_phishing(content) {
+            let msg = match risk {
+                PhishingRisk::DeceptiveDisplayDomain {
+                    display_domain,
+                    target_domain,
+                } => format!(
+                    "Deceptive link detected: Text displays \"{display_domain}\" but links to \"{target_domain}\"."
+                ),
+                PhishingRisk::RawIpAddress { ip } => {
+                    format!("Suspicious raw IP address detected in link target: \"{ip}\".")
+                }
+                PhishingRisk::PunycodeHomograph { domain } => {
+                    format!("Homograph / Punycode spoofing detected in domain: \"{domain}\".")
+                }
+                PhishingRisk::UserInfoSpoofing {
+                    user_info,
+                    target_domain,
+                } => {
+                    format!(
+                        "Deceptive URL with userinfo spoofing \"{user_info}\" targeting \"{target_domain}\"."
+                    )
+                }
+                PhishingRisk::Safe => String::new(),
+            };
+            self.phishing_warning = if msg.is_empty() { None } else { Some(msg) };
+        } else {
+            self.phishing_warning = None;
+        }
     }
 
     pub fn rendered(&self) -> String {

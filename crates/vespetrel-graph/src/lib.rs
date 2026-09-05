@@ -332,9 +332,20 @@ impl MailProvider for GraphProvider {
 
                         let subject = item.get("subject").and_then(|s| s.as_str()).unwrap_or("");
                         let body_preview = item
-                            .get("bodyPreview")
+                            .pointer("/body/content")
                             .and_then(|s| s.as_str())
+                            .or_else(|| item.get("bodyPreview").and_then(|s| s.as_str()))
                             .unwrap_or("");
+                        let is_html = item
+                            .pointer("/body/contentType")
+                            .and_then(|s| s.as_str())
+                            .map(|t| t.eq_ignore_ascii_case("html"))
+                            .unwrap_or(false);
+                        let content_type = if is_html {
+                            "Content-Type: text/html; charset=utf-8"
+                        } else {
+                            "Content-Type: text/plain; charset=utf-8"
+                        };
                         let sender = item
                             .pointer("/from/emailAddress/address")
                             .and_then(|s| s.as_str())
@@ -350,7 +361,7 @@ impl MailProvider for GraphProvider {
                         };
 
                         let mime_data = format!(
-                            "From: {sender}\r\nTo: me@example.com\r\nSubject: {subject}\r\n{date_hdr}Message-ID: <{id}@graph.microsoft.com>\r\nMIME-Version: 1.0\r\nContent-Type: text/plain; charset=utf-8\r\n\r\n{body_preview}"
+                            "From: {sender}\r\nTo: me@example.com\r\nSubject: {subject}\r\n{date_hdr}Message-ID: <{id}@graph.microsoft.com>\r\nMIME-Version: 1.0\r\n{content_type}\r\n\r\n{body_preview}"
                         )
                         .into_bytes();
 

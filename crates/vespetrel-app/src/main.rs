@@ -141,20 +141,20 @@ async fn main() -> anyhow::Result<()> {
     let storage_pool = app.create_storage_pool().ok();
 
     // Verify SQLite database integrity (quick_check)
-    if let Some(ref pool) = storage_pool {
-        if let Ok(conn) = pool.get().await {
-            let _ = conn
-                .interact(|c| {
-                    let integrity: Result<String, _> =
-                        c.query_row("PRAGMA quick_check(1);", [], |r| r.get(0));
-                    if let Ok(status) = integrity {
-                        if status != "ok" {
-                            tracing::warn!("SQLite integrity check warning: {status}");
-                        }
-                    }
-                })
-                .await;
-        }
+    if let Some(ref pool) = storage_pool
+        && let Ok(conn) = pool.get().await
+    {
+        let _ = conn
+            .interact(|c| {
+                let integrity: Result<String, _> =
+                    c.query_row("PRAGMA quick_check(1);", [], |r| r.get(0));
+                if let Ok(status) = integrity
+                    && status != "ok"
+                {
+                    tracing::warn!("SQLite integrity check warning: {status}");
+                }
+            })
+            .await;
     }
     let blob_dir = if db_path == ":memory:" {
         let p = std::env::temp_dir().join(format!("vespetrel_blobs_{}", uuid::Uuid::new_v4()));

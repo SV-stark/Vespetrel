@@ -6,7 +6,7 @@
 **Thunderbird Feature Parity • Sub-15ms Search • Sub-50MB Memory • GPU-Native UI**
 
 [![Rust](https://img.shields.io/badge/rust-stable-brightgreen.svg?style=flat-square&logo=rust)](https://www.rust-lang.org)
-[![GPUI](https://img.shields.io/badge/GUI-GPUI%20(Zed)-blueviolet.svg?style=flat-square)](https://github.com/zed-industries/zed)
+[![GPUI](https://img.shields.io/badge/GUI-gpui--kit%200.6.0-blueviolet.svg?style=flat-square)](https://crates.io/crates/gpui-kit)
 [![License: MIT OR Apache-2.0](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg?style=flat-square)](LICENSE)
 [![Nightly](https://img.shields.io/github/v/release/SV-stark/Vespetrel?include_prereleases&label=Windows%20Nightly&logo=windows&color=blue)](https://github.com/SV-stark/Vespetrel/releases/tag/nightly)
 [![Search](https://img.shields.io/badge/search-SQLite%20FTS5%20(BM25)-orange.svg?style=flat-square)](https://www.sqlite.org/fts5.html)
@@ -23,24 +23,27 @@
 
 Modern desktop email clients are almost universally trapped in web runtimes (Electron, Gecko, Chromium) that consume gigabytes of memory, introduce sluggish typing latency, and struggle when searching 50k+ local mailboxes.
 
-**Vespetrel** is built from the ground up in **100% memory-safe Rust** utilizing Zed's **`gpui`** framework. It directly renders UI elements on the GPU via Metal, Vulkan, and Direct3D at silky **120+ FPS**, maintaining an idle footprint under **50MB** while matching Thunderbird's complete feature suite: **Email + Calendars (CalDAV) + Contacts (CardDAV) + OpenPGP/S-MIME encryption + Instant Global Search**.
+**Vespetrel** is built from the ground up in **100% memory-safe Rust** utilizing **`gpui-kit 0.6.0`** (standard `Root` / `init` / `component::input` layers). It directly renders UI elements on the GPU via Metal, Vulkan, and Direct3D at silky **120+ FPS**, maintaining an idle footprint under **50MB** while matching Thunderbird's complete feature suite: **Email + Calendars (CalDAV) + Contacts (CardDAV) + OpenPGP/S-MIME encryption + Instant Global Search**.
 
 ```
 ┌────────────────────────────────────────────────────────────────────────────────────────────┐
 │                                   VESPETREL ARCHITECTURE                                   │
 │                                                                                            │
 │  ┌──────────────────────────────────────────────────────────────────────────────────────┐  │
-│  │ GPUI FRONTEND (GPU Metal / Vulkan / DirectX @ 120 FPS)                               │  │
+│  │ GPUI-KIT 0.6.0 FRONTEND (GPU Metal / Vulkan / DirectX @ 120 FPS)                  │  │
 │  │ • 3-Pane Dock Layout (Folders, Virtual Thread List, Message Viewer)                  │  │
+│  │ • Interactive Setup Wizard (Input/InputState, masked password + eye toggle)         │  │
 │  │ • Tree-sitter Rich Markdown/Plaintext Editor (<2ms keypress latency)                 │  │
 │  │ • Virtualized scrolling capable of fluidly displaying 200,000+ emails               │  │
 │  └───────────────────────────────────────────┬──────────────────────────────────────────┘  │
-│                                              │ Async Event Bus (Tokio mpsc / cx.spawn)     │
+│                                              │ Async Event Bus (flume bridge Tokio → GPUI)   │
 │                                              ▼                                             │
 │  ┌──────────────────────────────────────────────────────────────────────────────────────┐  │
 │  │ TOKIO ASYNC SYNC CORE                                                                │  │
 │  │ • Isolated Account Actors (IMAP IDLE, QRESYNC, CONDSTORE, JMAP RFC 8620/8621)        │  │
 │  │ • Microsoft Graph REST Engine (Corporate Exchange Online Parity)                     │  │
+│  │ • Persistent SQLite Outbox (retry backoff + scheduled send + graceful shutdown)      │  │
+│  │ • OAuth2 PKCE Browser Flow (127.0.0.1:0 loopback, CSRF + Host validation)           │  │
 │  │ • PIM Engine (libdav + icalendar + vcard4 CalDAV/CardDAV)                           │  │
 │  │ • Security: rPGP (OpenPGP RFC 9580 v6) + RustCrypto S/MIME + OS Keyring              │  │
 │  └───────────────────────────────────────────┬──────────────────────────────────────────┘  │
@@ -48,8 +51,9 @@ Modern desktop email clients are almost universally trapped in web runtimes (Ele
 │                                              ▼                                             │
 │  ┌──────────────────────────────────────────────────────────────────────────────────────┐  │
 │  │ LOCAL STORAGE & BM25 SEARCH                                                          │  │
-│  │ • Rusqlite in WAL Mode + Memory-Mapped I/O                                           │  │
-│  │ • SQLite FTS5 (unicode61 tokenizers) for sub-15ms search across 200k mails           │  │
+│  │ • Rusqlite in WAL Mode + Memory-Mapped I/O (quick_check verified)                   │  │
+│  │ • SQLite FTS5 (unicode61 remove_diacritics) for sub-15ms search across 200k mails    │  │
+│  │ • Moka TinyLFU Cache + ArcSwap lock-free UI state for 120 FPS rendering             │  │
 │  │ • Compressed Raw RFC822 Blob Store (lz4 / zstd) for offline resilience               │  │
 │  └──────────────────────────────────────────────────────────────────────────────────────┘  │
 └────────────────────────────────────────────────────────────────────────────────────────────┘
@@ -63,7 +67,7 @@ Modern desktop email clients are almost universally trapped in web runtimes (Ele
 |---|---|---|---|
 | **Cold Startup Time** | ~2.5s – 5.0s | ~3.0s – 6.0s | **< 200ms** |
 | **Idle Memory (RAM)** | 500MB – 1.2GB | 600MB – 1.5GB | **~35MB – 65MB (`mimalloc`)** |
-| **Rendering Framework** | Gecko (HTML/XUL/JS) | Chromium / DOM | **GPUI (Direct GPU Shader Pipeline @ 120 FPS)** |
+| **Rendering Framework** | Gecko (HTML/XUL/JS) | Chromium / DOM | **gpui-kit 0.6.0 (Direct GPU Shader Pipeline @ 120 FPS)** |
 | **Typing Latency** | 20ms – 40ms | 15ms – 30ms | **< 2ms (Tree-sitter GPU quads)** |
 | **Search (100k Emails)** | 2.5s – 8.0s (Gloda) | Cloud-dependent | **< 15ms (Local SQLite FTS5 BM25 + SIMD)** |
 | **Large Mailbox List** | Micro-stutters on large folders | DOM virtualization jitter | **GPU-accelerated native list (Direct GPU shader pipeline)** |
@@ -115,6 +119,12 @@ Vespetrel natively abstracts differences between modern and legacy email protoco
 
 ---
 
+### 🧙 Interactive Setup Wizard & Dual Gmail Auth
+* **New Mail Setup Wizard**: Real `gpui-kit` `Input`/`InputState` fields for Email Address, Display Name, Password / App Password, Incoming Server & Port, and Outgoing Server & Port, with masked password + show/hide eye toggle and quick preset chips (Personal / Work / Team).
+* **OAuth2 Browser Redirect (PKCE)**: Ephemeral loopback listener on `127.0.0.1:0`, SHA-256 code challenge + CSRF state, strict Host-header check (DNS-rebinding guard), system-browser consent (`accounts.google.com` / `login.microsoftonline.com`), friendly HTML confirmation page, and automatic OpenID userinfo discovery to fill email/display name.
+* **Dual Gmail Modes**: `🌐 Browser OAuth2` one-click web auth with token exchange + OS keyring storage, or `🔑 App Password (IMAP)` direct `imap.gmail.com:993` / `smtp.gmail.com:587` with contextual hint to `myaccount.google.com/apppasswords`.
+* **Persistent Outbox & Token Refresh**: Disk-backed SQLite outbox with retry backoff, scheduled-send support, background worker with graceful shutdown + `flume` wake triggers; proactive OAuth2 refresh 60s before expiry with cached-credential fallback.
+
 ### 🎨 7-Pillar Customization & Betterbird Parity
 * **Diacritic-Insensitive Quick Filter**: Sub-millisecond search across active folder lists with automatic accent folding (`é, à, ö, ü, ñ, ç, ß` → ASCII) and full `/regex/` pattern evaluation.
 * **Multi-Template HTML Signatures**: Visual designer generating email-safe responsive HTML signatures across 4 templates (*Modern*, *Minimal*, *Corporate*, *Creative*) with avatars, social badges, and per-account assignment.
@@ -123,15 +133,16 @@ Vespetrel natively abstracts differences between modern and legacy email protoco
 * **7-Pillar Settings Engine**: Comprehensive GUI preferences modal controlling Layout, Themes (Dark/Light/OLED Black), Typography, Triaging, Composer, Keyboard Shortcuts, and Privacy/Security.
 
 ### 📬 Complete Mail Engine
-* **Protocol Diversity**: Full support for standard **IMAP4rev2** (`IDLE`, `CONDSTORE`, `QRESYNC`, `SPECIAL-USE`), modern **JMAP** (RFC 8620/8621), and **Microsoft Graph REST** (for corporate Microsoft 365 environments where IMAP is disabled).
+* **Protocol Diversity**: Full support for standard **IMAP4rev2** (`IDLE`, `CONDSTORE`, `QRESYNC`, `SPECIAL-USE` with `VANISHED (EARLIER)` / `EXPUNGE` propagation and incremental UID sync), modern **JMAP** (RFC 8620/8621), and **Microsoft Graph REST** (for corporate Microsoft 365 environments where IMAP is disabled).
 * **MIME Parsing**: Powered by `mail-parser` for zero-copy string slicing (`Cow<str>`), streaming attachments, and robust decoding of 41 legacy character sets.
-* **OAuth2 with PKCE**: Built-in graphical authorization with loopback TCP callbacks (`127.0.0.1:0`), packet-split hardening, automated token rotation, and credential storage in the OS credential manager (`keyring-rs`).
-* **SMTP & Delivery**: High-throughput transmission via `lettre` with automated DKIM signing and Autocrypt 1.1 header injection.
+* **OAuth2 with PKCE**: Built-in graphical authorization with ephemeral loopback callbacks (`127.0.0.1:0`), SHA-256 challenge + CSRF/Host validation, automated token rotation (60s proactive refresh), and credential storage in the OS credential manager (`keyring-rs` v4, non-blocking `spawn_blocking` load).
+* **SMTP & Delivery**: High-throughput transmission via `lettre` with `send_live` + XOAUTH2, automated DKIM signing (`aws-lc-rs`, RFC 6376 relaxed/relaxed) and Autocrypt 1.1 header injection. Outbound mail queues in the persistent SQLite outbox.
 
 ### 🛡️ Security & Privacy First
 * **Tracker Shield**: Real-time streaming HTML rewriter (`lol_html`) strips remote tracking pixels (1x1 transparent GIFs), tracking URL queries, and un-sanitized script/form tags.
-* **Remote Content Blocker**: Remote images, styles, `srcset`, and `poster` attributes are blocked by default until explicitly trusted per sender.
-* **End-to-End Encryption**: Pure Rust **`rPGP`** implementation supporting OpenPGP RFC 9580 (v6 keys & AEAD) and Autocrypt 1.1 key exchange, alongside `RustCrypto` S/MIME X.509 DER validation.
+* **Remote Content Blocker**: Remote images, styles, `srcset`, and `poster` attributes are blocked by default until explicitly trusted per sender. Strict CSP + CID rewrite in the sandboxed viewport.
+* **End-to-End Encryption**: Pure Rust **`rPGP`** implementation supporting OpenPGP RFC 9580 (v6 keys & AEAD, PGP/MIME verified, no mock fallback) and Autocrypt 1.1 key exchange, alongside `RustCrypto` S/MIME X.509 DER validation (strict PKCS/CMS OID + ASN.1, `smime-verify` gated decrypt).
+* **Hardening**: Deterministic FNV-1a `stable_uid_from_id` (no restart collisions), symlink-traversal guard + corrupt-account quarantine + transactional signatures, 16MB IMAP response cap with zero-alloc fetch parsing, `webpki-roots` TLS, `cargo-deny` supply-chain audit (`openssl-sys` banned, unknown registries denied).
 
 ### 📅 Integrated PIM (Calendar, Contacts & Tasks)
 * **CalDAV**: Direct two-way sync with Google Calendar, Nextcloud, Fastmail, and Apple iCloud via `libdav` and `icalendar` (RFC 5545).
@@ -146,22 +157,22 @@ Vespetrel is architected as a highly modular Cargo workspace:
 
 ```
 vespetrel/
-├── Cargo.toml                  # Workspace manifest & shared dependencies
+├── Cargo.toml                  # Workspace manifest & shared dependencies (gpui-kit 0.6.0, aws-lc-rs)
 ├── rust-toolchain.toml         # Pinned stable Rust toolchain
-├── packaging/                  # Multi-OS packaging descriptors (.iss, .manifest, .desktop, Info.plist)
-├── .github/workflows/          # Cross-platform CI matrix & automated release build workflow
+├── packaging/                  # Native packaging: windows/ (.nsi + manifest), linux/ (.desktop), macos/ (Info.plist)
+├── .github/workflows/          # CI matrix (fmt + clippy + test + release build + headless verify + cargo-deny audit) & nightly release
 ├── crates/
-│   ├── vespetrel-app/          # GPUI application entrypoint, dock layout, virtual lists, settings & UI
-│   ├── vespetrel-core/         # Domain models (Account, Message, Settings, HTML Signatures, Thread, Contact)
-│   ├── vespetrel-storage/      # Rusqlite WAL storage, FTS5 BM25 search, Moka cache & LZ4/Zstd blob store
-│   ├── vespetrel-engine/       # Tokio sync coordinator, account worker actors & Flume event bridge
+│   ├── vespetrel-app/          # gpui-kit entrypoint, dock layout, virtual lists, login wizard modal, settings & UI
+│   ├── vespetrel-core/         # Domain models (Account, Message, Settings, HTML Signatures, Thread, Contact) + stable_uid
+│   ├── vespetrel-storage/      # Rusqlite WAL storage, FTS5 BM25 search, Moka cache, LZ4/Zstd blob store, outbox tables
+│   ├── vespetrel-engine/       # Tokio sync coordinator, account worker actors, persistent outbox & Flume event bridge
 │   ├── vespetrel-imap/         # IMAP client actor with IDLE, CONDSTORE, QRESYNC & XOAUTH2
 │   ├── vespetrel-jmap/         # JMAP client adapter (RFC 8620/8621)
 │   ├── vespetrel-graph/        # Microsoft Graph REST client for Exchange Online
 │   ├── vespetrel-smtp/         # Lettre submission engine with DKIM & Autocrypt
 │   ├── vespetrel-dav/          # CalDAV / CardDAV sync engine via libdav, icalendar & vcard4
 │   ├── vespetrel-crypto/       # rPGP OpenPGP (RFC 9580), S/MIME, Autocrypt 1.1 & OS keyring
-│   └── vespetrel-render/       # SIMD UTF-8 HTML sanitization (ammonia, lol_html) & anti-phishing
+│   └── vespetrel-render/       # SIMD UTF-8 HTML sanitization (ammonia, lol_html), auth badges, MDN, cleaner & anti-phishing
 ```
 
 
@@ -170,10 +181,10 @@ vespetrel/
 ## 🛠️ Getting Started
 
 ### Prerequisites
-* **Rust**: Pinned stable toolchain (1.85+ / 2024 edition) via `rustup`.
+* **Rust**: Pinned stable toolchain (1.85+ / 2024 edition) via `rustup` (+ `rustfmt`, `clippy` components for CI).
 * **C Compiler / Build Tools**:
   * **macOS**: Xcode Command Line Tools (`xcode-select --install`)
-  * **Linux**: `libx11-dev`, `libwayland-dev`, `libxkbcommon-dev`, `libvulkan-dev`
+  * **Linux**: `libkeyutils-dev libdbus-1-dev pkg-config libssl-dev libfontconfig1-dev libxkbcommon-dev libxkbcommon-x11-dev libxcb1-dev libxcb-shape0-dev libxcb-xfixes0-dev libxcb-render0-dev` (required by `gpui-kit` + `keyring` — see `.github/workflows/ci.yml`)
   * **Windows**: Visual Studio 2022 C++ Build Tools
 
 ### 📥 Downloads (Windows Nightly)
@@ -212,7 +223,19 @@ cargo build --release --workspace
 
 # Launch Vespetrel desktop client in headless validation mode
 cargo run --package vespetrel-app -- --memory
+
+# Headless startup check (CI verify) / custom DB / verbose logging
+cargo run --release -p vespetrel-app --bin vespetrel -- --memory
+cargo run --package vespetrel-app -- --db "C:\Users\you\AppData\Local\Vespetrel\vespetrel.db"
+cargo run --package vespetrel-app -- --headless
+cargo run --package vespetrel-app -- --verbose
 ```
+
+Default database locations: `%LOCALAPPDATA%\Vespetrel\vespetrel.db` (Windows) or `~/.local/share/vespetrel/vespetrel.db` (macOS/Linux); blobs live in a sibling `blobs/` dir (temp dir for `:memory:`).
+
+Other flags: `--cli` / `--gui` to force console vs `gpui-kit` GUI, `--batch` (headless alias), `--version`, `--help`.
+
+Interactive console commands once launched: `list`/`inbox`, `read <ID>`, `compose`, `folders`, `search <QUERY>` (FTS5 + in-memory fallback), `sync`, `settings`, `theme`, `clear`, `help`, `quit`.
 
 ---
 
@@ -226,7 +249,7 @@ cargo run --package vespetrel-app -- --memory
   - [x] Zero-copy MIME parser (`mail-parser`) & compressed raw message store (`lz4_flex` + `zstd`)
   - [x] Real-time HTML sanitizer (`ammonia`), tracking pixel stripper (`lol_html`), and sandboxed CSP document generator
 
-- [x] **P1: GPUI 3-Pane Shell & Message Reader (COMPLETE)**
+- [x] **P1: gpui-kit 3-Pane Shell & Message Reader (COMPLETE)**
   - [x] 3-Pane dock state model & view logic (`vespetrel-app`)
   - [x] Sandboxed HTML viewport with Content-Security-Policy generator
   - [x] Zero-allocation SIMD search filter with `memchr` and `ahash`
@@ -260,9 +283,9 @@ cargo run --package vespetrel-app -- --memory
   - [x] Hardware SIMD accelerations (`simdutf8`, `memchr`, `ahash`)
   - [x] `mimalloc` global allocator integration (-40% RAM fragmentation)
   - [x] Bounded in-memory TinyLFU cache (`moka`) & zero-copy byte slicing (`bytes`)
-  - [x] Lock-free `ArcSwap` shared UI state for 120 FPS GPUI rendering
-  - [x] Native OS packaging scripts (NSIS `.nsi`, Windows manifest, Linux `.desktop`, macOS `Info.plist`)
-  - [x] GitHub Actions multi-platform CI matrix workflow (`.github/workflows/ci.yml`)
+  - [x] Lock-free `ArcSwap` shared UI state for 120 FPS `gpui-kit` rendering
+  - [x] Native OS packaging (`packaging/windows/*.nsi` + manifest, `packaging/linux/*.desktop`, `packaging/macos/Info.plist`)
+  - [x] GitHub Actions multi-platform CI matrix + nightly release (`.github/workflows/ci.yml`, `release.yml`)
 
 - [x] **P5: Power-User Capabilities, Interoperability & Migration (COMPLETE)**
   - [x] **1-Click Thunderbird & Apple Mail Migrator**: Direct import from `~/.thunderbird/` profile directories (`profiles.ini`, `prefs.js`, `ImapMail/`, `Mail/Local Folders/`, `abook.sqlite`, `mbox`, and `maildir` files)
@@ -296,6 +319,16 @@ cargo run --package vespetrel-app -- --memory
   - [x] **Command Palette (`Ctrl+K` / `Cmd+K` Superhuman Action Switcher)**: Instant fuzzy-finder action switcher for commands, folders, and compose actions.
   - [x] **Reusable Email Snippets & Templates with Variables**: Pre-saved response templates with `{{name}}`, `{{company}}`, `{{email}}` placeholder interpolation.
 
+- [ ] **P8: Unreleased — Interactive Setup, Outbox & Hardening (IN PROGRESS, see `CHANGELOG.md`)**
+  - [x] **Interactive Setup Wizard**: `gpui-kit` `Input`/`InputState` fields, masked password + eye toggle, Personal/Work/Team presets
+  - [x] **OAuth2 Browser Flow (PKCE)**: `127.0.0.1:0` loopback, SHA-256 challenge + CSRF/Host checks, browser consent, HTML confirmation, OpenID userinfo discovery, OS keyring storage
+  - [x] **Dual Gmail Auth**: `Browser OAuth2` vs `App Password (IMAP)` (`imap.gmail.com:993` / `smtp.gmail.com:587`)
+  - [x] **Persistent Outbox & Dispatch**: SQLite-backed retry backoff + scheduled send, background worker + `flume` wake, graceful shutdown
+  - [x] **Proactive Token Refresh**: 60s pre-expiry refresh with cached-credential fallback
+  - [x] **Protocol Hardening**: `QRESYNC`/`CONDSTORE` incremental sync, `VANISHED (EARLIER)`/`EXPUNGE` propagation, PGP/MIME + S/MIME verification, FTS5 transactional integrity, CSP + CID rewrite + pixel removal
+  - [x] **UI Stack Migration**: Raw `gpui` git dep → `gpui-kit 0.6.0` (`Root`/`init`/`input`), `aws-lc-rs` default crypto provider
+  - [ ] Remaining: CI Linux deps (`xcb`/`xkbcommon`/`fontconfig`), `clippy` + `cargo-deny` audit parity, docs polish
+
 
 
 
@@ -308,7 +341,9 @@ cargo run --package vespetrel-app -- --memory
 Contributions are welcome! Please ensure that:
 1. `cargo check` runs with zero warnings or errors.
 2. `cargo test --workspace` passes all unit and integration tests.
-3. Code is formatted with `cargo fmt`.
+3. Code is formatted with `cargo fmt --all` (CI runs `cargo fmt --all -- --check`).
+4. `cargo clippy --all-targets -- -D warnings` is clean.
+5. `cargo deny check` passes (no banned crates / unknown registries).
 
 Feel free to open an issue or submit a pull request on [GitHub](https://github.com/SV-stark/Vespetrel).
 

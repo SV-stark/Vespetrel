@@ -258,66 +258,64 @@ pub async fn resolve_and_refresh_token(
         .map(|exp| now_ts >= exp - 60)
         .unwrap_or(false);
 
-    if is_expired {
-        if let (Some(rk), Some(oauth_cfg)) = (
+    if is_expired
+        && let (Some(rk), Some(oauth_cfg)) = (
             &account.auth_config.refresh_token_keyring_key,
             &account.auth_config.oauth,
-        ) {
-            let rk_owned = rk.clone();
-            let refresh_token = tokio::task::spawn_blocking(move || {
-                keyring::Entry::new("vespetrel", &rk_owned)
-                    .and_then(|e| e.get_password())
-                    .ok()
-            })
-            .await
-            .unwrap_or(None);
+        )
+    {
+        let rk_owned = rk.clone();
+        let refresh_token = tokio::task::spawn_blocking(move || {
+            keyring::Entry::new("vespetrel", &rk_owned)
+                .and_then(|e| e.get_password())
+                .ok()
+        })
+        .await
+        .unwrap_or(None);
 
-            if let Some(ref rt) = refresh_token {
-                let engine = vespetrel_crypto::OAuth2Engine::new(oauth_config_from_core(oauth_cfg));
-                match engine.refresh_access_token(rt).await {
-                    Ok(bundle) => {
-                        info!(account_id=%account.id, "successfully refreshed OAuth2 access token");
-                        let new_access = bundle.access_token.clone();
-                        let new_refresh = bundle.refresh_token.clone();
-                        let new_expires_at = now_ts + bundle.expires_in as i64;
+        if let Some(ref rt) = refresh_token {
+            let engine = vespetrel_crypto::OAuth2Engine::new(oauth_config_from_core(oauth_cfg));
+            match engine.refresh_access_token(rt).await {
+                Ok(bundle) => {
+                    info!(account_id=%account.id, "successfully refreshed OAuth2 access token");
+                    let new_access = bundle.access_token.clone();
+                    let new_refresh = bundle.refresh_token.clone();
+                    let new_expires_at = now_ts + bundle.expires_in as i64;
 
-                        let ak_key = account
-                            .auth_config
-                            .keyring_key
-                            .clone()
-                            .unwrap_or_else(|| account.id.clone());
-                        let rk_key = rk.clone();
-                        let access_copy = new_access.clone();
-                        tokio::task::spawn_blocking(move || {
-                            if let Ok(entry) = keyring::Entry::new("vespetrel", &ak_key) {
-                                let _ = entry.set_password(&access_copy);
-                            }
-                            if let (Some(new_rt), rk) = (new_refresh, rk_key) {
-                                if let Ok(entry) = keyring::Entry::new("vespetrel", &rk) {
-                                    let _ = entry.set_password(&new_rt);
-                                }
-                            }
-                        })
-                        .await
-                        .map_err(|e| AuthError::KeyringError(e.to_string()))?;
-
-                        if let Some(pool) = storage_pool {
-                            if let Ok(conn) = pool.get().await {
-                                let mut updated = account.clone();
-                                updated.auth_config.expires_at = Some(new_expires_at);
-                                let _ = conn
-                                    .interact(move |c| {
-                                        vespetrel_storage::repo::upsert_account(c, &updated)
-                                    })
-                                    .await;
-                            }
+                    let ak_key = account
+                        .auth_config
+                        .keyring_key
+                        .clone()
+                        .unwrap_or_else(|| account.id.clone());
+                    let rk_key = rk.clone();
+                    let access_copy = new_access.clone();
+                    tokio::task::spawn_blocking(move || {
+                        if let Ok(entry) = keyring::Entry::new("vespetrel", &ak_key) {
+                            let _ = entry.set_password(&access_copy);
                         }
+                        if let (Some(new_rt), rk) = (new_refresh, rk_key)
+                            && let Ok(entry) = keyring::Entry::new("vespetrel", &rk)
+                        {
+                            let _ = entry.set_password(&new_rt);
+                        }
+                    })
+                    .await
+                    .map_err(|e| AuthError::KeyringError(e.to_string()))?;
 
-                        return Ok(new_access);
+                    if let Some(pool) = storage_pool
+                        && let Ok(conn) = pool.get().await
+                    {
+                        let mut updated = account.clone();
+                        updated.auth_config.expires_at = Some(new_expires_at);
+                        let _ = conn
+                            .interact(move |c| vespetrel_storage::repo::upsert_account(c, &updated))
+                            .await;
                     }
-                    Err(e) => {
-                        tracing::warn!(account_id=%account.id, error=%e, "OAuth2 proactive refresh failed, falling back to cached token");
-                    }
+
+                    return Ok(new_access);
+                }
+                Err(e) => {
+                    tracing::warn!(account_id=%account.id, error=%e, "OAuth2 proactive refresh failed, falling back to cached token");
                 }
             }
         }

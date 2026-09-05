@@ -254,6 +254,12 @@ pub async fn process_due_outbox(
     results
 }
 
+impl Default for OutboxQueue {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -371,11 +377,5 @@ mod tests {
         let loaded = queue2.load_from_db(&conn).unwrap();
         assert_eq!(loaded, 1);
         assert!(queue2.scheduled.contains_key(&id));
-    }
-}
-
-impl Default for OutboxQueue {
-    fn default() -> Self {
-        Self::new()
     }
 }

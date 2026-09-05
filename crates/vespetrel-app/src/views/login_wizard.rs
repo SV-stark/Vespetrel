@@ -91,6 +91,72 @@ impl LoginWizardState {
         }
     }
 
+    /// Automatically inspects email domain to populate provider, hostnames, ports, and auth mode
+    pub fn apply_autodiscover_for_email(&mut self, email: &str) {
+        let email = email.trim();
+        if let Some((_, domain)) = email.split_once('@') {
+            let domain_lower = domain.to_lowercase();
+            match domain_lower.as_str() {
+                "gmail.com" | "googlemail.com" => {
+                    self.provider_type = ProviderType::Gmail;
+                    self.incoming_host = "imap.gmail.com".into();
+                    self.incoming_port = 993;
+                    self.outgoing_host = "smtp.gmail.com".into();
+                    self.outgoing_port = 587;
+                    self.auth_mode = AuthModeChoice::OAuth2;
+                }
+                "outlook.com" | "hotmail.com" | "live.com" | "msn.com" | "office365.com" => {
+                    self.provider_type = ProviderType::Graph;
+                    self.incoming_host = "outlook.office365.com".into();
+                    self.incoming_port = 993;
+                    self.outgoing_host = "smtp.office365.com".into();
+                    self.outgoing_port = 587;
+                    self.auth_mode = AuthModeChoice::OAuth2;
+                }
+                "fastmail.com" | "fastmail.fm" | "messagingengine.com" => {
+                    self.provider_type = ProviderType::Jmap;
+                    self.incoming_host = "api.fastmail.com".into();
+                    self.incoming_port = 443;
+                    self.outgoing_host = "api.fastmail.com".into();
+                    self.outgoing_port = 443;
+                    self.auth_mode = AuthModeChoice::Password;
+                }
+                "icloud.com" | "me.com" | "mac.com" => {
+                    self.provider_type = ProviderType::Imap;
+                    self.incoming_host = "imap.mail.me.com".into();
+                    self.incoming_port = 993;
+                    self.outgoing_host = "smtp.mail.me.com".into();
+                    self.outgoing_port = 587;
+                    self.auth_mode = AuthModeChoice::Password;
+                }
+                "yahoo.com" | "ymail.com" | "aol.com" => {
+                    self.provider_type = ProviderType::Imap;
+                    self.incoming_host = "imap.mail.yahoo.com".into();
+                    self.incoming_port = 993;
+                    self.outgoing_host = "smtp.mail.yahoo.com".into();
+                    self.outgoing_port = 587;
+                    self.auth_mode = AuthModeChoice::Password;
+                }
+                "zoho.com" => {
+                    self.provider_type = ProviderType::Imap;
+                    self.incoming_host = "imappro.zoho.com".into();
+                    self.incoming_port = 993;
+                    self.outgoing_host = "smtppro.zoho.com".into();
+                    self.outgoing_port = 587;
+                    self.auth_mode = AuthModeChoice::Password;
+                }
+                _ => {
+                    self.provider_type = ProviderType::Imap;
+                    self.incoming_host = format!("imap.{domain_lower}");
+                    self.incoming_port = 993;
+                    self.outgoing_host = format!("smtp.{domain_lower}");
+                    self.outgoing_port = 587;
+                    self.auth_mode = AuthModeChoice::Password;
+                }
+            }
+        }
+    }
+
     pub fn validate_and_build_account(&self) -> Result<Account, String> {
         if self.email.trim().is_empty() || !self.email.contains('@') {
             return Err("Invalid email address".into());
@@ -178,5 +244,31 @@ mod tests {
         let acct_imap = wizard.validate_and_build_account().unwrap();
         assert_eq!(acct_imap.email, "test@gmail.com");
         assert_eq!(acct_imap.provider_type, ProviderType::Imap);
+    }
+
+    #[test]
+    fn test_autodiscover_domains() {
+        let mut wizard = LoginWizardState::new();
+
+        wizard.apply_autodiscover_for_email("user@gmail.com");
+        assert_eq!(wizard.provider_type, ProviderType::Gmail);
+        assert_eq!(wizard.incoming_host, "imap.gmail.com");
+        assert_eq!(wizard.auth_mode, AuthModeChoice::OAuth2);
+
+        wizard.apply_autodiscover_for_email("colleague@outlook.com");
+        assert_eq!(wizard.provider_type, ProviderType::Graph);
+        assert_eq!(wizard.incoming_host, "outlook.office365.com");
+        assert_eq!(wizard.auth_mode, AuthModeChoice::OAuth2);
+
+        wizard.apply_autodiscover_for_email("privacy@fastmail.com");
+        assert_eq!(wizard.provider_type, ProviderType::Jmap);
+        assert_eq!(wizard.incoming_host, "api.fastmail.com");
+
+        wizard.apply_autodiscover_for_email("custom@mycorp.net");
+        assert_eq!(wizard.provider_type, ProviderType::Imap);
+        assert_eq!(wizard.incoming_host, "imap.mycorp.net");
+        assert_eq!(wizard.outgoing_host, "smtp.mycorp.net");
+        assert_eq!(wizard.incoming_port, 993);
+        assert_eq!(wizard.outgoing_port, 587);
     }
 }

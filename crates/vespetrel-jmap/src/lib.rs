@@ -137,7 +137,7 @@ impl JmapProvider {
                         "name": "Email/query",
                         "path": "/ids"
                     },
-                    "properties": ["id", "blobId", "threadId", "mailboxIds", "keywords", "size", "receivedAt", "from", "to", "subject", "preview"]
+                    "properties": ["id", "blobId", "threadId", "mailboxIds", "keywords", "size", "receivedAt", "from", "to", "subject", "preview", "bodyValues", "textBody", "htmlBody"]
                 }, "1"]
             ]
         })
@@ -307,130 +307,115 @@ impl MailProvider for JmapProvider {
                     .json(&changes_req)
                     .send()
                     .await
+                    && let Ok(json) = resp.json::<serde_json::Value>().await
+                    && let Some(res_obj) = json.pointer("/methodResponses/0/1")
+                    && let Some(new_state) = res_obj.get("newState").and_then(|v| v.as_str())
                 {
-                    if let Ok(json) = resp.json::<serde_json::Value>().await {
-                        if let Some(res_obj) = json.pointer("/methodResponses/0/1") {
-                            if let Some(new_state) =
-                                res_obj.get("newState").and_then(|v| v.as_str())
-                            {
-                                delta.new_sync_state = SyncState {
-                                    jmap_state: Some(new_state.to_string()),
-                                    ..state.clone()
-                                };
+                    delta.new_sync_state = SyncState {
+                        jmap_state: Some(new_state.to_string()),
+                        ..state.clone()
+                    };
 
-                                if let Some(destroyed) =
-                                    res_obj.get("destroyed").and_then(|v| v.as_array())
+                    if let Some(destroyed) = res_obj.get("destroyed").and_then(|v| v.as_array()) {
+                        for id in destroyed.iter().filter_map(|v| v.as_str()) {
+                            delta
+                                .deleted_uids
+                                .push(vespetrel_core::stable_uid_from_id(id));
+                        }
+                    }
+
+                    let created = res_obj
+                        .get("created")
+                        .and_then(|v| v.as_array())
+                        .map(|a| a.as_slice())
+                        .unwrap_or_default();
+                    let updated = res_obj
+                        .get("updated")
+                        .and_then(|v| v.as_array())
+                        .map(|a| a.as_slice())
+                        .unwrap_or_default();
+
+                    let ids_to_fetch: Vec<String> = created
+                        .iter()
+                        .chain(updated.iter())
+                        .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                        .collect();
+
+                    if !ids_to_fetch.is_empty() {
+                        let fetch_req = serde_json::json!({
+                            "using": ["urn:ietf:params:jmap:core", "urn:ietf:params:jmap:mail"],
+                            "methodCalls": [
+                                ["Email/get", {
+                                    "accountId": self.config.username,
+                                    "ids": ids_to_fetch,
+                                    "properties": ["id", "blobId", "threadId", "mailboxIds", "keywords", "size", "receivedAt", "from", "to", "subject", "preview", "bodyValues", "textBody", "htmlBody"]
+                                }, "0"]
+                            ]
+                        });
+
+                        if let Ok(fetch_resp) = self
+                            .http
+                            .post(&self.config.base_url)
+                            .bearer_auth(&self.config.access_token)
+                            .json(&fetch_req)
+                            .send()
+                            .await
+                            && let Ok(fjson) = fetch_resp.json::<serde_json::Value>().await
+                            && let Some(items) = fjson
+                                .pointer("/methodResponses/0/1/list")
+                                .and_then(|v| v.as_array())
+                        {
+                            for item in items {
+                                let id =
+                                    item.get("id").and_then(|v| v.as_str()).unwrap_or_default();
+                                let subject = item
+                                    .get("subject")
+                                    .and_then(|v| v.as_str())
+                                    .unwrap_or("No Subject");
+                                let from = item
+                                    .pointer("/from/0/email")
+                                    .and_then(|v| v.as_str())
+                                    .unwrap_or("sender@jmap.example");
+                                let date_str = chrono::Utc::now().to_rfc2822();
+                                let body_text = item
+                                    .get("preview")
+                                    .and_then(|v| v.as_str())
+                                    .or_else(|| {
+                                        item.pointer("/bodyValues/1/value").and_then(|v| v.as_str())
+                                    })
+                                    .unwrap_or("JMAP Message Content");
+                                let raw = format!("From: {from}\r\nTo: {}\r\nSubject: {subject}\r\nDate: {date_str}\r\nMessage-ID: <{id}@jmap.example>\r\nMIME-Version: 1.0\r\nContent-Type: text/plain; charset=utf-8\r\n\r\n{body_text}", self.config.username).into_bytes();
+                                let mut flags = Vec::new();
+                                if let Some(keywords) =
+                                    item.get("keywords").and_then(|k| k.as_object())
                                 {
-                                    for id in destroyed.iter().filter_map(|v| v.as_str()) {
-                                        delta
-                                            .deleted_uids
-                                            .push(vespetrel_core::stable_uid_from_id(id));
+                                    if keywords.contains_key("$seen") {
+                                        flags.push(vespetrel_core::Flag::Seen);
+                                    }
+                                    if keywords.contains_key("$flagged") {
+                                        flags.push(vespetrel_core::Flag::Flagged);
+                                    }
+                                    if keywords.contains_key("$draft") {
+                                        flags.push(vespetrel_core::Flag::Draft);
                                     }
                                 }
-
-                                let created = res_obj
-                                    .get("created")
-                                    .and_then(|v| v.as_array())
-                                    .map(|a| a.as_slice())
-                                    .unwrap_or_default();
-                                let updated = res_obj
-                                    .get("updated")
-                                    .and_then(|v| v.as_array())
-                                    .map(|a| a.as_slice())
-                                    .unwrap_or_default();
-
-                                let ids_to_fetch: Vec<String> = created
-                                    .iter()
-                                    .chain(updated.iter())
-                                    .filter_map(|v| v.as_str().map(|s| s.to_string()))
-                                    .collect();
-
-                                if !ids_to_fetch.is_empty() {
-                                    let fetch_req = serde_json::json!({
-                                        "using": ["urn:ietf:params:jmap:core", "urn:ietf:params:jmap:mail"],
-                                        "methodCalls": [
-                                            ["Email/get", {
-                                                "accountId": self.config.username,
-                                                "ids": ids_to_fetch,
-                                                "properties": ["id", "blobId", "threadId", "mailboxIds", "keywords", "size", "receivedAt", "from", "to", "subject", "preview"]
-                                            }, "0"]
-                                        ]
-                                    });
-
-                                    if let Ok(fetch_resp) = self
-                                        .http
-                                        .post(&self.config.base_url)
-                                        .bearer_auth(&self.config.access_token)
-                                        .json(&fetch_req)
-                                        .send()
-                                        .await
-                                    {
-                                        if let Ok(fjson) =
-                                            fetch_resp.json::<serde_json::Value>().await
-                                        {
-                                            if let Some(items) = fjson
-                                                .pointer("/methodResponses/0/1/list")
-                                                .and_then(|v| v.as_array())
-                                            {
-                                                for item in items {
-                                                    let id = item
-                                                        .get("id")
-                                                        .and_then(|v| v.as_str())
-                                                        .unwrap_or_default();
-                                                    let subject = item
-                                                        .get("subject")
-                                                        .and_then(|v| v.as_str())
-                                                        .unwrap_or("No Subject");
-                                                    let from = item
-                                                        .pointer("/from/0/email")
-                                                        .and_then(|v| v.as_str())
-                                                        .unwrap_or("sender@jmap.example");
-                                                    let date_str = chrono::Utc::now().to_rfc2822();
-                                                    let raw = format!("From: {from}\r\nTo: {}\r\nSubject: {subject}\r\nDate: {date_str}\r\nMessage-ID: <{id}@jmap.example>\r\nMIME-Version: 1.0\r\nContent-Type: text/plain; charset=utf-8\r\n\r\nJMAP Message Content", self.config.username).into_bytes();
-                                                    let mut flags = Vec::new();
-                                                    if let Some(keywords) = item
-                                                        .get("keywords")
-                                                        .and_then(|k| k.as_object())
-                                                    {
-                                                        if keywords.contains_key("$seen") {
-                                                            flags.push(vespetrel_core::Flag::Seen);
-                                                        }
-                                                        if keywords.contains_key("$flagged") {
-                                                            flags.push(
-                                                                vespetrel_core::Flag::Flagged,
-                                                            );
-                                                        }
-                                                        if keywords.contains_key("$draft") {
-                                                            flags.push(vespetrel_core::Flag::Draft);
-                                                        }
-                                                    }
-                                                    let remote_uid =
-                                                        vespetrel_core::stable_uid_from_id(id);
-                                                    let sync_msg =
-                                                        vespetrel_core::provider::SyncMessage {
-                                                            remote_uid,
-                                                            remote_id: Some(id.to_string()),
-                                                            flags,
-                                                            raw_rfc822: Some(raw),
-                                                            mod_seq: None,
-                                                        };
-                                                    if created
-                                                        .iter()
-                                                        .any(|v| v.as_str() == Some(id))
-                                                    {
-                                                        delta.inserted.push(sync_msg);
-                                                    } else {
-                                                        delta.updated.push(sync_msg);
-                                                    }
-                                                }
-                                            }
-                                        }
-                                    }
+                                let remote_uid = vespetrel_core::stable_uid_from_id(id);
+                                let sync_msg = vespetrel_core::provider::SyncMessage {
+                                    remote_uid,
+                                    remote_id: Some(id.to_string()),
+                                    flags,
+                                    raw_rfc822: Some(raw),
+                                    mod_seq: None,
+                                };
+                                if created.iter().any(|v| v.as_str() == Some(id)) {
+                                    delta.inserted.push(sync_msg);
+                                } else {
+                                    delta.updated.push(sync_msg);
                                 }
-                                return Ok(delta);
                             }
                         }
                     }
+                    return Ok(delta);
                 }
             }
 
@@ -486,7 +471,14 @@ impl MailProvider for JmapProvider {
                             .and_then(|v| v.as_str())
                             .unwrap_or("sender@jmap.example");
                         let date_str = chrono::Utc::now().to_rfc2822();
-                        let raw = format!("From: {from}\r\nTo: {}\r\nSubject: {subject}\r\nDate: {date_str}\r\nMessage-ID: <{id}@jmap.example>\r\nMIME-Version: 1.0\r\nContent-Type: text/plain; charset=utf-8\r\n\r\nJMAP Message Content", self.config.username).into_bytes();
+                        let body_text = item
+                            .get("preview")
+                            .and_then(|v| v.as_str())
+                            .or_else(|| {
+                                item.pointer("/bodyValues/1/value").and_then(|v| v.as_str())
+                            })
+                            .unwrap_or("JMAP Message Content");
+                        let raw = format!("From: {from}\r\nTo: {}\r\nSubject: {subject}\r\nDate: {date_str}\r\nMessage-ID: <{id}@jmap.example>\r\nMIME-Version: 1.0\r\nContent-Type: text/plain; charset=utf-8\r\n\r\n{body_text}", self.config.username).into_bytes();
                         let mut flags = Vec::new();
                         if let Some(keywords) = item.get("keywords").and_then(|k| k.as_object()) {
                             if keywords.contains_key("$seen") {

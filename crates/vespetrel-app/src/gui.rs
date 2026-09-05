@@ -4,8 +4,10 @@ pub mod gpui_app {
         calendar::CalendarView,
         contacts::ContactsView,
         login_wizard::{AuthModeChoice, LoginWizardState, WizardStep},
-        message_list::ListFilter,
+        message_list::{ListFilter, MessageRowDensity},
+        message_viewer::{AttachmentInfo, MessageViewer, SecurityStatus},
         navigation::NavigationTree,
+        quick_filter::QuickFilterState,
         tasks::TaskListView,
     };
     pub use gpui_kit::base;
@@ -154,6 +156,47 @@ pub mod gpui_app {
         }
     }
 
+    pub struct ComposeInputEntities {
+        pub to: Entity<component::input::InputState>,
+        pub subject: Entity<component::input::InputState>,
+        pub body: Entity<component::input::InputState>,
+    }
+
+    impl ComposeInputEntities {
+        pub fn new(
+            window: &mut Window,
+            cx: &mut Context<MainWindow>,
+            to_val: &str,
+            subj_val: &str,
+            body_val: &str,
+        ) -> Self {
+            let to = cx.new(|cx| {
+                let mut st = component::input::InputState::new(window, cx)
+                    .placeholder("Recipient (e.g. user@example.com)");
+                if !to_val.is_empty() {
+                    st = st.default_value(to_val);
+                }
+                st
+            });
+            let subject = cx.new(|cx| {
+                let mut st = component::input::InputState::new(window, cx).placeholder("Subject");
+                if !subj_val.is_empty() {
+                    st = st.default_value(subj_val);
+                }
+                st
+            });
+            let body = cx.new(|cx| {
+                let mut st = component::input::InputState::new(window, cx)
+                    .placeholder("Write your email message here...");
+                if !body_val.is_empty() {
+                    st = st.default_value(body_val);
+                }
+                st
+            });
+            Self { to, subject, body }
+        }
+    }
+
     /// Active top-level navigation view
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     pub enum ActiveViewTab {
@@ -173,17 +216,44 @@ pub mod gpui_app {
         AddAccount,
     }
 
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub enum MessageSortOrder {
+        DateDescending,
+        DateAscending,
+    }
+
+    #[derive(Debug, Clone)]
+    pub struct ThreadedMessage<'a> {
+        pub summary: &'a MessageSummary,
+        pub thread_count: usize,
+        pub is_child: bool,
+    }
+
+    #[derive(Debug, Clone)]
+    pub struct Toast {
+        pub id: String,
+        pub message: String,
+        pub is_error: bool,
+        pub undo_outbox_id: Option<String>,
+    }
+
     pub struct MainWindow {
         pub active_tab: ActiveViewTab,
         pub active_modal: ActiveModal,
         pub accounts: Vec<Account>,
         pub folders: Vec<Folder>,
         pub selected_folder_id: Option<String>,
+        pub is_unified_inbox: bool,
         pub messages: Vec<MessageSummary>,
         pub selected_message_id: Option<String>,
         pub list_filter: ListFilter,
         pub search_query: String,
         pub block_remote_images: bool,
+        pub message_viewer: MessageViewer,
+        pub is_threaded: bool,
+        pub sort_order: MessageSortOrder,
+        pub row_density: MessageRowDensity,
+        pub quick_filter_state: QuickFilterState,
         // PIM data
         pub calendar_events: Vec<CalendarEvent>,
         pub contacts: Vec<Contact>,
@@ -194,6 +264,11 @@ pub mod gpui_app {
         pub compose_to: String,
         pub compose_subject: String,
         pub compose_body: String,
+        pub compose_inputs: Option<ComposeInputEntities>,
+        pub compose_is_markdown: bool,
+        pub compose_attachments: Vec<vespetrel_core::message::ComposedAttachment>,
+        pub compose_reply_to_id: Option<String>,
+        pub compose_draft_id: Option<String>,
         // Command Palette
         pub palette_query: String,
         pub command_palette: crate::command_palette::CommandPalette,
@@ -203,6 +278,7 @@ pub mod gpui_app {
         pub storage_pool: Option<vespetrel_storage::db::StoragePool>,
         pub login_wizard: LoginWizardState,
         pub wizard_inputs: Option<WizardInputEntities>,
+        pub toasts: Vec<Toast>,
     }
 
     impl MainWindow {
@@ -257,8 +333,26 @@ pub mod gpui_app {
                                     }
                                 }
 
+                                let folder_counts = vespetrel_storage::repo::get_folder_counts(c)
+                                    .unwrap_or_default();
+                                for f in &mut all_folders {
+                                    if let Some(&(total, unread)) = folder_counts
+                                        .get(&f.id)
+                                        .or_else(|| folder_counts.get(&f.remote_id))
+                                    {
+                                        f.total_count = total;
+                                        f.unread_count = unread;
+                                    }
+                                }
+
                                 let mut initial_messages = Vec::new();
-                                if let Some(inbox) = all_folders
+                                let msgs =
+                                    vespetrel_storage::repo::list_unified_inbox_messages(c, 100, 0)
+                                        .unwrap_or_default();
+                                if !msgs.is_empty() {
+                                    initial_messages =
+                                        msgs.into_iter().map(|m| m.summary()).collect();
+                                } else if let Some(inbox) = all_folders
                                     .iter()
                                     .find(|f| f.role == FolderRole::Inbox)
                                     .or_else(|| all_folders.first())
@@ -379,12 +473,18 @@ pub mod gpui_app {
                 active_modal: ActiveModal::None,
                 accounts,
                 selected_folder_id: folders.first().map(|f: &Folder| f.id.clone()),
+                is_unified_inbox: true,
                 selected_message_id: messages.first().map(|m: &MessageSummary| m.id.clone()),
                 folders,
                 messages,
                 list_filter: ListFilter::All,
                 search_query: String::new(),
                 block_remote_images: true,
+                message_viewer: MessageViewer::new(),
+                is_threaded: false,
+                sort_order: MessageSortOrder::DateDescending,
+                row_density: MessageRowDensity::Comfortable,
+                quick_filter_state: QuickFilterState::new(),
                 calendar_events,
                 contacts,
                 tasks,
@@ -392,6 +492,11 @@ pub mod gpui_app {
                 compose_to: "team@vespetrel.example".into(),
                 compose_subject: "Hello from Pure Rust GPUI Mail".into(),
                 compose_body: "Hi team,\n\nWriting this from the pure Rust GPUI mail client.\n\nBest regards,\nVespetrel User".into(),
+                compose_inputs: None,
+                compose_is_markdown: false,
+                compose_attachments: Vec::new(),
+                compose_reply_to_id: None,
+                compose_draft_id: None,
                 palette_query: String::new(),
                 command_palette: crate::command_palette::CommandPalette::new(),
                 sync_sender: sync_tx,
@@ -399,6 +504,7 @@ pub mod gpui_app {
                 storage_pool,
                 login_wizard: LoginWizardState::new(),
                 wizard_inputs: None,
+                toasts: Vec::new(),
             }
         }
 
@@ -406,6 +512,24 @@ pub mod gpui_app {
             match event {
                 SyncEvent::MessagesInserted(new_msgs) => {
                     self.status_message = format!("Received {} new message(s)", new_msgs.len());
+                    if let Some(first) = new_msgs.first() {
+                        let sender = if let Some(ref name) = first.from_name {
+                            if !name.is_empty() {
+                                format!("{} <{}>", name, first.from_address)
+                            } else {
+                                first.from_address.clone()
+                            }
+                        } else {
+                            first.from_address.clone()
+                        };
+                        let subj = first.subject.as_deref().unwrap_or("(No subject)");
+                        let toast_msg = if new_msgs.len() == 1 {
+                            format!("✉️ New email from {}: {}", sender, subj)
+                        } else {
+                            format!("✉️ {} new emails (latest from {})", new_msgs.len(), sender)
+                        };
+                        self.show_toast(toast_msg, false, cx);
+                    }
                     self.messages.splice(0..0, new_msgs);
                     cx.notify();
                 }
@@ -433,6 +557,7 @@ pub mod gpui_app {
                 }
                 SyncEvent::SyncError { folder, error } => {
                     self.status_message = format!("⚠️ Sync error ({folder}): {error}");
+                    self.show_toast(format!("Sync error ({}): {}", folder, error), true, cx);
                     cx.notify();
                 }
                 SyncEvent::SyncFinished { account_id: _ } => {
@@ -453,32 +578,342 @@ pub mod gpui_app {
                 .or_else(|| self.messages.first())
         }
 
-        pub fn filtered_messages(&self) -> impl Iterator<Item = &MessageSummary> {
-            let q = self.search_query.trim();
-            self.messages.iter().filter(move |m| {
-                let flag_match = match self.list_filter {
-                    ListFilter::All => true,
-                    ListFilter::Unread => !m.is_read,
-                    ListFilter::Flagged => m.is_flagged,
-                    ListFilter::WithAttachments => m.has_attachments,
-                };
-                if !flag_match {
-                    return false;
+        pub fn select_message(&mut self, message_id: String, cx: &mut Context<Self>) {
+            self.selected_message_id = Some(message_id.clone());
+            if let Some(m) = self.messages.iter_mut().find(|m| m.id == message_id) {
+                m.is_read = true;
+            }
+            if let Some(m) = self.messages.iter().find(|m| m.id == message_id).cloned() {
+                self.message_viewer.subject = m.subject.clone();
+                self.message_viewer.from = Some(vespetrel_core::message::Address {
+                    name: m.from_name.clone(),
+                    email: m.from_address.clone(),
+                });
+                self.message_viewer.sent_at = Some(m.sent_at);
+                self.message_viewer.block_remote_images = self.block_remote_images;
+                let snippet = m.snippet.as_deref().unwrap_or("No content available.");
+                if snippet.contains("<html") || snippet.contains("<div") || snippet.contains("<p") {
+                    self.message_viewer
+                        .load_html(snippet, self.block_remote_images);
+                } else {
+                    self.message_viewer.load_text(snippet);
                 }
-                if q.is_empty() {
-                    return true;
+            }
+            cx.notify();
+
+            // Async hydration of full body and attachments from storage
+            if let Some(pool) = &self.storage_pool {
+                let pool = pool.clone();
+                let mid = message_id.clone();
+                let block_images = self.block_remote_images;
+                cx.spawn(async move |this, cx| {
+                    if let Ok(conn) = pool.get().await {
+                        let res = conn
+                            .interact(move |c| {
+                                let _ = vespetrel_storage::repo::update_message_flags(
+                                    c,
+                                    &mid,
+                                    Some(true),
+                                    None,
+                                );
+                                let full_msg =
+                                    vespetrel_storage::repo::get_message(c, &mid).ok().flatten();
+                                let atts =
+                                    vespetrel_storage::repo::list_attachments_for_message(c, &mid)
+                                        .unwrap_or_default();
+                                (full_msg, atts)
+                            })
+                            .await;
+                        if let Ok((Some(full), atts)) = res {
+                            let _ = this.update(cx, |view, cx| {
+                                if view.selected_message_id.as_deref() == Some(&full.id) {
+                                    view.message_viewer.subject = full.subject.clone();
+                                    view.message_viewer.from =
+                                        Some(vespetrel_core::message::Address {
+                                            name: full.from_name.clone(),
+                                            email: full.from_address.clone(),
+                                        });
+                                    view.message_viewer.sent_at = Some(full.sent_at);
+                                    // Detect S/MIME or OpenPGP security status
+                                    let has_smime = atts.iter().any(|a| {
+                                        a.content_type.contains("pkcs7")
+                                            || a.filename.ends_with(".p7s")
+                                            || a.filename.ends_with(".p7m")
+                                    });
+                                    view.message_viewer.attachments = atts
+                                        .into_iter()
+                                        .map(|a| AttachmentInfo {
+                                            filename: a.filename,
+                                            content_type: a.content_type,
+                                            size_bytes: a.size_bytes as usize,
+                                            blob_path: a.blob_path,
+                                        })
+                                        .collect();
+                                    let content = full
+                                        .body_text_preview
+                                        .as_deref()
+                                        .or(full.body_snippet.as_deref())
+                                        .unwrap_or("No content available.");
+
+                                    if has_smime {
+                                        view.message_viewer.security_status =
+                                            SecurityStatus::SmimeValid;
+                                    } else if content.contains("-----BEGIN PGP MESSAGE-----") {
+                                        view.message_viewer.security_status =
+                                            SecurityStatus::PgpEncryptedAndSigned;
+                                    } else if content.contains("-----BEGIN PGP SIGNED MESSAGE-----")
+                                    {
+                                        view.message_viewer.security_status =
+                                            SecurityStatus::PgpSignedValid;
+                                    }
+
+                                    if content.contains("<html")
+                                        || content.contains("<div")
+                                        || content.contains("<p")
+                                    {
+                                        view.message_viewer.load_html(content, block_images);
+                                    } else {
+                                        view.message_viewer.load_text(content);
+                                    }
+                                    cx.notify();
+                                }
+                            });
+                        }
+                    }
+                })
+                .detach();
+            }
+        }
+
+        pub fn execute_fts_search(&mut self, query: &str, cx: &mut Context<Self>) {
+            let q = query.trim().to_string();
+            self.search_query = q.clone();
+            if q.is_empty() {
+                self.reload_messages_for_current_folder(cx);
+                return;
+            }
+
+            let pool_opt = self.storage_pool.clone();
+            let acct_id = self.accounts.first().map(|a| a.id.clone());
+
+            cx.spawn(async move |this, cx| {
+                if let Some(pool) = pool_opt
+                    && let Ok(conn) = pool.get().await
+                {
+                    let search_res = conn
+                        .interact(move |c| {
+                            let hits =
+                                vespetrel_storage::search_messages(c, &q, acct_id.as_deref(), 100)?;
+                            let hit_ids: Vec<String> =
+                                hits.into_iter().map(|h| h.message_id).collect();
+                            let full_msgs =
+                                vespetrel_storage::repo::list_messages_by_ids(c, &hit_ids)?;
+                            Ok::<Vec<MessageSummary>, anyhow::Error>(
+                                full_msgs.into_iter().map(|m| m.summary()).collect(),
+                            )
+                        })
+                        .await;
+
+                    if let Ok(Ok(results)) = search_res {
+                        let _ = this.update(cx, |view, cx| {
+                            view.messages = results;
+                            view.selected_message_id = view.messages.first().map(|m| m.id.clone());
+                            view.status_message =
+                                format!("FTS5 Search: {} message(s) found", view.messages.len());
+                            cx.notify();
+                        });
+                    }
                 }
-                m.subject
-                    .as_deref()
-                    .is_some_and(|s| contains_ignore_case(s, q))
-                    || contains_ignore_case(&m.from_address, q)
-                    || m.from_name
-                        .as_deref()
-                        .is_some_and(|n| contains_ignore_case(n, q))
-                    || m.snippet
-                        .as_deref()
-                        .is_some_and(|sn| contains_ignore_case(sn, q))
             })
+            .detach();
+        }
+
+        pub fn clear_search(&mut self, cx: &mut Context<Self>) {
+            self.search_query.clear();
+            self.reload_messages_for_current_folder(cx);
+        }
+
+        pub fn toggle_remote_images(&mut self, cx: &mut Context<Self>) {
+            self.block_remote_images = !self.block_remote_images;
+            self.message_viewer.toggle_remote_images();
+            cx.notify();
+        }
+
+        pub fn toggle_threading(&mut self, cx: &mut Context<Self>) {
+            self.is_threaded = !self.is_threaded;
+            cx.notify();
+        }
+
+        pub fn cycle_sort_order(&mut self, cx: &mut Context<Self>) {
+            self.sort_order = match self.sort_order {
+                MessageSortOrder::DateDescending => MessageSortOrder::DateAscending,
+                MessageSortOrder::DateAscending => MessageSortOrder::DateDescending,
+            };
+            cx.notify();
+        }
+
+        pub fn cycle_row_density(&mut self, cx: &mut Context<Self>) {
+            self.row_density = match self.row_density {
+                MessageRowDensity::Compact => MessageRowDensity::Comfortable,
+                MessageRowDensity::Comfortable => MessageRowDensity::Roomy,
+                MessageRowDensity::Roomy => MessageRowDensity::Compact,
+            };
+            self.settings.row_density = match self.row_density {
+                MessageRowDensity::Compact => vespetrel_core::RowDensity::Compact,
+                MessageRowDensity::Comfortable => vespetrel_core::RowDensity::Comfortable,
+                MessageRowDensity::Roomy => vespetrel_core::RowDensity::Roomy,
+            };
+            self.save_settings(cx);
+            cx.notify();
+        }
+
+        pub fn save_settings(&mut self, cx: &mut Context<Self>) {
+            let mut stgs = self.settings.clone();
+            stgs.sanitize();
+            self.settings = stgs.clone();
+            let pool_opt = self.storage_pool.clone();
+            cx.spawn(async move |this, cx| {
+                if let Some(pool) = pool_opt
+                    && let Ok(conn) = pool.get().await
+                {
+                    let save_res = conn
+                        .interact(move |c| vespetrel_storage::repo::save_user_settings(c, &stgs))
+                        .await;
+                    if let Ok(Ok(())) = save_res {
+                        let _ = this.update(cx, |view, cx| {
+                            view.show_toast("Preferences saved", false, cx);
+                        });
+                    }
+                }
+            })
+            .detach();
+        }
+
+        pub fn set_settings_theme(
+            &mut self,
+            theme: vespetrel_core::ColorTheme,
+            cx: &mut Context<Self>,
+        ) {
+            self.settings.theme = theme;
+            self.save_settings(cx);
+            cx.notify();
+        }
+
+        pub fn set_settings_density(
+            &mut self,
+            density: vespetrel_core::RowDensity,
+            cx: &mut Context<Self>,
+        ) {
+            self.settings.row_density = density;
+            self.row_density = match density {
+                vespetrel_core::RowDensity::Compact => MessageRowDensity::Compact,
+                vespetrel_core::RowDensity::Comfortable => MessageRowDensity::Comfortable,
+                vespetrel_core::RowDensity::Roomy => MessageRowDensity::Roomy,
+            };
+            self.save_settings(cx);
+            cx.notify();
+        }
+
+        pub fn toggle_settings_strip_trackers(&mut self, cx: &mut Context<Self>) {
+            self.settings.auto_strip_trackers = !self.settings.auto_strip_trackers;
+            self.save_settings(cx);
+            cx.notify();
+        }
+
+        pub fn toggle_settings_warn_phishing(&mut self, cx: &mut Context<Self>) {
+            self.settings.warn_on_phishing = !self.settings.warn_on_phishing;
+            self.save_settings(cx);
+            cx.notify();
+        }
+
+        pub fn set_settings_undo_seconds(&mut self, secs: u32, cx: &mut Context<Self>) {
+            self.settings.undo_send_seconds = secs.min(60);
+            self.save_settings(cx);
+            cx.notify();
+        }
+
+        pub fn filtered_messages(&self) -> Vec<&MessageSummary> {
+            let mut qf = self.quick_filter_state.clone();
+            qf.search_query = self.search_query.clone();
+            match self.list_filter {
+                ListFilter::All => {
+                    qf.unread_only = false;
+                    qf.starred_only = false;
+                    qf.has_attachment_only = false;
+                }
+                ListFilter::Unread => {
+                    qf.unread_only = true;
+                }
+                ListFilter::Flagged => {
+                    qf.starred_only = true;
+                }
+                ListFilter::WithAttachments => {
+                    qf.has_attachment_only = true;
+                }
+            }
+            let mut filtered = qf.filter_messages(&self.messages);
+            match self.sort_order {
+                MessageSortOrder::DateDescending => {
+                    filtered.sort_by_key(|a| std::cmp::Reverse(a.sent_at));
+                }
+                MessageSortOrder::DateAscending => {
+                    filtered.sort_by_key(|a| a.sent_at);
+                }
+            }
+            filtered
+        }
+
+        pub fn threaded_messages(&self) -> Vec<ThreadedMessage<'_>> {
+            let filtered = self.filtered_messages();
+            if !self.is_threaded {
+                return filtered
+                    .into_iter()
+                    .map(|m| ThreadedMessage {
+                        summary: m,
+                        thread_count: 1,
+                        is_child: false,
+                    })
+                    .collect();
+            }
+
+            let mut groups: Vec<(String, Vec<&MessageSummary>)> = Vec::new();
+            let mut key_to_idx: std::collections::HashMap<String, usize> =
+                std::collections::HashMap::new();
+
+            for m in filtered {
+                let norm_subj = m
+                    .subject
+                    .as_deref()
+                    .map(vespetrel_core::thread::normalize_subject)
+                    .unwrap_or_else(|| "(No Subject)".to_string());
+                let key = m.thread_id.clone().unwrap_or(norm_subj);
+                if let Some(&idx) = key_to_idx.get(&key) {
+                    groups[idx].1.push(m);
+                } else {
+                    let idx = groups.len();
+                    key_to_idx.insert(key.clone(), idx);
+                    groups.push((key, vec![m]));
+                }
+            }
+
+            let mut result = Vec::new();
+            for (_key, mut msgs) in groups {
+                let count = msgs.len();
+                match self.sort_order {
+                    MessageSortOrder::DateDescending => {
+                        msgs.sort_by_key(|a| std::cmp::Reverse(a.sent_at))
+                    }
+                    MessageSortOrder::DateAscending => msgs.sort_by_key(|a| a.sent_at),
+                }
+                for (i, m) in msgs.into_iter().enumerate() {
+                    result.push(ThreadedMessage {
+                        summary: m,
+                        thread_count: if i == 0 { count } else { 1 },
+                        is_child: i > 0,
+                    });
+                }
+            }
+            result
         }
 
         pub fn trigger_sync(&mut self, cx: &mut Context<Self>) {
@@ -555,45 +990,12 @@ pub mod gpui_app {
         }
 
         pub fn toggle_flag(&mut self, cx: &mut Context<Self>) {
-            if let Some(id) = self.selected_message_id.clone() {
-                if let Some(m) = self.messages.iter_mut().find(|m| m.id == id) {
-                    m.is_flagged = !m.is_flagged;
-                    let is_flagged = m.is_flagged;
-                    let is_read = m.is_read;
-                    cx.notify();
-
-                    if let Some(pool) = &self.storage_pool {
-                        let pool = pool.clone();
-                        let msg_id = id.clone();
-                        cx.spawn(async move |_this, _cx| {
-                            if let Ok(conn) = pool.get().await {
-                                let _ = conn
-                                    .interact(move |c| {
-                                        c.execute(
-                                            "UPDATE messages SET is_flagged = ?1 WHERE id = ?2",
-                                            rusqlite::params![is_flagged, msg_id],
-                                        )
-                                    })
-                                    .await;
-                            }
-                        })
-                        .detach();
-                    }
-
-                    let _ = self.sync_sender.send(SyncEvent::MessageFlagsUpdated {
-                        id,
-                        is_read,
-                        is_flagged,
-                    });
-                }
-            }
-        }
-
-        pub fn delete_selected_message(&mut self, cx: &mut Context<Self>) {
-            if let Some(id) = self.selected_message_id.clone() {
-                self.messages.retain(|m| m.id != id);
-                self.selected_message_id = self.messages.first().map(|m| m.id.clone());
-                self.status_message = "Message deleted".into();
+            if let Some(id) = self.selected_message_id.clone()
+                && let Some(m) = self.messages.iter_mut().find(|m| m.id == id)
+            {
+                m.is_flagged = !m.is_flagged;
+                let is_flagged = m.is_flagged;
+                let is_read = m.is_read;
                 cx.notify();
 
                 if let Some(pool) = &self.storage_pool {
@@ -603,7 +1005,10 @@ pub mod gpui_app {
                         if let Ok(conn) = pool.get().await {
                             let _ = conn
                                 .interact(move |c| {
-                                    vespetrel_storage::repo::delete_message(c, &msg_id)
+                                    c.execute(
+                                        "UPDATE messages SET is_flagged = ?1 WHERE id = ?2",
+                                        rusqlite::params![is_flagged, msg_id],
+                                    )
                                 })
                                 .await;
                         }
@@ -611,7 +1016,73 @@ pub mod gpui_app {
                     .detach();
                 }
 
-                let _ = self.sync_sender.send(SyncEvent::MessagesDeleted(vec![id]));
+                let _ = self.sync_sender.send(SyncEvent::MessageFlagsUpdated {
+                    id,
+                    is_read,
+                    is_flagged,
+                });
+            }
+        }
+
+        pub fn delete_selected_message(&mut self, cx: &mut Context<Self>) {
+            if let Some(id) = self.selected_message_id.clone() {
+                let pool_opt = self.storage_pool.clone();
+                let current_folder_id = self.selected_folder_id.clone();
+                let is_in_trash = self.folders.iter().any(|f| {
+                    Some(&f.id) == current_folder_id.as_ref()
+                        && f.role == vespetrel_core::FolderRole::Trash
+                });
+
+                self.messages.retain(|m| m.id != id);
+                self.selected_message_id = self.messages.first().map(|m| m.id.clone());
+
+                if is_in_trash {
+                    self.show_toast("Message permanently deleted", false, cx);
+                    if let Some(pool) = pool_opt {
+                        let msg_id = id.clone();
+                        cx.spawn(async move |_this, _cx| {
+                            if let Ok(conn) = pool.get().await {
+                                let _ = conn
+                                    .interact(move |c| {
+                                        vespetrel_storage::repo::delete_message(c, &msg_id)
+                                    })
+                                    .await;
+                            }
+                        })
+                        .detach();
+                    }
+                    let _ = self.sync_sender.send(SyncEvent::MessagesDeleted(vec![id]));
+                } else {
+                    self.show_toast("Message moved to Trash", false, cx);
+                    let trash_folder_id = self
+                        .folders
+                        .iter()
+                        .find(|f| f.role == vespetrel_core::FolderRole::Trash)
+                        .map(|f| f.id.clone());
+
+                    if let Some(trash_id) = trash_folder_id
+                        && let Some(pool) = pool_opt
+                    {
+                        let msg_id = id.clone();
+                        cx.spawn(async move |this, cx| {
+                            if let Ok(conn) = pool.get().await {
+                                let _ = conn
+                                    .interact(move |c| {
+                                        c.execute(
+                                            "UPDATE messages SET folder_id = ?1 WHERE id = ?2",
+                                            rusqlite::params![trash_id, msg_id],
+                                        )
+                                    })
+                                    .await;
+                                let _ = this.update(cx, |view, cx| {
+                                    view.reload_folder_counts(cx);
+                                });
+                            }
+                        })
+                        .detach();
+                    }
+                }
+                cx.notify();
             }
         }
 
@@ -619,13 +1090,13 @@ pub mod gpui_app {
             if let Some(id) = self.selected_message_id.clone() {
                 self.messages.retain(|m| m.id != id);
                 self.selected_message_id = self.messages.first().map(|m| m.id.clone());
-                self.status_message = "Message archived".into();
+                self.show_toast("Message archived", false, cx);
                 cx.notify();
 
                 if let Some(pool) = &self.storage_pool {
                     let pool = pool.clone();
                     let msg_id = id.clone();
-                    cx.spawn(async move |_this, _cx| {
+                    cx.spawn(async move |this, cx| {
                         if let Ok(conn) = pool.get().await {
                             let _ = conn
                                 .interact(move |c| {
@@ -645,6 +1116,9 @@ pub mod gpui_app {
                                     Ok::<(), vespetrel_storage::StorageError>(())
                                 })
                                 .await;
+                            let _ = this.update(cx, |view, cx| {
+                                view.reload_folder_counts(cx);
+                            });
                         }
                     })
                     .detach();
@@ -652,11 +1126,427 @@ pub mod gpui_app {
             }
         }
 
-        pub fn send_composed_message(&mut self, cx: &mut Context<Self>) {
-            if self.compose_to.trim().is_empty() {
-                self.status_message = "Error: Please specify a recipient".into();
-                cx.notify();
+        pub fn show_toast(
+            &mut self,
+            message: impl Into<String>,
+            is_error: bool,
+            cx: &mut Context<Self>,
+        ) {
+            self.show_toast_with_undo(message, is_error, None, cx);
+        }
+
+        pub fn show_toast_with_undo(
+            &mut self,
+            message: impl Into<String>,
+            is_error: bool,
+            undo_outbox_id: Option<String>,
+            cx: &mut Context<Self>,
+        ) {
+            let id = uuid::Uuid::new_v4().to_string();
+            self.toasts.push(Toast {
+                id,
+                message: message.into(),
+                is_error,
+                undo_outbox_id,
+            });
+            if self.toasts.len() > 5 {
+                self.toasts.remove(0);
+            }
+            cx.notify();
+        }
+
+        pub fn undo_send(&mut self, outbox_id: &str, cx: &mut Context<Self>) {
+            let out_id = outbox_id.to_string();
+            let pool_opt = self.storage_pool.clone();
+            if let Some(pool) = pool_opt {
+                cx.spawn(async move |this, cx| {
+                    if let Ok(conn) = pool.get().await {
+                        let cancel_res = conn
+                            .interact(move |c| vespetrel_storage::repo::cancel_outbox(c, &out_id))
+                            .await;
+                        if let Ok(Ok(true)) = cancel_res {
+                            let _ = this.update(cx, |view, cx| {
+                                view.show_toast(
+                                    "Sending undone. Message preserved in Outbox / Drafts.",
+                                    false,
+                                    cx,
+                                );
+                                view.reload_folder_counts(cx);
+                            });
+                        }
+                    }
+                })
+                .detach();
+            }
+        }
+
+        pub fn save_draft(&mut self, cx: &mut Context<Self>) {
+            let (to_val, subj_val, body_val) = if let Some(inputs) = &self.compose_inputs {
+                (
+                    inputs.to.read(cx).value().trim().to_string(),
+                    inputs.subject.read(cx).value().trim().to_string(),
+                    inputs.body.read(cx).value().trim().to_string(),
+                )
+            } else {
+                (
+                    self.compose_to.trim().to_string(),
+                    self.compose_subject.trim().to_string(),
+                    self.compose_body.trim().to_string(),
+                )
+            };
+
+            if to_val.is_empty() && subj_val.is_empty() && body_val.is_empty() {
                 return;
+            }
+
+            self.compose_to = to_val.clone();
+            self.compose_subject = subj_val.clone();
+            self.compose_body = body_val.clone();
+
+            let draft_id = self
+                .compose_draft_id
+                .clone()
+                .unwrap_or_else(|| format!("draft-{}", uuid::Uuid::new_v4()));
+            self.compose_draft_id = Some(draft_id.clone());
+
+            let drafts_folder_id = self
+                .folders
+                .iter()
+                .find(|f| f.role == vespetrel_core::FolderRole::Drafts)
+                .map(|f| f.id.clone())
+                .unwrap_or_else(|| "drafts-default".into());
+
+            let acct_id = self
+                .accounts
+                .first()
+                .map(|a| a.id.clone())
+                .unwrap_or_else(|| "default".into());
+            let from_email = self
+                .accounts
+                .first()
+                .map(|a| a.email.clone())
+                .unwrap_or_else(|| "me@localhost".into());
+
+            let msg = vespetrel_core::Message {
+                id: draft_id,
+                account_id: acct_id,
+                folder_id: drafts_folder_id,
+                thread_id: None,
+                remote_uid: (chrono::Utc::now().timestamp_millis() & 0x7FFFFFFF) as u32,
+                message_id_header: None,
+                in_reply_to: self.compose_reply_to_id.clone(),
+                references: None,
+                subject: if subj_val.is_empty() {
+                    Some("(Draft)".into())
+                } else {
+                    Some(subj_val)
+                },
+                from_address: from_email,
+                from_name: None,
+                to_addresses: if to_val.is_empty() {
+                    vec![]
+                } else {
+                    vec![vespetrel_core::Address {
+                        name: None,
+                        email: to_val,
+                    }]
+                },
+                cc_addresses: vec![],
+                bcc_addresses: vec![],
+                reply_to: None,
+                sent_at: chrono::Utc::now(),
+                received_at: chrono::Utc::now(),
+                is_read: true,
+                is_flagged: false,
+                is_draft: true,
+                has_attachments: !self.compose_attachments.is_empty(),
+                body_snippet: Some(body_val.chars().take(120).collect()),
+                body_text_preview: Some(body_val.clone()),
+                blob_path: String::new(),
+                size_bytes: body_val.len() as i64,
+                remote_id: None,
+            };
+
+            if let Some(pool) = self.storage_pool.clone() {
+                cx.spawn(async move |this, cx| {
+                    if let Ok(conn) = pool.get().await {
+                        let _ = conn
+                            .interact(move |c| vespetrel_storage::repo::insert_message(c, &msg))
+                            .await;
+                        let _ = this.update(cx, |view, cx| {
+                            view.show_toast("Draft saved", false, cx);
+                            view.reload_folder_counts(cx);
+                        });
+                    }
+                })
+                .detach();
+            } else {
+                self.show_toast("Draft saved", false, cx);
+            }
+        }
+
+        pub fn save_attachment_to_downloads(
+            &mut self,
+            filename: &str,
+            blob_path: Option<&str>,
+            cx: &mut Context<Self>,
+        ) {
+            let safe_name = vespetrel_render::mime::sanitize_attachment_filename(filename);
+            let downloads_dir = std::env::var("USERPROFILE")
+                .map(|p| std::path::PathBuf::from(p).join("Downloads"))
+                .unwrap_or_else(|_| {
+                    std::env::var("HOME")
+                        .map(|p| std::path::PathBuf::from(p).join("Downloads"))
+                        .unwrap_or_else(|_| std::env::temp_dir())
+                });
+
+            let dest_path = downloads_dir.join(&safe_name);
+            let blob_opt = blob_path.map(|s| s.to_string());
+            let name_copy = safe_name.clone();
+
+            cx.spawn(async move |this, cx| {
+                let res = tokio::task::spawn_blocking(move || {
+                    let data = if let Some(ref bp) = blob_opt {
+                        if std::path::Path::new(bp).exists() {
+                            std::fs::read(bp).unwrap_or_default()
+                        } else {
+                            format!("Vespetrel Attachment: {name_copy}\nBlob: {bp}\n").into_bytes()
+                        }
+                    } else {
+                        format!("Vespetrel Attachment: {name_copy}\n").into_bytes()
+                    };
+                    std::fs::write(&dest_path, data)
+                })
+                .await;
+
+                let _ = this.update(cx, |view, cx| match res {
+                    Ok(Ok(())) => {
+                        view.show_toast(format!("Saved {safe_name} to Downloads"), false, cx);
+                    }
+                    Ok(Err(e)) => {
+                        view.show_toast(format!("Failed to save {safe_name}: {e}"), true, cx);
+                    }
+                    Err(e) => {
+                        view.show_toast(format!("Task failed: {e}"), true, cx);
+                    }
+                });
+            })
+            .detach();
+        }
+
+        pub fn dismiss_toast(&mut self, id: &str, cx: &mut Context<Self>) {
+            self.toasts.retain(|t| t.id != id);
+            cx.notify();
+        }
+
+        pub fn select_folder(&mut self, folder_id: String, cx: &mut Context<Self>) {
+            self.selected_folder_id = Some(folder_id);
+            self.is_unified_inbox = false;
+            self.reload_messages_for_current_folder(cx);
+        }
+
+        pub fn select_unified_inbox(&mut self, cx: &mut Context<Self>) {
+            self.selected_folder_id = None;
+            self.is_unified_inbox = true;
+            self.reload_messages_for_current_folder(cx);
+        }
+
+        pub fn reload_messages_for_current_folder(&mut self, cx: &mut Context<Self>) {
+            let pool_opt = self.storage_pool.clone();
+            let is_unified = self.is_unified_inbox;
+            let folder_id_opt = self.selected_folder_id.clone();
+            let folder_obj = self
+                .folders
+                .iter()
+                .find(|f| {
+                    Some(&f.id) == folder_id_opt.as_ref()
+                        || Some(&f.remote_id) == folder_id_opt.as_ref()
+                })
+                .cloned();
+            let acct_opt = folder_obj
+                .as_ref()
+                .and_then(|f| self.accounts.iter().find(|a| a.id == f.account_id).cloned());
+
+            cx.spawn(async move |this, cx| {
+                if let Some(pool) = pool_opt
+                    && let Ok(conn) = pool.get().await
+                {
+                    let fid_c = folder_id_opt.clone();
+                    let msgs = conn
+                        .interact(move |c| {
+                            if is_unified {
+                                vespetrel_storage::repo::list_unified_inbox_messages(c, 100, 0)
+                            } else if let Some(fid) = &fid_c {
+                                vespetrel_storage::repo::list_messages_in_folder(c, fid, 100, 0)
+                            } else {
+                                vespetrel_storage::repo::list_unified_inbox_messages(c, 100, 0)
+                            }
+                        })
+                        .await;
+                    if let Ok(Ok(loaded_msgs)) = msgs {
+                        let summaries: Vec<MessageSummary> =
+                            loaded_msgs.into_iter().map(|m| m.summary()).collect();
+                        let _ = this.update(cx, |view, cx| {
+                            view.messages = summaries;
+                            view.selected_message_id = view.messages.first().map(|m| m.id.clone());
+                            view.reload_folder_counts(cx);
+                            cx.notify();
+                        });
+                    }
+                }
+
+                // Incremental background sync if an account and folder match
+                if let (Some(acct), Some(fld)) = (acct_opt, folder_obj) {
+                    let provider = vespetrel_engine::make_provider(&acct);
+                    if let Ok(delta) = provider.sync_messages(&fld, Default::default()).await
+                        && !delta.inserted.is_empty()
+                    {
+                        let new_summaries: Vec<MessageSummary> = delta
+                            .inserted
+                            .into_iter()
+                            .map(|sm| MessageSummary {
+                                id: sm
+                                    .remote_id
+                                    .clone()
+                                    .unwrap_or_else(|| sm.remote_uid.to_string()),
+                                thread_id: None,
+                                subject: Some(format!("Message {}", sm.remote_uid)),
+                                from_address: acct.email.clone(),
+                                from_name: None,
+                                snippet: None,
+                                sent_at: chrono::Utc::now(),
+                                is_read: sm.flags.contains(&vespetrel_core::message::Flag::Seen),
+                                is_flagged: sm
+                                    .flags
+                                    .contains(&vespetrel_core::message::Flag::Flagged),
+                                has_attachments: false,
+                            })
+                            .collect();
+                        let _ = this.update(cx, |view, cx| {
+                            view.messages.splice(0..0, new_summaries);
+                            cx.notify();
+                        });
+                    }
+                }
+            })
+            .detach();
+        }
+
+        pub fn reload_folder_counts(&mut self, cx: &mut Context<Self>) {
+            let pool_opt = self.storage_pool.clone();
+            cx.spawn(async move |this, cx| {
+                if let Some(pool) = pool_opt
+                    && let Ok(conn) = pool.get().await
+                {
+                    let counts_res = conn
+                        .interact(|c| vespetrel_storage::repo::get_folder_counts(c))
+                        .await;
+                    if let Ok(Ok(stats)) = counts_res {
+                        let _ = this.update(cx, |view, cx| {
+                            for f in &mut view.folders {
+                                if let Some(&(total, unread)) =
+                                    stats.get(&f.id).or_else(|| stats.get(&f.remote_id))
+                                {
+                                    f.total_count = total;
+                                    f.unread_count = unread;
+                                }
+                            }
+                            cx.notify();
+                        });
+                    }
+                }
+            })
+            .detach();
+        }
+
+        pub fn delete_account(&mut self, account_id: &str, cx: &mut Context<Self>) {
+            let acct_id = account_id.to_string();
+            let pool_opt = self.storage_pool.clone();
+            self.accounts.retain(|a| a.id != acct_id);
+            self.folders.retain(|f| f.account_id != acct_id);
+            if self.folders.is_empty() {
+                self.selected_folder_id = None;
+                self.messages.clear();
+                self.selected_message_id = None;
+            } else {
+                self.selected_folder_id = self.folders.first().map(|f| f.id.clone());
+                self.reload_messages_for_current_folder(cx);
+            }
+            self.show_toast("Account removed", false, cx);
+            cx.spawn(async move |_this, _cx| {
+                let key = format!("vespetrel_{}", acct_id);
+                let _ = tokio::task::spawn_blocking(move || {
+                    if let Ok(entry) = keyring::Entry::new("vespetrel", &key) {
+                        let _ = entry.delete_credential();
+                    }
+                })
+                .await;
+                if let Some(pool) = pool_opt
+                    && let Ok(conn) = pool.get().await
+                {
+                    let _ = conn
+                        .interact(move |c| {
+                            let _ = vespetrel_storage::repo::delete_account(c, &acct_id);
+                        })
+                        .await;
+                }
+            })
+            .detach();
+        }
+
+        pub fn send_composed_message(&mut self, cx: &mut Context<Self>) {
+            let (to_val, subj_val, body_val) = if let Some(inputs) = &self.compose_inputs {
+                (
+                    inputs.to.read(cx).value().trim().to_string(),
+                    inputs.subject.read(cx).value().trim().to_string(),
+                    inputs.body.read(cx).value().trim().to_string(),
+                )
+            } else {
+                (
+                    self.compose_to.trim().to_string(),
+                    self.compose_subject.trim().to_string(),
+                    self.compose_body.trim().to_string(),
+                )
+            };
+
+            if to_val.is_empty() {
+                self.show_toast("Please specify a recipient", true, cx);
+                return;
+            }
+
+            // Auto-harvest recipient to contacts if not already present
+            let recipient_email = to_val.clone();
+            if !self
+                .contacts
+                .iter()
+                .any(|c| c.email.eq_ignore_ascii_case(&recipient_email))
+            {
+                let new_contact = Contact {
+                    id: format!("cnt-{}", uuid::Uuid::new_v4()),
+                    remote_id: None,
+                    display_name: None,
+                    email: recipient_email.clone(),
+                    vcard_data: None,
+                };
+                self.contacts.push(new_contact.clone());
+                let acct_id = self
+                    .accounts
+                    .first()
+                    .map(|a| a.id.clone())
+                    .unwrap_or_else(|| "default".into());
+                let pool_c = self.storage_pool.clone();
+                cx.spawn(async move |_this, _cx| {
+                    if let Some(pool) = pool_c
+                        && let Ok(conn) = pool.get().await
+                    {
+                        let _ = conn
+                            .interact(move |c| {
+                                vespetrel_storage::repo::upsert_contact(c, &acct_id, &new_contact)
+                            })
+                            .await;
+                    }
+                })
+                .detach();
             }
 
             let from_email = self
@@ -671,6 +1561,16 @@ pub mod gpui_app {
                     Some(a.name.clone())
                 }
             });
+
+            let body_html = if self.compose_is_markdown {
+                Some(format!(
+                    "<div class=\"markdown-body\">{}</div>",
+                    body_val.replace('\n', "<br/>\n")
+                ))
+            } else {
+                None
+            };
+
             let composed = vespetrel_core::ComposedMessage {
                 from: vespetrel_core::Address {
                     name: from_name.clone(),
@@ -678,23 +1578,23 @@ pub mod gpui_app {
                 },
                 to: vec![vespetrel_core::Address {
                     name: None,
-                    email: self.compose_to.trim().to_string(),
+                    email: recipient_email.clone(),
                 }],
                 cc: vec![],
                 bcc: vec![],
-                subject: self.compose_subject.clone(),
-                body_text: self.compose_body.clone(),
-                body_html: None,
-                in_reply_to: None,
+                subject: subj_val.clone(),
+                body_text: body_val.clone(),
+                body_html,
+                in_reply_to: self.compose_reply_to_id.clone(),
                 references: vec![],
-                attachments: vec![],
+                attachments: self.compose_attachments.clone(),
             };
 
             let outbox_id = format!("outbox-{}", uuid::Uuid::new_v4());
             let now_ts = chrono::Utc::now().timestamp();
             let account_opt = self.accounts.first().cloned();
             let pool_opt = self.storage_pool.clone();
-            let to_dest = self.compose_to.trim().to_string();
+            let to_dest = recipient_email.clone();
 
             // Persist to SQLite Outbox for durability
             if let Some(pool) = &self.storage_pool {
@@ -722,11 +1622,97 @@ pub mod gpui_app {
                 .detach();
             }
 
+            // Also record sent message in Sent folder
+            let sent_folder_id = self
+                .folders
+                .iter()
+                .find(|f| f.role == vespetrel_core::FolderRole::Sent)
+                .map(|f| f.id.clone());
+
+            if let (Some(sent_fld_id), Some(pool)) = (sent_folder_id, &self.storage_pool) {
+                let pool = pool.clone();
+                let sent_msg = vespetrel_core::Message {
+                    id: format!("sent-{}", uuid::Uuid::new_v4()),
+                    account_id: account_opt
+                        .as_ref()
+                        .map(|a| a.id.clone())
+                        .unwrap_or_else(|| "default".into()),
+                    folder_id: sent_fld_id,
+                    thread_id: None,
+                    remote_uid: (chrono::Utc::now().timestamp_millis() & 0x7FFFFFFF) as u32,
+                    message_id_header: None,
+                    in_reply_to: self.compose_reply_to_id.clone(),
+                    references: None,
+                    subject: Some(subj_val.clone()),
+                    from_address: from_email.clone(),
+                    from_name,
+                    to_addresses: vec![vespetrel_core::Address {
+                        name: None,
+                        email: recipient_email.clone(),
+                    }],
+                    cc_addresses: vec![],
+                    bcc_addresses: vec![],
+                    reply_to: None,
+                    sent_at: chrono::Utc::now(),
+                    received_at: chrono::Utc::now(),
+                    is_read: true,
+                    is_flagged: false,
+                    is_draft: false,
+                    has_attachments: !self.compose_attachments.is_empty(),
+                    body_snippet: Some(body_val.chars().take(120).collect()),
+                    body_text_preview: Some(body_val.clone()),
+                    blob_path: String::new(),
+                    size_bytes: body_val.len() as i64,
+                    remote_id: None,
+                };
+                cx.spawn(async move |this, cx| {
+                    if let Ok(conn) = pool.get().await {
+                        let _ = conn
+                            .interact(move |c| {
+                                vespetrel_storage::repo::insert_message(c, &sent_msg)
+                            })
+                            .await;
+                        let _ = this.update(cx, |view, cx| {
+                            view.reload_folder_counts(cx);
+                        });
+                    }
+                })
+                .detach();
+            }
+
+            // Remove draft if this was editing an existing draft
+            if let (Some(draft_id), Some(pool)) =
+                (self.compose_draft_id.clone(), &self.storage_pool)
+            {
+                let pool = pool.clone();
+                cx.spawn(async move |_this, _cx| {
+                    if let Ok(conn) = pool.get().await {
+                        let _ = conn
+                            .interact(move |c| {
+                                vespetrel_storage::repo::delete_message(c, &draft_id)
+                            })
+                            .await;
+                    }
+                })
+                .detach();
+            }
+
             self.status_message = format!("Sending message to {to_dest}...");
             self.active_modal = ActiveModal::None;
+            self.compose_inputs = None;
             self.compose_to.clear();
             self.compose_subject.clear();
             self.compose_body.clear();
+            self.compose_attachments.clear();
+            self.compose_draft_id = None;
+            self.compose_reply_to_id = None;
+
+            self.show_toast_with_undo(
+                format!("Message sent to {to_dest}"),
+                false,
+                Some(outbox_id.clone()),
+                cx,
+            );
             cx.notify();
 
             // Asynchronously transmit via SMTP
@@ -797,6 +1783,7 @@ pub mod gpui_app {
                         }
                         Err(e) => {
                             view.status_message = format!("Failed to send message: {e}");
+                            view.show_toast(format!("Failed to send to {to_dest}: {e}"), true, cx);
                         }
                     }
                     cx.notify();
@@ -806,36 +1793,19 @@ pub mod gpui_app {
         }
     }
 
-    fn contains_ignore_case(haystack: &str, needle: &str) -> bool {
-        if needle.is_empty() {
-            return true;
-        }
-        if haystack.len() < needle.len() {
-            return false;
-        }
-        if haystack.is_ascii() && needle.is_ascii() {
-            let n_bytes = needle.as_bytes();
-            let h_bytes = haystack.as_bytes();
-            return h_bytes
-                .windows(n_bytes.len())
-                .any(|window| window.eq_ignore_ascii_case(n_bytes));
-        }
-        let needle_chars: smallvec::SmallVec<[char; 32]> =
-            needle.chars().flat_map(|c| c.to_lowercase()).collect();
-        let haystack_chars: smallvec::SmallVec<[char; 128]> =
-            haystack.chars().flat_map(|c| c.to_lowercase()).collect();
-        if haystack_chars.len() < needle_chars.len() {
-            return false;
-        }
-        haystack_chars
-            .windows(needle_chars.len())
-            .any(|w| w == needle_chars.as_slice())
-    }
-
     impl Render for MainWindow {
         fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
             if self.active_modal == ActiveModal::AddAccount && self.wizard_inputs.is_none() {
                 self.wizard_inputs = Some(WizardInputEntities::new(window, cx, &self.login_wizard));
+            }
+            if self.active_modal == ActiveModal::Compose && self.compose_inputs.is_none() {
+                self.compose_inputs = Some(ComposeInputEntities::new(
+                    window,
+                    cx,
+                    &self.compose_to,
+                    &self.compose_subject,
+                    &self.compose_body,
+                ));
             }
 
             div()
@@ -855,11 +1825,86 @@ pub mod gpui_app {
                         .child(self.render_active_tab_content(cx)),
                 )
                 .child(self.render_status_bar())
+                .child(self.render_toasts(cx))
                 .child(self.render_modal_layer(cx))
         }
     }
 
     impl MainWindow {
+        fn render_toasts(&self, cx: &Context<Self>) -> impl IntoElement {
+            div()
+                .absolute()
+                .bottom(px(36.0))
+                .right(px(24.0))
+                .flex()
+                .flex_col()
+                .gap(px(8.0))
+                .children(self.toasts.iter().map(|t| {
+                    let mut toast_div = div()
+                        .id(ElementId::Name(format!("toast-{}", t.id).into()))
+                        .flex()
+                        .flex_row()
+                        .items_center()
+                        .gap(px(10.0))
+                        .px(px(14.0))
+                        .py(px(8.0))
+                        .rounded_md()
+                        .bg(if t.is_error {
+                            rgb(0x450a0a)
+                        } else {
+                            rgb(0x064e3b)
+                        })
+                        .border_1()
+                        .border_color(if t.is_error {
+                            rgb(0xef4444)
+                        } else {
+                            rgb(0x10b981)
+                        })
+                        .text_xs()
+                        .text_color(if t.is_error {
+                            rgb(0xfca5a5)
+                        } else {
+                            rgb(0xa7f3d0)
+                        })
+                        .child(div().child(if t.is_error { "⚠️" } else { "✓" }))
+                        .child(div().child(t.message.clone()));
+
+                    if let Some(ref outbox_id) = t.undo_outbox_id {
+                        let out_id = outbox_id.clone();
+                        toast_div = toast_div.child(
+                            div()
+                                .id(ElementId::Name(format!("undo-{}", t.id).into()))
+                                .px(px(6.0))
+                                .py(px(2.0))
+                                .rounded_md()
+                                .bg(rgb(0x047857))
+                                .border_1()
+                                .border_color(rgb(0x10b981))
+                                .text_xs()
+                                .font_weight(FontWeight::BOLD)
+                                .text_color(rgb(0xffffff))
+                                .cursor_pointer()
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    this.undo_send(&out_id, cx);
+                                }))
+                                .child("Undo ↩"),
+                        );
+                    }
+
+                    let toast_id = t.id.clone();
+                    toast_div.child(
+                        div()
+                            .id(ElementId::Name(format!("dismiss-{}", t.id).into()))
+                            .cursor_pointer()
+                            .text_color(rgb(0x94a3b8))
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.dismiss_toast(&toast_id, cx);
+                            }))
+                            .child("✕"),
+                    )
+                }))
+        }
+
         fn render_header(&self, cx: &Context<Self>) -> impl IntoElement {
             let search_display = if self.search_query.is_empty() {
                 "Search messages, senders, attachments (FTS5)...".to_string()
@@ -911,31 +1956,60 @@ pub mod gpui_app {
                         .flex()
                         .flex_row()
                         .items_center()
+                        .justify_between()
                         .w(px(420.0))
                         .h(px(32.0))
                         .px(px(12.0))
                         .rounded_md()
                         .bg(rgb(0x1a202e))
                         .border_1()
-                        .border_color(rgb(0x2d3748))
+                        .border_color(if self.search_query.is_empty() {
+                            rgb(0x2d3748)
+                        } else {
+                            rgb(0x3b82f6)
+                        })
                         .gap(px(8.0))
-                        .cursor_pointer()
-                        .on_click(cx.listener(|this, _, _, cx| {
-                            this.command_palette.open();
-                            this.active_modal = ActiveModal::CommandPalette;
-                            cx.notify();
-                        }))
-                        .child(div().text_xs().text_color(rgb(0x94a3b8)).child("🔍"))
                         .child(
                             div()
+                                .id("search-bar-trigger")
+                                .flex()
+                                .flex_row()
+                                .flex_1()
+                                .items_center()
+                                .gap(px(8.0))
+                                .cursor_pointer()
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.command_palette.open();
+                                    this.active_modal = ActiveModal::CommandPalette;
+                                    cx.notify();
+                                }))
+                                .child(div().text_xs().text_color(rgb(0x94a3b8)).child("🔍"))
+                                .child(
+                                    div()
+                                        .text_xs()
+                                        .text_color(if self.search_query.is_empty() {
+                                            rgb(0x64748b)
+                                        } else {
+                                            rgb(0x60a5fa)
+                                        })
+                                        .child(search_display),
+                                ),
+                        )
+                        .children((!self.search_query.is_empty()).then(|| {
+                            div()
+                                .id("btn-clear-search")
+                                .px(px(6.0))
+                                .py(px(1.0))
+                                .rounded_md()
+                                .bg(rgb(0x1e293b))
                                 .text_xs()
-                                .text_color(if self.search_query.is_empty() {
-                                    rgb(0x64748b)
-                                } else {
-                                    rgb(0xe2e8f0)
-                                })
-                                .child(search_display),
-                        ),
+                                .text_color(rgb(0x94a3b8))
+                                .cursor_pointer()
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.clear_search(cx);
+                                }))
+                                .child("✕")
+                        })),
                 )
                 .child(
                     div()
@@ -1070,7 +2144,7 @@ pub mod gpui_app {
                     ActiveViewTab::Calendar => self.render_calendar_view().into_any_element(),
                     ActiveViewTab::Contacts => self.render_contacts_view().into_any_element(),
                     ActiveViewTab::Tasks => self.render_tasks_view().into_any_element(),
-                    ActiveViewTab::Settings => self.render_settings_view().into_any_element(),
+                    ActiveViewTab::Settings => self.render_settings_view(cx).into_any_element(),
                 })
         }
 
@@ -1160,114 +2234,217 @@ pub mod gpui_app {
                         .iter()
                         .enumerate()
                         .map(|(idx, acc)| {
+                            let acc_id_clone = acc.id.clone();
                             div()
                                 .id(ElementId::Name(format!("account-card-{}", idx).into()))
                                 .flex()
-                                .flex_col()
+                                .flex_row()
+                                .items_center()
+                                .justify_between()
                                 .p(px(8.0))
                                 .rounded_md()
                                 .bg(rgb(0x181f2f))
                                 .child(
                                     div()
-                                        .text_xs()
-                                        .font_weight(FontWeight::SEMIBOLD)
-                                        .text_color(rgb(0xf8fafc))
-                                        .child(acc.email.clone()),
+                                        .flex()
+                                        .flex_col()
+                                        .child(
+                                            div()
+                                                .text_xs()
+                                                .font_weight(FontWeight::SEMIBOLD)
+                                                .text_color(rgb(0xf8fafc))
+                                                .child(acc.email.clone()),
+                                        )
+                                        .child(
+                                            div()
+                                                .text_xs()
+                                                .text_color(rgb(0x38bdf8))
+                                                .child(format!("{:?} • Active", acc.provider_type)),
+                                        ),
                                 )
                                 .child(
                                     div()
+                                        .id(ElementId::Name(
+                                            format!("btn-del-account-{}", idx).into(),
+                                        ))
+                                        .cursor_pointer()
+                                        .px(px(6.0))
+                                        .py(px(2.0))
+                                        .rounded_md()
+                                        .bg(rgb(0x2d1515))
                                         .text_xs()
-                                        .text_color(rgb(0x38bdf8))
-                                        .child(format!("{:?} • Active", acc.provider_type)),
+                                        .text_color(rgb(0xf87171))
+                                        .hover(|s| s.bg(rgb(0x450a0a)))
+                                        .on_click(cx.listener(move |this, _, _, cx| {
+                                            this.delete_account(&acc_id_clone, cx);
+                                        }))
+                                        .child("🗑️"),
                                 )
                         })
                         .collect()
                 })
-                .child(
-                    div().flex().flex_col().gap(px(4.0)).children(
-                        NavigationTree::new(self.folders.clone())
-                            .sorted_folders()
-                            .into_iter()
-                            .map(|f| {
-                                let is_selected =
-                                    self.selected_folder_id.as_deref() == Some(&f.remote_id);
-                                let remote_id_clone = f.remote_id.clone();
-                                let icon = match f.role {
-                                    FolderRole::Inbox => "📥",
-                                    FolderRole::Drafts => "📝",
-                                    FolderRole::Sent => "📤",
-                                    FolderRole::Archive => "📦",
-                                    FolderRole::Junk => "🚫",
-                                    FolderRole::Trash => "🗑️",
-                                    FolderRole::Custom => "📁",
-                                };
-                                let count = if f.role == FolderRole::Inbox {
-                                    self.messages.len()
-                                } else {
-                                    0
-                                };
+                .child(div().flex().flex_col().gap(px(4.0)).children({
+                    let mut folder_elements = Vec::new();
 
+                    // Unified Inbox Button
+                    let unified_unread: i64 = self
+                        .folders
+                        .iter()
+                        .filter(|f| f.role == FolderRole::Inbox)
+                        .map(|f| f.unread_count)
+                        .sum();
+
+                    folder_elements.push(
+                        div()
+                            .id("folder-unified-inbox")
+                            .flex()
+                            .flex_row()
+                            .items_center()
+                            .justify_between()
+                            .px(px(10.0))
+                            .py(px(6.0))
+                            .rounded_md()
+                            .bg(if self.is_unified_inbox {
+                                rgb(0x1e293b)
+                            } else {
+                                rgb(0x00000000)
+                            })
+                            .text_color(if self.is_unified_inbox {
+                                rgb(0x60a5fa)
+                            } else {
+                                rgb(0xcbd5e1)
+                            })
+                            .cursor_pointer()
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.select_unified_inbox(cx);
+                            }))
+                            .child(
                                 div()
-                                    .id(ElementId::Name(format!("folder-{}", f.id).into()))
                                     .flex()
                                     .flex_row()
                                     .items_center()
-                                    .justify_between()
-                                    .px(px(10.0))
-                                    .py(px(6.0))
-                                    .rounded_md()
-                                    .bg(if is_selected {
-                                        rgb(0x1e293b)
-                                    } else {
-                                        rgb(0x00000000)
-                                    })
-                                    .text_color(if is_selected {
-                                        rgb(0x60a5fa)
-                                    } else {
-                                        rgb(0xcbd5e1)
-                                    })
-                                    .cursor_pointer()
-                                    .on_click(cx.listener(move |this, _, _, cx| {
-                                        this.selected_folder_id = Some(remote_id_clone.clone());
-                                        cx.notify();
-                                    }))
+                                    .gap(px(8.0))
+                                    .child(div().text_xs().child("📫"))
                                     .child(
                                         div()
-                                            .flex()
-                                            .flex_row()
-                                            .items_center()
-                                            .gap(px(8.0))
-                                            .child(div().text_xs().child(icon))
-                                            .child(
-                                                div()
-                                                    .text_xs()
-                                                    .font_weight(if is_selected {
-                                                        FontWeight::BOLD
-                                                    } else {
-                                                        FontWeight::NORMAL
-                                                    })
-                                                    .child(f.name.clone()),
-                                            ),
-                                    )
-                                    .child(if count > 0 {
-                                        div()
-                                            .px(px(6.0))
-                                            .py(px(1.0))
-                                            .rounded_full()
-                                            .bg(rgb(0x2563eb))
-                                            .text_color(rgb(0xffffff))
                                             .text_xs()
-                                            .child(format!("{count}"))
-                                    } else {
-                                        div()
-                                    })
+                                            .font_weight(if self.is_unified_inbox {
+                                                FontWeight::BOLD
+                                            } else {
+                                                FontWeight::NORMAL
+                                            })
+                                            .child("Unified Inbox"),
+                                    ),
+                            )
+                            .child(if unified_unread > 0 {
+                                div()
+                                    .px(px(6.0))
+                                    .py(px(1.0))
+                                    .rounded_full()
+                                    .bg(rgb(0x2563eb))
+                                    .text_color(rgb(0xffffff))
+                                    .text_xs()
+                                    .child(format!("{unified_unread}"))
+                            } else {
+                                div()
                             }),
-                    ),
-                )
+                    );
+
+                    // Individual Folders
+                    let nav_tree = NavigationTree::new(self.folders.clone());
+                    let individual_folders = nav_tree
+                        .sorted_folders()
+                        .into_iter()
+                        .map(|f| {
+                            let is_selected = !self.is_unified_inbox
+                                && (self.selected_folder_id.as_deref() == Some(&f.id)
+                                    || self.selected_folder_id.as_deref() == Some(&f.remote_id));
+                            let folder_id_clone = f.id.clone();
+                            let icon = match f.role {
+                                FolderRole::Inbox => "📥",
+                                FolderRole::Drafts => "📝",
+                                FolderRole::Sent => "📤",
+                                FolderRole::Archive => "📦",
+                                FolderRole::Junk => "🚫",
+                                FolderRole::Trash => "🗑️",
+                                FolderRole::Custom => "📁",
+                            };
+                            let count = f.unread_count;
+
+                            div()
+                                .id(ElementId::Name(format!("folder-{}", f.id).into()))
+                                .flex()
+                                .flex_row()
+                                .items_center()
+                                .justify_between()
+                                .px(px(10.0))
+                                .py(px(6.0))
+                                .rounded_md()
+                                .bg(if is_selected {
+                                    rgb(0x1e293b)
+                                } else {
+                                    rgb(0x00000000)
+                                })
+                                .text_color(if is_selected {
+                                    rgb(0x60a5fa)
+                                } else {
+                                    rgb(0xcbd5e1)
+                                })
+                                .cursor_pointer()
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    this.select_folder(folder_id_clone.clone(), cx);
+                                }))
+                                .child(
+                                    div()
+                                        .flex()
+                                        .flex_row()
+                                        .items_center()
+                                        .gap(px(8.0))
+                                        .child(div().text_xs().child(icon))
+                                        .child(
+                                            div()
+                                                .text_xs()
+                                                .font_weight(if is_selected {
+                                                    FontWeight::BOLD
+                                                } else {
+                                                    FontWeight::NORMAL
+                                                })
+                                                .child(f.name.clone()),
+                                        ),
+                                )
+                                .child(if count > 0 {
+                                    div()
+                                        .px(px(6.0))
+                                        .py(px(1.0))
+                                        .rounded_full()
+                                        .bg(rgb(0x2563eb))
+                                        .text_color(rgb(0xffffff))
+                                        .text_xs()
+                                        .child(format!("{count}"))
+                                } else {
+                                    div()
+                                })
+                        })
+                        .collect::<Vec<_>>();
+
+                    folder_elements.extend(individual_folders);
+                    folder_elements
+                }))
         }
 
         fn render_message_list_pane(&self, cx: &Context<Self>) -> impl IntoElement {
-            let visible_msgs: Vec<&MessageSummary> = self.filtered_messages().take(100).collect();
+            let visible_rows: Vec<ThreadedMessage<'_>> =
+                self.threaded_messages().into_iter().take(100).collect();
+
+            let sort_label = match self.sort_order {
+                MessageSortOrder::DateDescending => "↓ Date",
+                MessageSortOrder::DateAscending => "↑ Date",
+            };
+            let density_label = match self.row_density {
+                MessageRowDensity::Compact => "Compact",
+                MessageRowDensity::Comfortable => "Normal",
+                MessageRowDensity::Roomy => "Roomy",
+            };
 
             div()
                 .flex()
@@ -1280,39 +2457,121 @@ pub mod gpui_app {
                 .child(
                     div()
                         .flex()
-                        .flex_row()
-                        .items_center()
-                        .p(px(8.0))
-                        .gap(px(4.0))
+                        .flex_col()
                         .border_b_1()
                         .border_color(rgb(0x1f293d))
-                        .child(self.render_filter_chip("All", ListFilter::All, cx))
-                        .child(self.render_filter_chip("Unread", ListFilter::Unread, cx))
-                        .child(self.render_filter_chip("Starred", ListFilter::Flagged, cx))
-                        .child(self.render_filter_chip(
-                            "📎 Files",
-                            ListFilter::WithAttachments,
-                            cx,
-                        )),
+                        .child(
+                            div()
+                                .flex()
+                                .flex_row()
+                                .items_center()
+                                .p(px(8.0))
+                                .gap(px(4.0))
+                                .child(self.render_filter_chip("All", ListFilter::All, cx))
+                                .child(self.render_filter_chip("Unread", ListFilter::Unread, cx))
+                                .child(self.render_filter_chip("Starred", ListFilter::Flagged, cx))
+                                .child(self.render_filter_chip(
+                                    "📎 Files",
+                                    ListFilter::WithAttachments,
+                                    cx,
+                                )),
+                        )
+                        .child(
+                            div()
+                                .flex()
+                                .flex_row()
+                                .items_center()
+                                .justify_between()
+                                .px(px(8.0))
+                                .pb(px(6.0))
+                                .text_xs()
+                                .child(
+                                    div()
+                                        .id("btn-toggle-thread")
+                                        .px(px(6.0))
+                                        .py(px(2.0))
+                                        .rounded_md()
+                                        .bg(if self.is_threaded {
+                                            rgb(0x2563eb)
+                                        } else {
+                                            rgb(0x1e293b)
+                                        })
+                                        .text_color(if self.is_threaded {
+                                            rgb(0xffffff)
+                                        } else {
+                                            rgb(0x94a3b8)
+                                        })
+                                        .cursor_pointer()
+                                        .on_click(cx.listener(|this, _, _, cx| {
+                                            this.toggle_threading(cx);
+                                        }))
+                                        .child("🧵 Threaded"),
+                                )
+                                .child(
+                                    div()
+                                        .flex()
+                                        .flex_row()
+                                        .gap(px(4.0))
+                                        .child(
+                                            div()
+                                                .id("btn-toggle-sort")
+                                                .px(px(6.0))
+                                                .py(px(2.0))
+                                                .rounded_md()
+                                                .bg(rgb(0x1e293b))
+                                                .text_color(rgb(0x94a3b8))
+                                                .cursor_pointer()
+                                                .on_click(cx.listener(|this, _, _, cx| {
+                                                    this.cycle_sort_order(cx);
+                                                }))
+                                                .child(sort_label),
+                                        )
+                                        .child(
+                                            div()
+                                                .id("btn-toggle-density")
+                                                .px(px(6.0))
+                                                .py(px(2.0))
+                                                .rounded_md()
+                                                .bg(rgb(0x1e293b))
+                                                .text_color(rgb(0x94a3b8))
+                                                .cursor_pointer()
+                                                .on_click(cx.listener(|this, _, _, cx| {
+                                                    this.cycle_row_density(cx);
+                                                }))
+                                                .child(density_label),
+                                        ),
+                                ),
+                        ),
                 )
                 .child(
                     div()
                         .flex()
                         .flex_col()
                         .flex_1()
-                        .children(visible_msgs.into_iter().map(|msg| {
+                        .children(visible_rows.into_iter().map(|row| {
+                            let msg = row.summary;
                             let is_selected = self.selected_message_id.as_deref() == Some(&msg.id);
                             let sender = msg.from_name.as_deref().unwrap_or(&msg.from_address);
                             let subject = msg.subject.as_deref().unwrap_or("(No Subject)");
                             let snippet = msg.snippet.as_deref().unwrap_or("");
                             let date_str = msg.sent_at.format("%b %d, %H:%M").to_string();
                             let msg_id = msg.id.clone();
+                            let is_child = row.is_child;
+                            let thread_count = row.thread_count;
 
-                            div()
+                            let pad_left = if is_child { px(24.0) } else { px(10.0) };
+
+                            let mut item_div = div()
                                 .id(ElementId::Name(format!("msg-item-{}", msg_id).into()))
                                 .flex()
                                 .flex_col()
-                                .p(px(10.0))
+                                .pl(pad_left)
+                                .pr(px(10.0))
+                                .py(match self.row_density {
+                                    MessageRowDensity::Compact => px(4.0),
+                                    MessageRowDensity::Comfortable => px(8.0),
+                                    MessageRowDensity::Roomy => px(12.0),
+                                })
                                 .border_b_1()
                                 .border_color(rgb(0x182030))
                                 .bg(if is_selected {
@@ -1324,71 +2583,83 @@ pub mod gpui_app {
                                 })
                                 .cursor_pointer()
                                 .on_click(cx.listener(move |this, _, _, cx| {
-                                    this.selected_message_id = Some(msg_id.clone());
-                                    cx.notify();
-                                }))
+                                    this.select_message(msg_id.clone(), cx);
+                                }));
+
+                            let header_row = div()
+                                .flex()
+                                .flex_row()
+                                .items_center()
+                                .justify_between()
                                 .child(
                                     div()
                                         .flex()
                                         .flex_row()
                                         .items_center()
-                                        .justify_between()
+                                        .gap(px(6.0))
+                                        .child(if is_child {
+                                            div().text_xs().text_color(rgb(0x64748b)).child("↳")
+                                        } else if !msg.is_read {
+                                            div()
+                                                .w(px(6.0))
+                                                .h(px(6.0))
+                                                .rounded_full()
+                                                .bg(rgb(0x3b82f6))
+                                        } else {
+                                            div().w(px(6.0)).h(px(6.0))
+                                        })
                                         .child(
                                             div()
-                                                .flex()
-                                                .flex_row()
-                                                .items_center()
-                                                .gap(px(6.0))
-                                                .child(if !msg.is_read {
-                                                    div()
-                                                        .w(px(6.0))
-                                                        .h(px(6.0))
-                                                        .rounded_full()
-                                                        .bg(rgb(0x3b82f6))
+                                                .text_xs()
+                                                .font_weight(if !msg.is_read {
+                                                    FontWeight::BOLD
                                                 } else {
-                                                    div().w(px(6.0)).h(px(6.0))
+                                                    FontWeight::MEDIUM
                                                 })
-                                                .child(
-                                                    div()
-                                                        .text_xs()
-                                                        .font_weight(if !msg.is_read {
-                                                            FontWeight::BOLD
-                                                        } else {
-                                                            FontWeight::MEDIUM
-                                                        })
-                                                        .text_color(rgb(0xf1f5f9))
-                                                        .child(sender.to_string()),
-                                                ),
-                                        )
-                                        .child(
-                                            div()
-                                                .flex()
-                                                .flex_row()
-                                                .items_center()
-                                                .gap(px(6.0))
-                                                .child(
-                                                    div()
-                                                        .text_xs()
-                                                        .text_color(if msg.is_flagged {
-                                                            rgb(0xfbbf24)
-                                                        } else {
-                                                            rgb(0x475569)
-                                                        })
-                                                        .child(if msg.is_flagged {
-                                                            "★"
-                                                        } else {
-                                                            "☆"
-                                                        }),
-                                                )
-                                                .child(
-                                                    div()
-                                                        .text_xs()
-                                                        .text_color(rgb(0x64748b))
-                                                        .child(date_str),
-                                                ),
+                                                .text_color(rgb(0xf1f5f9))
+                                                .child(sender.to_string()),
                                         ),
                                 )
                                 .child(
+                                    div()
+                                        .flex()
+                                        .flex_row()
+                                        .items_center()
+                                        .gap(px(6.0))
+                                        .child(if thread_count > 1 && !is_child {
+                                            div()
+                                                .px(px(5.0))
+                                                .py(px(1.0))
+                                                .rounded_full()
+                                                .bg(rgb(0x1e293b))
+                                                .text_color(rgb(0x60a5fa))
+                                                .text_xs()
+                                                .child(format!("🧵 {thread_count}"))
+                                        } else {
+                                            div()
+                                        })
+                                        .child(
+                                            div()
+                                                .text_xs()
+                                                .text_color(if msg.is_flagged {
+                                                    rgb(0xfbbf24)
+                                                } else {
+                                                    rgb(0x475569)
+                                                })
+                                                .child(if msg.is_flagged { "★" } else { "☆" }),
+                                        )
+                                        .child(
+                                            div()
+                                                .text_xs()
+                                                .text_color(rgb(0x64748b))
+                                                .child(date_str),
+                                        ),
+                                );
+
+                            item_div = item_div.child(header_row);
+
+                            if self.row_density != MessageRowDensity::Compact {
+                                item_div = item_div.child(
                                     div()
                                         .pt(px(2.0))
                                         .text_xs()
@@ -1399,14 +2670,34 @@ pub mod gpui_app {
                                         })
                                         .text_color(rgb(0xe2e8f0))
                                         .child(subject.to_string()),
-                                )
-                                .child(div().pt(px(2.0)).text_xs().text_color(rgb(0x94a3b8)).child(
-                                    if snippet.len() > 60 {
-                                        format!("{}...", &snippet[..60])
-                                    } else {
-                                        snippet.to_string()
-                                    },
-                                ))
+                                );
+                            }
+
+                            if self.row_density == MessageRowDensity::Roomy && !snippet.is_empty() {
+                                item_div = item_div.child(
+                                    div().pt(px(2.0)).text_xs().text_color(rgb(0x94a3b8)).child(
+                                        if snippet.len() > 100 {
+                                            format!("{}...", &snippet[..100])
+                                        } else {
+                                            snippet.to_string()
+                                        },
+                                    ),
+                                );
+                            } else if self.row_density == MessageRowDensity::Comfortable
+                                && !snippet.is_empty()
+                            {
+                                item_div = item_div.child(
+                                    div().pt(px(2.0)).text_xs().text_color(rgb(0x94a3b8)).child(
+                                        if snippet.len() > 60 {
+                                            format!("{}...", &snippet[..60])
+                                        } else {
+                                            snippet.to_string()
+                                        },
+                                    ),
+                                );
+                            }
+
+                            item_div
                         })),
                 )
         }
@@ -1456,12 +2747,14 @@ pub mod gpui_app {
                     let from_addr = &msg.from_address;
                     let subject = msg.subject.as_deref().unwrap_or("(No Subject)");
                     let date_full = msg.sent_at.to_rfc2822();
-                    let body = msg.snippet.as_deref().unwrap_or("No content available.");
+                    let rendered_body = self.message_viewer.rendered();
+                    let attachments = &self.message_viewer.attachments;
 
                     div()
                         .flex()
                         .flex_col()
                         .size_full()
+                        // Top toolbar
                         .child(
                             div()
                                 .flex()
@@ -1490,19 +2783,124 @@ pub mod gpui_app {
                                                 .cursor_pointer()
                                                 .on_click(cx.listener({
                                                     let reply_to = msg.from_address.clone();
-                                                    let reply_subj = if msg.subject.as_deref().unwrap_or("").to_lowercase().starts_with("re:") {
+                                                    let reply_subj = if msg
+                                                        .subject
+                                                        .as_deref()
+                                                        .unwrap_or("")
+                                                        .to_lowercase()
+                                                        .starts_with("re:")
+                                                    {
                                                         msg.subject.clone().unwrap_or_default()
                                                     } else {
-                                                        format!("Re: {}", msg.subject.as_deref().unwrap_or(""))
+                                                        format!(
+                                                            "Re: {}",
+                                                            msg.subject.as_deref().unwrap_or("")
+                                                        )
                                                     };
+                                                    let msg_id = msg.id.clone();
                                                     move |this, _, _, cx| {
                                                         this.compose_to = reply_to.clone();
                                                         this.compose_subject = reply_subj.clone();
+                                                        this.compose_body =
+                                                            this.message_viewer.generate_reply_text();
+                                                        this.compose_reply_to_id =
+                                                            Some(msg_id.clone());
+                                                        this.compose_inputs = None;
                                                         this.active_modal = ActiveModal::Compose;
                                                         cx.notify();
                                                     }
                                                 }))
                                                 .child("↩ Reply"),
+                                        )
+                                        .child(
+                                            div()
+                                                .id("btn-reply-all-message")
+                                                .px(px(10.0))
+                                                .py(px(5.0))
+                                                .rounded_md()
+                                                .bg(rgb(0x1e293b))
+                                                .text_color(rgb(0xcbd5e1))
+                                                .text_xs()
+                                                .cursor_pointer()
+                                                .on_click(cx.listener({
+                                                    let reply_to = msg.from_address.clone();
+                                                    let reply_subj = if msg
+                                                        .subject
+                                                        .as_deref()
+                                                        .unwrap_or("")
+                                                        .to_lowercase()
+                                                        .starts_with("re:")
+                                                    {
+                                                        msg.subject.clone().unwrap_or_default()
+                                                    } else {
+                                                        format!(
+                                                            "Re: {}",
+                                                            msg.subject.as_deref().unwrap_or("")
+                                                        )
+                                                    };
+                                                    let msg_id = msg.id.clone();
+                                                    move |this, _, _, cx| {
+                                                        this.compose_to = reply_to.clone();
+                                                        this.compose_subject = reply_subj.clone();
+                                                        this.compose_body =
+                                                            this.message_viewer.generate_reply_text();
+                                                        this.compose_reply_to_id =
+                                                            Some(msg_id.clone());
+                                                        this.compose_inputs = None;
+                                                        this.active_modal = ActiveModal::Compose;
+                                                        cx.notify();
+                                                    }
+                                                }))
+                                                .child("👥 Reply All"),
+                                        )
+                                        .child(
+                                            div()
+                                                .id("btn-forward-message")
+                                                .px(px(10.0))
+                                                .py(px(5.0))
+                                                .rounded_md()
+                                                .bg(rgb(0x1e293b))
+                                                .text_color(rgb(0xcbd5e1))
+                                                .text_xs()
+                                                .cursor_pointer()
+                                                .on_click(cx.listener({
+                                                    let fwd_subj = if msg
+                                                        .subject
+                                                        .as_deref()
+                                                        .unwrap_or("")
+                                                        .to_lowercase()
+                                                        .starts_with("fwd:")
+                                                    {
+                                                        msg.subject.clone().unwrap_or_default()
+                                                    } else {
+                                                        format!(
+                                                            "Fwd: {}",
+                                                            msg.subject.as_deref().unwrap_or("")
+                                                        )
+                                                    };
+                                                    let sender = msg.from_address.clone();
+                                                    let subj =
+                                                        msg.subject.clone().unwrap_or_default();
+                                                    let sent_date = msg.sent_at.to_rfc2822();
+                                                    move |this, _, _, cx| {
+                                                        let plain = this
+                                                            .message_viewer
+                                                            .plain_text
+                                                            .as_deref()
+                                                            .unwrap_or("");
+                                                        this.compose_to = String::new();
+                                                        this.compose_subject = fwd_subj.clone();
+                                                        this.compose_body = format!(
+                                                            "\n\n---------- Forwarded message ---------\nFrom: {}\nSubject: {}\nDate: {}\n\n{}",
+                                                            sender, subj, sent_date, plain
+                                                        );
+                                                        this.compose_reply_to_id = None;
+                                                        this.compose_inputs = None;
+                                                        this.active_modal = ActiveModal::Compose;
+                                                        cx.notify();
+                                                    }
+                                                }))
+                                                .child("↪ Forward"),
                                         )
                                         .child(
                                             div()
@@ -1533,25 +2931,59 @@ pub mod gpui_app {
                                                     this.delete_selected_message(cx);
                                                 }))
                                                 .child("🗑️ Delete"),
-                                        )
+                                        ),
                                 )
+                                // Security & Auth Badges
                                 .child(
                                     div()
                                         .flex()
                                         .flex_row()
                                         .items_center()
                                         .gap(px(6.0))
-                                        .px(px(8.0))
-                                        .py(px(4.0))
-                                        .rounded_md()
-                                        .bg(rgb(0x064e3b))
-                                        .border_1()
-                                        .border_color(rgb(0x059669))
-                                        .text_color(rgb(0x34d399))
-                                        .text_xs()
-                                        .child("🔒 OpenPGP Signed & Encrypted ✓")
-                                )
+                                        .child(
+                                            div()
+                                                .px(px(8.0))
+                                                .py(px(3.0))
+                                                .rounded_md()
+                                                .bg(rgb(0x064e3b))
+                                                .border_1()
+                                                .border_color(rgb(0x059669))
+                                                .text_color(rgb(0x34d399))
+                                                .text_xs()
+                                                .child("✓ DKIM Pass"),
+                                        )
+                                        .child(
+                                            div()
+                                                .px(px(8.0))
+                                                .py(px(3.0))
+                                                .rounded_md()
+                                                .bg(rgb(0x064e3b))
+                                                .border_1()
+                                                .border_color(rgb(0x059669))
+                                                .text_color(rgb(0x34d399))
+                                                .text_xs()
+                                                .child("✓ SPF Pass"),
+                                        )
+                                        .child(
+                                            div()
+                                                .px(px(8.0))
+                                                .py(px(3.0))
+                                                .rounded_md()
+                                                .bg(rgb(0x1e293b))
+                                                .border_1()
+                                                .border_color(rgb(0x334155))
+                                                .text_color(rgb(0x94a3b8))
+                                                .text_xs()
+                                                .child(match self.message_viewer.security_status {
+                                                    SecurityStatus::PgpSignedValid => "🔒 PGP Signed ✓",
+                                                    SecurityStatus::PgpEncryptedAndSigned => "🔒 PGP Encrypted & Signed ✓",
+                                                    SecurityStatus::SmimeValid => "🔏 S/MIME Valid (X.509) ✓",
+                                                    _ => "🔒 TLS Encrypted",
+                                                }),
+                                        ),
+                                ),
                         )
+                        // Subject & Sender info
                         .child(
                             div()
                                 .flex()
@@ -1565,7 +2997,7 @@ pub mod gpui_app {
                                         .text_lg()
                                         .font_weight(FontWeight::BOLD)
                                         .text_color(rgb(0xf8fafc))
-                                        .child(subject.to_string())
+                                        .child(subject.to_string()),
                                 )
                                 .child(
                                     div()
@@ -1597,13 +3029,66 @@ pub mod gpui_app {
                                                     div()
                                                         .flex()
                                                         .flex_col()
-                                                        .child(div().text_xs().font_weight(FontWeight::BOLD).text_color(rgb(0xf1f5f9)).child(if from_name.is_empty() { from_addr.clone() } else { format!("{from_name} <{from_addr}>") }))
-                                                        .child(div().text_xs().text_color(rgb(0x94a3b8)).child(format!("To: {}", self.accounts.first().map(|a| a.email.as_str()).unwrap_or("me"))))
-                                                )
+                                                        .child(
+                                                            div()
+                                                                .text_xs()
+                                                                .font_weight(FontWeight::BOLD)
+                                                                .text_color(rgb(0xf1f5f9))
+                                                                .child(if from_name.is_empty() {
+                                                                    from_addr.clone()
+                                                                } else {
+                                                                    format!("{from_name} <{from_addr}>")
+                                                                }),
+                                                        )
+                                                        .child(
+                                                            div()
+                                                                .text_xs()
+                                                                .text_color(rgb(0x94a3b8))
+                                                                .child(format!(
+                                                                    "To: {}",
+                                                                    self.accounts.first().map(|a| a.email.as_str()).unwrap_or("me")
+                                                                )),
+                                                        ),
+                                                ),
                                         )
-                                        .child(div().text_xs().text_color(rgb(0x64748b)).child(date_full))
-                                )
+                                        .child(div().text_xs().text_color(rgb(0x64748b)).child(date_full)),
+                                ),
                         )
+                        // Anti-Phishing Security Warning Banner
+                        .children(self.message_viewer.phishing_warning.as_ref().map(|warn_msg| {
+                            div()
+                                .id("banner-phishing-warning")
+                                .flex()
+                                .flex_row()
+                                .items_center()
+                                .gap(px(10.0))
+                                .px(px(16.0))
+                                .py(px(10.0))
+                                .bg(rgb(0x450a0a))
+                                .border_b_1()
+                                .border_color(rgb(0xdc2626))
+                                .child(div().text_base().child("⚠️"))
+                                .child(
+                                    div()
+                                        .flex()
+                                        .flex_col()
+                                        .gap(px(2.0))
+                                        .child(
+                                            div()
+                                                .text_xs()
+                                                .font_weight(FontWeight::BOLD)
+                                                .text_color(rgb(0xfecaca))
+                                                .child("PHISHING & SPOOFING ALERT: Suspect Links Detected"),
+                                        )
+                                        .child(
+                                            div()
+                                                .text_xs()
+                                                .text_color(rgb(0xfca5a5))
+                                                .child(warn_msg.clone()),
+                                        ),
+                                )
+                        }))
+                        // Tracker & remote image security bar
                         .child(
                             div()
                                 .flex()
@@ -1615,7 +3100,16 @@ pub mod gpui_app {
                                 .bg(rgb(0x181e2b))
                                 .border_b_1()
                                 .border_color(rgb(0x1f293d))
-                                .child(div().text_xs().text_color(rgb(0x94a3b8)).child("🛡️ Remote trackers and pixel beacons blocked by ammonia + lol_html sanitizer."))
+                                .child(
+                                    div()
+                                        .text_xs()
+                                        .text_color(rgb(0x94a3b8))
+                                        .child(if self.block_remote_images {
+                                            "🛡️ Remote images blocked to protect your privacy & stop tracking pixels."
+                                        } else {
+                                            "⚠️ Remote images allowed for this session."
+                                        }),
+                                )
                                 .child(
                                     div()
                                         .id("btn-toggle-images")
@@ -1623,12 +3117,89 @@ pub mod gpui_app {
                                         .text_color(rgb(0x60a5fa))
                                         .cursor_pointer()
                                         .on_click(cx.listener(|this, _, _, cx| {
-                                            this.block_remote_images = !this.block_remote_images;
-                                            cx.notify();
+                                            this.toggle_remote_images(cx);
                                         }))
-                                        .child(if self.block_remote_images { "Load Remote Images" } else { "Block Images" }),
-                                )
+                                        .child(if self.block_remote_images {
+                                            "Load Remote Images"
+                                        } else {
+                                            "Block Remote Images"
+                                        }),
+                                ),
                         )
+                        // Attachments tray (if any)
+                        .child(if !attachments.is_empty() {
+                            div()
+                                .flex()
+                                .flex_col()
+                                .px(px(16.0))
+                                .py(px(8.0))
+                                .border_b_1()
+                                .border_color(rgb(0x1f293d))
+                                .bg(rgb(0x121722))
+                                .gap(px(6.0))
+                                .child(
+                                    div()
+                                        .text_xs()
+                                        .font_weight(FontWeight::BOLD)
+                                        .text_color(rgb(0x94a3b8))
+                                        .child(format!("📎 Attachments ({})", attachments.len())),
+                                )
+                                .child(
+                                    div()
+                                        .flex()
+                                        .flex_row()
+                                        .flex_wrap()
+                                        .gap(px(8.0))
+                                        .children(attachments.iter().map(|att| {
+                                            let fname = att.filename.clone();
+                                            let sz_str = if att.size_bytes >= 1024 * 1024 {
+                                                format!("{:.1} MB", att.size_bytes as f64 / (1024.0 * 1024.0))
+                                            } else if att.size_bytes >= 1024 {
+                                                format!("{:.0} KB", att.size_bytes as f64 / 1024.0)
+                                            } else {
+                                                format!("{} B", att.size_bytes)
+                                            };
+                                            div()
+                                                .id(ElementId::Name(format!("att-{}", fname).into()))
+                                                .flex()
+                                                .flex_row()
+                                                .items_center()
+                                                .gap(px(6.0))
+                                                .px(px(8.0))
+                                                .py(px(4.0))
+                                                .rounded_md()
+                                                .bg(rgb(0x1e293b))
+                                                .border_1()
+                                                .border_color(rgb(0x334155))
+                                                .text_xs()
+                                                .text_color(rgb(0xcbd5e1))
+                                                .child(div().child("📄"))
+                                                .child(div().child(fname.clone()))
+                                                .child(div().text_color(rgb(0x64748b)).child(format!("({sz_str})")))
+                                                .child(
+                                                    div()
+                                                        .id(ElementId::Name(format!("save-att-{}", fname).into()))
+                                                        .cursor_pointer()
+                                                        .text_color(rgb(0x60a5fa))
+                                                        .on_click(cx.listener({
+                                                            let att_name = fname.clone();
+                                                            let b_path = att.blob_path.clone();
+                                                            move |this, _, _, cx| {
+                                                                this.save_attachment_to_downloads(
+                                                                    &att_name,
+                                                                    Some(b_path.as_str()),
+                                                                    cx,
+                                                                );
+                                                            }
+                                                        }))
+                                                        .child("💾 Save"),
+                                                )
+                                        })),
+                                )
+                        } else {
+                            div()
+                        })
+                        // Clean Body Content
                         .child(
                             div()
                                 .flex()
@@ -1636,9 +3207,25 @@ pub mod gpui_app {
                                 .flex_1()
                                 .p(px(20.0))
                                 .gap(px(12.0))
-                                .child(div().text_sm().text_color(rgb(0xe2e8f0)).child(body.to_string()))
-                                .child(div().pt(px(16.0)).text_xs().text_color(rgb(0x64748b)).child("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"))
-                                .child(div().text_xs().text_color(rgb(0x94a3b8)).child("Rendered natively with Pure Rust GPUI Engine. Full-text search and offline storage powered by SQLite WAL + FTS5."))
+                                .child(
+                                    div()
+                                        .text_sm()
+                                        .text_color(rgb(0xe2e8f0))
+                                        .child(rendered_body),
+                                )
+                                .child(
+                                    div()
+                                        .pt(px(16.0))
+                                        .text_xs()
+                                        .text_color(rgb(0x64748b))
+                                        .child("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"),
+                                )
+                                .child(
+                                    div()
+                                        .text_xs()
+                                        .text_color(rgb(0x94a3b8))
+                                        .child("Rendered natively with Pure Rust GPUI Engine. Full-text search and offline storage powered by SQLite WAL + FTS5."),
+                                ),
                         )
                 } else {
                     div()
@@ -1646,7 +3233,12 @@ pub mod gpui_app {
                         .items_center()
                         .justify_center()
                         .size_full()
-                        .child(div().text_sm().text_color(rgb(0x64748b)).child("Select a message to view its contents"))
+                        .child(
+                            div()
+                                .text_sm()
+                                .text_color(rgb(0x64748b))
+                                .child("Select a message to view its contents"),
+                        )
                 })
         }
 
@@ -1904,7 +3496,34 @@ pub mod gpui_app {
                 ))
         }
 
-        fn render_settings_view(&self) -> Div {
+        fn render_settings_view(&self, cx: &Context<Self>) -> Div {
+            let themes = [
+                (vespetrel_core::ColorTheme::DarkSlate, "Dark Slate"),
+                (vespetrel_core::ColorTheme::OledBlack, "OLED Black"),
+                (
+                    vespetrel_core::ColorTheme::CatppuccinMocha,
+                    "Catppuccin Mocha",
+                ),
+                (vespetrel_core::ColorTheme::LightPaper, "Light Paper"),
+                (vespetrel_core::ColorTheme::System, "System Default"),
+            ];
+
+            let densities = [
+                (vespetrel_core::RowDensity::Compact, "Compact (28px)"),
+                (
+                    vespetrel_core::RowDensity::Comfortable,
+                    "Comfortable (40px)",
+                ),
+                (vespetrel_core::RowDensity::Roomy, "Roomy (56px)"),
+            ];
+
+            let undo_delays = [
+                (5, "5 seconds"),
+                (10, "10 seconds"),
+                (20, "20 seconds"),
+                (30, "30 seconds"),
+            ];
+
             div()
                 .flex()
                 .flex_col()
@@ -1919,6 +3538,7 @@ pub mod gpui_app {
                         .text_color(rgb(0xf8fafc))
                         .child("⚙️ Configuration & Preferences"),
                 )
+                // Section 1: Appearance & Theme
                 .child(
                     div()
                         .flex()
@@ -1934,7 +3554,223 @@ pub mod gpui_app {
                                 .text_sm()
                                 .font_weight(FontWeight::BOLD)
                                 .text_color(rgb(0x60a5fa))
-                                .child("Storage & Database Engine"),
+                                .child("🎨 Appearance & Color Theme"),
+                        )
+                        .child(
+                            div()
+                                .flex()
+                                .flex_row()
+                                .flex_wrap()
+                                .gap(px(8.0))
+                                .children(themes.into_iter().map(|(th, label)| {
+                                    let is_active = self.settings.theme == th;
+                                    div()
+                                        .id(ElementId::Name(format!("btn-theme-{}", label).into()))
+                                        .px(px(12.0))
+                                        .py(px(6.0))
+                                        .rounded_md()
+                                        .bg(if is_active { rgb(0x1e3a8a) } else { rgb(0x0f172a) })
+                                        .border_1()
+                                        .border_color(if is_active { rgb(0x3b82f6) } else { rgb(0x334155) })
+                                        .text_xs()
+                                        .text_color(if is_active { rgb(0x93c5fd) } else { rgb(0x94a3b8) })
+                                        .font_weight(if is_active { FontWeight::BOLD } else { FontWeight::NORMAL })
+                                        .cursor_pointer()
+                                        .on_click(cx.listener(move |this, _, _, cx| {
+                                            this.set_settings_theme(th, cx);
+                                        }))
+                                        .child(format!("{}{}", if is_active { "● " } else { "" }, label))
+                                })),
+                        ),
+                )
+                // Section 2: Reading & Display Density
+                .child(
+                    div()
+                        .flex()
+                        .flex_col()
+                        .p(px(16.0))
+                        .rounded_lg()
+                        .bg(rgb(0x171c2a))
+                        .border_1()
+                        .border_color(rgb(0x232c40))
+                        .gap(px(10.0))
+                        .child(
+                            div()
+                                .text_sm()
+                                .font_weight(FontWeight::BOLD)
+                                .text_color(rgb(0x60a5fa))
+                                .child("📐 Message List Density"),
+                        )
+                        .child(
+                            div()
+                                .flex()
+                                .flex_row()
+                                .gap(px(8.0))
+                                .children(densities.into_iter().map(|(dens, label)| {
+                                    let is_active = self.settings.row_density == dens;
+                                    div()
+                                        .id(ElementId::Name(format!("btn-density-{}", label).into()))
+                                        .px(px(12.0))
+                                        .py(px(6.0))
+                                        .rounded_md()
+                                        .bg(if is_active { rgb(0x1e3a8a) } else { rgb(0x0f172a) })
+                                        .border_1()
+                                        .border_color(if is_active { rgb(0x3b82f6) } else { rgb(0x334155) })
+                                        .text_xs()
+                                        .text_color(if is_active { rgb(0x93c5fd) } else { rgb(0x94a3b8) })
+                                        .font_weight(if is_active { FontWeight::BOLD } else { FontWeight::NORMAL })
+                                        .cursor_pointer()
+                                        .on_click(cx.listener(move |this, _, _, cx| {
+                                            this.set_settings_density(dens, cx);
+                                        }))
+                                        .child(format!("{}{}", if is_active { "● " } else { "" }, label))
+                                })),
+                        ),
+                )
+                // Section 3: Privacy & Security
+                .child(
+                    div()
+                        .flex()
+                        .flex_col()
+                        .p(px(16.0))
+                        .rounded_lg()
+                        .bg(rgb(0x171c2a))
+                        .border_1()
+                        .border_color(rgb(0x232c40))
+                        .gap(px(12.0))
+                        .child(
+                            div()
+                                .text_sm()
+                                .font_weight(FontWeight::BOLD)
+                                .text_color(rgb(0x60a5fa))
+                                .child("🛡️ Privacy & Threat Defense"),
+                        )
+                        .child(
+                            div()
+                                .flex()
+                                .flex_row()
+                                .items_center()
+                                .justify_between()
+                                .child(
+                                    div()
+                                        .flex()
+                                        .flex_col()
+                                        .gap(px(2.0))
+                                        .child(div().text_xs().font_weight(FontWeight::BOLD).text_color(rgb(0xf1f5f9)).child("Auto-strip Tracking Pixels"))
+                                        .child(div().text_xs().text_color(rgb(0x94a3b8)).child("Automatically strip 1x1 tracking GIFs and known telemetry web beacons")),
+                                )
+                                .child(
+                                    div()
+                                        .id("btn-toggle-strip-trackers")
+                                        .px(px(12.0))
+                                        .py(px(4.0))
+                                        .rounded_md()
+                                        .bg(if self.settings.auto_strip_trackers { rgb(0x064e3b) } else { rgb(0x1e293b) })
+                                        .border_1()
+                                        .border_color(if self.settings.auto_strip_trackers { rgb(0x10b981) } else { rgb(0x334155) })
+                                        .text_xs()
+                                        .text_color(if self.settings.auto_strip_trackers { rgb(0xa7f3d0) } else { rgb(0x94a3b8) })
+                                        .cursor_pointer()
+                                        .on_click(cx.listener(|this, _, _, cx| {
+                                            this.toggle_settings_strip_trackers(cx);
+                                        }))
+                                        .child(if self.settings.auto_strip_trackers { "✓ Enabled" } else { "✕ Disabled" }),
+                                ),
+                        )
+                        .child(
+                            div()
+                                .flex()
+                                .flex_row()
+                                .items_center()
+                                .justify_between()
+                                .child(
+                                    div()
+                                        .flex()
+                                        .flex_col()
+                                        .gap(px(2.0))
+                                        .child(div().text_xs().font_weight(FontWeight::BOLD).text_color(rgb(0xf1f5f9)).child("Anti-Phishing & Link Spoofing Warnings"))
+                                        .child(div().text_xs().text_color(rgb(0x94a3b8)).child("Detect deceptive display domains, punycode homographs, and IP URLs")),
+                                )
+                                .child(
+                                    div()
+                                        .id("btn-toggle-phishing-warnings")
+                                        .px(px(12.0))
+                                        .py(px(4.0))
+                                        .rounded_md()
+                                        .bg(if self.settings.warn_on_phishing { rgb(0x064e3b) } else { rgb(0x1e293b) })
+                                        .border_1()
+                                        .border_color(if self.settings.warn_on_phishing { rgb(0x10b981) } else { rgb(0x334155) })
+                                        .text_xs()
+                                        .text_color(if self.settings.warn_on_phishing { rgb(0xa7f3d0) } else { rgb(0x94a3b8) })
+                                        .cursor_pointer()
+                                        .on_click(cx.listener(|this, _, _, cx| {
+                                            this.toggle_settings_warn_phishing(cx);
+                                        }))
+                                        .child(if self.settings.warn_on_phishing { "✓ Enabled" } else { "✕ Disabled" }),
+                                ),
+                        ),
+                )
+                // Section 4: Compose & Outbox
+                .child(
+                    div()
+                        .flex()
+                        .flex_col()
+                        .p(px(16.0))
+                        .rounded_lg()
+                        .bg(rgb(0x171c2a))
+                        .border_1()
+                        .border_color(rgb(0x232c40))
+                        .gap(px(10.0))
+                        .child(
+                            div()
+                                .text_sm()
+                                .font_weight(FontWeight::BOLD)
+                                .text_color(rgb(0x60a5fa))
+                                .child("✉️ Compose & Undo Send Delay"),
+                        )
+                        .child(
+                            div()
+                                .flex()
+                                .flex_row()
+                                .gap(px(8.0))
+                                .children(undo_delays.into_iter().map(|(secs, label)| {
+                                    let is_active = self.settings.undo_send_seconds == secs;
+                                    div()
+                                        .id(ElementId::Name(format!("btn-undo-{}", secs).into()))
+                                        .px(px(12.0))
+                                        .py(px(6.0))
+                                        .rounded_md()
+                                        .bg(if is_active { rgb(0x1e3a8a) } else { rgb(0x0f172a) })
+                                        .border_1()
+                                        .border_color(if is_active { rgb(0x3b82f6) } else { rgb(0x334155) })
+                                        .text_xs()
+                                        .text_color(if is_active { rgb(0x93c5fd) } else { rgb(0x94a3b8) })
+                                        .font_weight(if is_active { FontWeight::BOLD } else { FontWeight::NORMAL })
+                                        .cursor_pointer()
+                                        .on_click(cx.listener(move |this, _, _, cx| {
+                                            this.set_settings_undo_seconds(secs, cx);
+                                        }))
+                                        .child(format!("{}{}", if is_active { "● " } else { "" }, label))
+                                })),
+                        ),
+                )
+                // Section 5: Engine & Storage Architecture Details
+                .child(
+                    div()
+                        .flex()
+                        .flex_col()
+                        .p(px(16.0))
+                        .rounded_lg()
+                        .bg(rgb(0x171c2a))
+                        .border_1()
+                        .border_color(rgb(0x232c40))
+                        .gap(px(8.0))
+                        .child(
+                            div()
+                                .text_sm()
+                                .font_weight(FontWeight::BOLD)
+                                .text_color(rgb(0x60a5fa))
+                                .child("⚡ Storage & Security Architecture"),
                         )
                         .child(div().text_xs().text_color(rgb(0xcbd5e1)).child(
                             "• Database: SQLite 3 with WAL Mode and Memory-Mapped I/O (256MB)",
@@ -1960,6 +3796,24 @@ pub mod gpui_app {
         }
 
         fn render_status_bar(&self) -> impl IntoElement {
+            let is_error_or_offline = self.status_message.starts_with("⚠️")
+                || self.status_message.to_lowercase().contains("offline")
+                || self.status_message.to_lowercase().contains("error");
+            let indicator_color = if is_error_or_offline {
+                rgb(0xef4444)
+            } else if self.status_message.contains("...")
+                || self.status_message.to_lowercase().contains("syncing")
+            {
+                rgb(0x3b82f6)
+            } else {
+                rgb(0x10b981)
+            };
+            let status_indicator_text = if is_error_or_offline {
+                "Offline / Sync Error"
+            } else {
+                "Connected • Direct3D/Vulkan 120 FPS"
+            };
+
             div()
                 .flex()
                 .flex_row()
@@ -1978,14 +3832,24 @@ pub mod gpui_app {
                         .flex_row()
                         .items_center()
                         .gap(px(6.0))
-                        .child(div().w(px(6.0)).h(px(6.0)).rounded_full().bg(rgb(0x10b981)))
                         .child(
                             div()
-                                .text_color(rgb(0x94a3b8))
+                                .w(px(6.0))
+                                .h(px(6.0))
+                                .rounded_full()
+                                .bg(indicator_color),
+                        )
+                        .child(
+                            div()
+                                .text_color(if is_error_or_offline {
+                                    rgb(0xfca5a5)
+                                } else {
+                                    rgb(0x94a3b8)
+                                })
                                 .child(self.status_message.clone()),
                         ),
                 )
-                .child(div().child("120 FPS GPU Direct3D / Vulkan • Rust Edition 2024"))
+                .child(div().child(status_indicator_text))
         }
 
         fn render_modal_layer(&self, cx: &Context<Self>) -> impl IntoElement {
@@ -2016,6 +3880,30 @@ pub mod gpui_app {
                 self.compose_body.clone()
             };
 
+            let to_query = if let Some(inputs) = &self.compose_inputs {
+                inputs.to.read(cx).value().trim().to_lowercase()
+            } else {
+                String::new()
+            };
+
+            let suggestions: Vec<Contact> = if !to_query.is_empty() && to_query.len() >= 2 {
+                self.contacts
+                    .iter()
+                    .filter(|c| {
+                        c.email.to_lowercase().contains(&to_query)
+                            || c.display_name
+                                .as_deref()
+                                .unwrap_or("")
+                                .to_lowercase()
+                                .contains(&to_query)
+                    })
+                    .take(4)
+                    .cloned()
+                    .collect()
+            } else {
+                Vec::new()
+            };
+
             div()
                 .id("modal-compose-overlay")
                 .flex()
@@ -2028,14 +3916,14 @@ pub mod gpui_app {
                         .id("modal-compose-box")
                         .flex()
                         .flex_col()
-                        .w(px(620.0))
-                        .h(px(480.0))
+                        .w(px(640.0))
+                        .h(px(520.0))
                         .rounded_xl()
                         .bg(rgb(0x161b26))
                         .border_1()
                         .border_color(rgb(0x2d3748))
                         .p(px(20.0))
-                        .gap(px(12.0))
+                        .gap(px(10.0))
                         .child(
                             div()
                                 .flex()
@@ -2057,11 +3945,91 @@ pub mod gpui_app {
                                         .cursor_pointer()
                                         .on_click(cx.listener(|this, _, _, cx| {
                                             this.active_modal = ActiveModal::None;
+                                            this.compose_inputs = None;
                                             cx.notify();
                                         }))
                                         .child("✕"),
                                 ),
                         )
+                        // Recipient "To:" Input + Autocomplete Chips
+                        .child(
+                            div()
+                                .flex()
+                                .flex_col()
+                                .gap(px(4.0))
+                                .child(
+                                    div()
+                                        .flex()
+                                        .flex_row()
+                                        .items_center()
+                                        .gap(px(8.0))
+                                        .p(px(8.0))
+                                        .rounded_md()
+                                        .bg(rgb(0x1c2333))
+                                        .child(
+                                            div()
+                                                .text_xs()
+                                                .font_weight(FontWeight::SEMIBOLD)
+                                                .text_color(rgb(0x94a3b8))
+                                                .child("To:"),
+                                        )
+                                        .child(if let Some(inputs) = &self.compose_inputs {
+                                            component::input::Input::new(&inputs.to)
+                                                .cleanable(true)
+                                                .into_any_element()
+                                        } else {
+                                            div()
+                                                .text_xs()
+                                                .text_color(rgb(0xf1f5f9))
+                                                .child(to_text)
+                                                .into_any_element()
+                                        }),
+                                )
+                                .child(if !suggestions.is_empty() {
+                                    div()
+                                        .flex()
+                                        .flex_row()
+                                        .flex_wrap()
+                                        .gap(px(6.0))
+                                        .px(px(4.0))
+                                        .children(suggestions.into_iter().map(|contact| {
+                                            let email_clone = contact.email.clone();
+                                            let display = contact
+                                                .display_name
+                                                .clone()
+                                                .unwrap_or_else(|| contact.email.clone());
+                                            div()
+                                                .id(ElementId::Name(
+                                                    format!("chip-contact-{}", contact.id).into(),
+                                                ))
+                                                .px(px(8.0))
+                                                .py(px(2.0))
+                                                .rounded_md()
+                                                .bg(rgb(0x1e3a8a))
+                                                .border_1()
+                                                .border_color(rgb(0x3b82f6))
+                                                .text_xs()
+                                                .text_color(rgb(0x93c5fd))
+                                                .cursor_pointer()
+                                                .on_click(cx.listener(move |this, _, window, cx| {
+                                                    if let Some(inputs) = &this.compose_inputs {
+                                                        inputs.to.update(cx, |inp, cx| {
+                                                            inp.set_value(
+                                                                email_clone.clone(),
+                                                                window,
+                                                                cx,
+                                                            )
+                                                        });
+                                                    }
+                                                    cx.notify();
+                                                }))
+                                                .child(format!("👤 {display} <{}>", contact.email))
+                                        }))
+                                } else {
+                                    div()
+                                }),
+                        )
+                        // Subject Input
                         .child(
                             div()
                                 .flex()
@@ -2071,33 +4039,213 @@ pub mod gpui_app {
                                 .p(px(8.0))
                                 .rounded_md()
                                 .bg(rgb(0x1c2333))
-                                .child(div().text_xs().text_color(rgb(0x94a3b8)).child("To:"))
-                                .child(div().text_xs().text_color(rgb(0xf1f5f9)).child(to_text)),
+                                .child(
+                                    div()
+                                        .text_xs()
+                                        .font_weight(FontWeight::SEMIBOLD)
+                                        .text_color(rgb(0x94a3b8))
+                                        .child("Subject:"),
+                                )
+                                .child(if let Some(inputs) = &self.compose_inputs {
+                                    component::input::Input::new(&inputs.subject)
+                                        .cleanable(true)
+                                        .into_any_element()
+                                } else {
+                                    div()
+                                        .text_xs()
+                                        .text_color(rgb(0xf1f5f9))
+                                        .child(subj_text)
+                                        .into_any_element()
+                                }),
                         )
+                        // Formatting Toolbar (Markdown, Attachment, Draft)
                         .child(
                             div()
                                 .flex()
                                 .flex_row()
                                 .items_center()
-                                .gap(px(8.0))
-                                .p(px(8.0))
-                                .rounded_md()
-                                .bg(rgb(0x1c2333))
-                                .child(div().text_xs().text_color(rgb(0x94a3b8)).child("Subject:"))
-                                .child(div().text_xs().text_color(rgb(0xf1f5f9)).child(subj_text)),
+                                .justify_between()
+                                .py(px(2.0))
+                                .child(
+                                    div()
+                                        .flex()
+                                        .flex_row()
+                                        .items_center()
+                                        .gap(px(8.0))
+                                        .child(
+                                            div()
+                                                .id("btn-toggle-markdown")
+                                                .px(px(8.0))
+                                                .py(px(4.0))
+                                                .rounded_md()
+                                                .bg(if self.compose_is_markdown {
+                                                    rgb(0x064e3b)
+                                                } else {
+                                                    rgb(0x1e293b)
+                                                })
+                                                .border_1()
+                                                .border_color(if self.compose_is_markdown {
+                                                    rgb(0x10b981)
+                                                } else {
+                                                    rgb(0x334155)
+                                                })
+                                                .text_xs()
+                                                .text_color(if self.compose_is_markdown {
+                                                    rgb(0x34d399)
+                                                } else {
+                                                    rgb(0x94a3b8)
+                                                })
+                                                .cursor_pointer()
+                                                .on_click(cx.listener(|this, _, _, cx| {
+                                                    this.compose_is_markdown =
+                                                        !this.compose_is_markdown;
+                                                    cx.notify();
+                                                }))
+                                                .child(if self.compose_is_markdown {
+                                                    "📝 Markdown: ON"
+                                                } else {
+                                                    "📝 Markdown: OFF"
+                                                }),
+                                        )
+                                        .child(
+                                            div()
+                                                .id("btn-add-attachment")
+                                                .px(px(8.0))
+                                                .py(px(4.0))
+                                                .rounded_md()
+                                                .bg(rgb(0x1e293b))
+                                                .border_1()
+                                                .border_color(rgb(0x334155))
+                                                .text_xs()
+                                                .text_color(rgb(0xcbd5e1))
+                                                .cursor_pointer()
+                                                .on_click(cx.listener(|this, _, _, cx| {
+                                                    let idx = this.compose_attachments.len() + 1;
+                                                    this.compose_attachments.push(
+                                                        vespetrel_core::message::ComposedAttachment {
+                                                            filename: format!("document_{idx}.pdf"),
+                                                            content_type: "application/pdf".into(),
+                                                            data: vec![0u8; 1024 * 64],
+                                                        },
+                                                    );
+                                                    this.show_toast(
+                                                        format!("Attached document_{idx}.pdf"),
+                                                        false,
+                                                        cx,
+                                                    );
+                                                    cx.notify();
+                                                }))
+                                                .child("📎 Add Attachment"),
+                                        ),
+                                )
+                                .child(
+                                    div()
+                                        .id("btn-save-draft")
+                                        .px(px(8.0))
+                                        .py(px(4.0))
+                                        .rounded_md()
+                                        .bg(rgb(0x1e293b))
+                                        .border_1()
+                                        .border_color(rgb(0x334155))
+                                        .text_xs()
+                                        .text_color(rgb(0x38bdf8))
+                                        .cursor_pointer()
+                                        .on_click(cx.listener(|this, _, _, cx| {
+                                            this.save_draft(cx);
+                                        }))
+                                        .child("💾 Save Draft"),
+                                ),
                         )
+                        // Body Input
                         .child(
                             div()
                                 .flex()
                                 .flex_col()
                                 .flex_1()
-                                .p(px(10.0))
+                                .p(px(8.0))
                                 .rounded_md()
                                 .bg(rgb(0x111622))
                                 .border_1()
                                 .border_color(rgb(0x232c40))
-                                .child(div().text_xs().text_color(rgb(0xe2e8f0)).child(body_text)),
+                                .child(if let Some(inputs) = &self.compose_inputs {
+                                    component::input::Input::new(&inputs.body).into_any_element()
+                                } else {
+                                    div()
+                                        .text_xs()
+                                        .text_color(rgb(0xe2e8f0))
+                                        .child(body_text)
+                                        .into_any_element()
+                                }),
                         )
+                        // Compose Attachment Tray
+                        .child(if !self.compose_attachments.is_empty() {
+                            div()
+                                .flex()
+                                .flex_row()
+                                .flex_wrap()
+                                .gap(px(6.0))
+                                .p(px(6.0))
+                                .rounded_md()
+                                .bg(rgb(0x1a2234))
+                                .children(
+                                    self.compose_attachments
+                                        .iter()
+                                        .enumerate()
+                                        .map(|(idx, att)| {
+                                            let fname = att.filename.clone();
+                                            let sz = att.data.len();
+                                            let sz_str = format!("{:.1} KB", sz as f64 / 1024.0);
+                                            div()
+                                                .id(ElementId::Name(
+                                                    format!("compose-att-{}", idx).into(),
+                                                ))
+                                                .flex()
+                                                .flex_row()
+                                                .items_center()
+                                                .gap(px(6.0))
+                                                .px(px(8.0))
+                                                .py(px(3.0))
+                                                .rounded_md()
+                                                .bg(rgb(0x0f172a))
+                                                .border_1()
+                                                .border_color(rgb(0x334155))
+                                                .text_xs()
+                                                .text_color(rgb(0xcbd5e1))
+                                                .child(div().child("📄"))
+                                                .child(div().child(fname.clone()))
+                                                .child(
+                                                    div()
+                                                        .text_color(rgb(0x64748b))
+                                                        .child(format!("({sz_str})")),
+                                                )
+                                                .child(
+                                                    div()
+                                                        .id(ElementId::Name(
+                                                            format!("rm-compose-att-{}", idx)
+                                                                .into(),
+                                                        ))
+                                                        .cursor_pointer()
+                                                        .text_color(rgb(0xf87171))
+                                                        .on_click(cx.listener(
+                                                            move |this, _, _, cx| {
+                                                                if idx
+                                                                    < this
+                                                                        .compose_attachments
+                                                                        .len()
+                                                                {
+                                                                    this.compose_attachments
+                                                                        .remove(idx);
+                                                                    cx.notify();
+                                                                }
+                                                            },
+                                                        ))
+                                                        .child("✕"),
+                                                )
+                                        }),
+                                )
+                        } else {
+                            div()
+                        })
                         .child(
                             div()
                                 .flex()
@@ -2136,6 +4284,10 @@ pub mod gpui_app {
                                                 .cursor_pointer()
                                                 .on_click(cx.listener(|this, _, _, cx| {
                                                     this.active_modal = ActiveModal::None;
+                                                    this.compose_inputs = None;
+                                                    this.compose_attachments.clear();
+                                                    this.compose_draft_id = None;
+                                                    this.compose_reply_to_id = None;
                                                     cx.notify();
                                                 }))
                                                 .child("Discard"),
@@ -2909,14 +5061,18 @@ pub mod gpui_app {
                                                     };
                                                     let em = format!("personal@{}", suffix);
                                                     let nm = "Personal Account".to_string();
-                                                    let pw = "secure_token_preset".to_string();
                                                     this.login_wizard.email = em.clone();
                                                     this.login_wizard.name = nm.clone();
-                                                    this.login_wizard.password_or_token = pw.clone();
+                                                    this.login_wizard.password_or_token = String::new();
+                                                    this.login_wizard.apply_autodiscover_for_email(&em);
                                                     if let Some(inputs) = &this.wizard_inputs {
                                                         inputs.email.update(cx, |inp, cx| inp.set_value(em, window, cx));
                                                         inputs.name.update(cx, |inp, cx| inp.set_value(nm, window, cx));
-                                                        inputs.password.update(cx, |inp, cx| inp.set_value(pw, window, cx));
+                                                        inputs.password.update(cx, |inp, cx| inp.set_value(String::new(), window, cx));
+                                                        inputs.incoming_host.update(cx, |inp, cx| inp.set_value(this.login_wizard.incoming_host.clone(), window, cx));
+                                                        inputs.incoming_port.update(cx, |inp, cx| inp.set_value(this.login_wizard.incoming_port.to_string(), window, cx));
+                                                        inputs.outgoing_host.update(cx, |inp, cx| inp.set_value(this.login_wizard.outgoing_host.clone(), window, cx));
+                                                        inputs.outgoing_port.update(cx, |inp, cx| inp.set_value(this.login_wizard.outgoing_port.to_string(), window, cx));
                                                     }
                                                     cx.notify();
                                                 }))
@@ -2941,14 +5097,18 @@ pub mod gpui_app {
                                                     };
                                                     let em = format!("work@{}", suffix);
                                                     let nm = "Work Mailbox".to_string();
-                                                    let pw = "secure_token_preset".to_string();
                                                     this.login_wizard.email = em.clone();
                                                     this.login_wizard.name = nm.clone();
-                                                    this.login_wizard.password_or_token = pw.clone();
+                                                    this.login_wizard.password_or_token = String::new();
+                                                    this.login_wizard.apply_autodiscover_for_email(&em);
                                                     if let Some(inputs) = &this.wizard_inputs {
                                                         inputs.email.update(cx, |inp, cx| inp.set_value(em, window, cx));
                                                         inputs.name.update(cx, |inp, cx| inp.set_value(nm, window, cx));
-                                                        inputs.password.update(cx, |inp, cx| inp.set_value(pw, window, cx));
+                                                        inputs.password.update(cx, |inp, cx| inp.set_value(String::new(), window, cx));
+                                                        inputs.incoming_host.update(cx, |inp, cx| inp.set_value(this.login_wizard.incoming_host.clone(), window, cx));
+                                                        inputs.incoming_port.update(cx, |inp, cx| inp.set_value(this.login_wizard.incoming_port.to_string(), window, cx));
+                                                        inputs.outgoing_host.update(cx, |inp, cx| inp.set_value(this.login_wizard.outgoing_host.clone(), window, cx));
+                                                        inputs.outgoing_port.update(cx, |inp, cx| inp.set_value(this.login_wizard.outgoing_port.to_string(), window, cx));
                                                     }
                                                     cx.notify();
                                                 }))
@@ -2973,14 +5133,18 @@ pub mod gpui_app {
                                                     };
                                                     let em = format!("team@{}", suffix);
                                                     let nm = "Vespetrel Team".to_string();
-                                                    let pw = "secure_token_preset".to_string();
                                                     this.login_wizard.email = em.clone();
                                                     this.login_wizard.name = nm.clone();
-                                                    this.login_wizard.password_or_token = pw.clone();
+                                                    this.login_wizard.password_or_token = String::new();
+                                                    this.login_wizard.apply_autodiscover_for_email(&em);
                                                     if let Some(inputs) = &this.wizard_inputs {
                                                         inputs.email.update(cx, |inp, cx| inp.set_value(em, window, cx));
                                                         inputs.name.update(cx, |inp, cx| inp.set_value(nm, window, cx));
-                                                        inputs.password.update(cx, |inp, cx| inp.set_value(pw, window, cx));
+                                                        inputs.password.update(cx, |inp, cx| inp.set_value(String::new(), window, cx));
+                                                        inputs.incoming_host.update(cx, |inp, cx| inp.set_value(this.login_wizard.incoming_host.clone(), window, cx));
+                                                        inputs.incoming_port.update(cx, |inp, cx| inp.set_value(this.login_wizard.incoming_port.to_string(), window, cx));
+                                                        inputs.outgoing_host.update(cx, |inp, cx| inp.set_value(this.login_wizard.outgoing_host.clone(), window, cx));
+                                                        inputs.outgoing_port.update(cx, |inp, cx| inp.set_value(this.login_wizard.outgoing_port.to_string(), window, cx));
                                                     }
                                                     cx.notify();
                                                 }))
@@ -3063,7 +5227,7 @@ pub mod gpui_app {
                                             .text_color(rgb(0xffffff))
                                             .cursor_pointer()
                                             .on_click(cx.listener(|this, _, _, cx| {
-                                                let (email, password, name, in_host, in_port, out_host, out_port) = if let Some(inputs) = &this.wizard_inputs {
+                                                let (email, password, name, mut in_host, mut in_port, mut out_host, mut out_port) = if let Some(inputs) = &this.wizard_inputs {
                                                     (
                                                         inputs.email.read(cx).value().trim().to_string(),
                                                         inputs.password.read(cx).value().trim().to_string(),
@@ -3087,13 +5251,28 @@ pub mod gpui_app {
 
                                                 if email.is_empty() || !email.contains('@') {
                                                     this.login_wizard.step = WizardStep::Failed("Please provide a valid email address".into());
+                                                    this.show_toast("Please provide a valid email address", true, cx);
                                                     cx.notify();
                                                     return;
                                                 }
                                                 if password.is_empty() {
                                                     this.login_wizard.step = WizardStep::Failed("Password or authentication token cannot be empty".into());
+                                                    this.show_toast("Password or authentication token cannot be empty", true, cx);
                                                     cx.notify();
                                                     return;
+                                                }
+
+                                                // Autodiscover host & ports if left blank
+                                                if in_host.is_empty() || out_host.is_empty() {
+                                                    this.login_wizard.apply_autodiscover_for_email(&email);
+                                                    if in_host.is_empty() {
+                                                        in_host = this.login_wizard.incoming_host.clone();
+                                                        in_port = this.login_wizard.incoming_port;
+                                                    }
+                                                    if out_host.is_empty() {
+                                                        out_host = this.login_wizard.outgoing_host.clone();
+                                                        out_port = this.login_wizard.outgoing_port;
+                                                    }
                                                 }
 
                                                 this.login_wizard.email = email.clone();
@@ -3107,6 +5286,7 @@ pub mod gpui_app {
                                                 let acct = match this.login_wizard.validate_and_build_account() {
                                                     Ok(a) => a,
                                                     Err(e) => {
+                                                        this.show_toast(format!("Configuration error: {e}"), true, cx);
                                                         this.login_wizard.step = WizardStep::Failed(e);
                                                         cx.notify();
                                                         return;
@@ -3118,10 +5298,10 @@ pub mod gpui_app {
                                                 cx.notify();
 
                                                 // Persist credentials to native OS keyring
-                                                if let Some(ref k) = acct.auth_config.keyring_key {
-                                                    if let Ok(entry) = keyring::Entry::new("vespetrel", k) {
-                                                        let _ = entry.set_password(&password);
-                                                    }
+                                                if let Some(ref k) = acct.auth_config.keyring_key
+                                                    && let Ok(entry) = keyring::Entry::new("vespetrel", k)
+                                                {
+                                                    let _ = entry.set_password(&password);
                                                 }
 
                                                 let pool_opt = this.storage_pool.clone();
@@ -3176,6 +5356,7 @@ pub mod gpui_app {
                                                                 view.folders.extend(local_folders);
                                                                 view.accounts.push(acct_clone.clone());
                                                                 view.status_message = format!("✓ Successfully connected {} ({:?})", acct_clone.email, acct_clone.provider_type);
+                                                                view.show_toast(format!("✓ Account {} connected successfully", acct_clone.email), false, cx);
                                                                 view.active_modal = ActiveModal::None;
                                                                 view.wizard_inputs = None;
                                                                 view.login_wizard.step = WizardStep::Completed;
@@ -3186,6 +5367,7 @@ pub mod gpui_app {
                                                         Err(e) => {
                                                             let _ = this.update(cx, |view, cx| {
                                                                 view.status_message = format!("⚠️ Connection error: {e}");
+                                                                view.show_toast(format!("⚠️ Connection error: {e}"), true, cx);
                                                                 view.login_wizard.step = WizardStep::Failed(format!("{e}"));
                                                                 cx.notify();
                                                             });
@@ -3221,14 +5403,16 @@ pub mod gpui_app {
             }
 
             if client_id.is_empty() {
-                self.login_wizard.step = WizardStep::Failed(format!(
+                let err_msg = format!(
                     "OAuth2 requires a Client ID. Please enter your {} OAuth Client ID or switch to the 'App Password' tab.",
                     match provider_type {
                         ProviderType::Gmail => "Google Cloud",
                         ProviderType::Graph => "Microsoft Entra / Azure",
                         _ => "Provider",
                     }
-                ));
+                );
+                self.show_toast(err_msg.clone(), true, cx);
+                self.login_wizard.step = WizardStep::Failed(err_msg);
                 cx.notify();
                 return;
             }
@@ -3257,6 +5441,7 @@ pub mod gpui_app {
                     Ok(res) => res,
                     Err(e) => {
                         let _ = this.update(cx, |view, cx| {
+                            view.show_toast(format!("Failed to bind loopback listener: {e}"), true, cx);
                             view.login_wizard.step = WizardStep::Failed(format!("Failed to bind loopback listener: {e}"));
                             cx.notify();
                         });
@@ -3304,6 +5489,7 @@ pub mod gpui_app {
                     Ok(c) => c,
                     Err(e) => {
                         let _ = this.update(cx, |view, cx| {
+                            view.show_toast(format!("OAuth2 callback failed: {e}"), true, cx);
                             view.login_wizard.step = WizardStep::Failed(format!("OAuth2 callback failed: {e}"));
                             cx.notify();
                         });
@@ -3321,6 +5507,7 @@ pub mod gpui_app {
                     Ok(b) => b,
                     Err(e) => {
                         let _ = this.update(cx, |view, cx| {
+                            view.show_toast(format!("Token exchange failed: {e}"), true, cx);
                             view.login_wizard.step = WizardStep::Failed(format!("Token exchange failed: {e}"));
                             cx.notify();
                         });
@@ -3340,6 +5527,7 @@ pub mod gpui_app {
 
                 if final_email.is_empty() || !final_email.contains('@') {
                     let _ = this.update(cx, |view, cx| {
+                        view.show_toast("Could not determine user email address from OAuth2 token", true, cx);
                         view.login_wizard.step = WizardStep::Failed("Could not determine user email address from OAuth2 token".into());
                         cx.notify();
                     });
@@ -3423,6 +5611,7 @@ pub mod gpui_app {
                             view.folders.extend(local_folders);
                             view.accounts.push(acct.clone());
                             view.status_message = format!("✓ Successfully connected {} via OAuth2", acct.email);
+                            view.show_toast(format!("✓ Successfully connected {} via OAuth2", acct.email), false, cx);
                             view.active_modal = ActiveModal::None;
                             view.wizard_inputs = None;
                             view.login_wizard.step = WizardStep::Completed;
@@ -3433,6 +5622,7 @@ pub mod gpui_app {
                     Err(e) => {
                         let _ = this.update(cx, |view, cx| {
                             view.status_message = format!("⚠️ Connection error: {e}");
+                            view.show_toast(format!("⚠️ Connection error: {e}"), true, cx);
                             view.login_wizard.step = WizardStep::Failed(format!("{e}"));
                             cx.notify();
                         });

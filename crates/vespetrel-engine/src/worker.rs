@@ -148,27 +148,27 @@ impl AccountWorker {
                         }
                         Some(WorkerCommand::UpdateFlags{ folder_remote_id, uids, add, remove }) => {
                             let mut remote_ids = Vec::new();
-                            if let Some(pool) = &self.storage_pool {
-                                if let Ok(conn) = pool.get().await {
-                                    let uids_c = uids.clone();
-                                    let fid = folder_remote_id.clone();
-                                    let q = conn.interact(move |c| -> anyhow::Result<Vec<String>> {
-                                        let mut ids = Vec::new();
-                                        for chunk in uids_c.chunks(500) {
-                                            let placeholders = chunk.iter().map(|_| "?").collect::<Vec<_>>().join(",");
-                                            let sql = format!("SELECT remote_id FROM messages WHERE folder_id = ? AND remote_uid IN ({placeholders}) AND remote_id IS NOT NULL");
-                                            let mut stmt = c.prepare(&sql)?;
-                                            let mut params: Vec<&dyn rusqlite::ToSql> = Vec::with_capacity(chunk.len() + 1);
-                                            params.push(&fid);
-                                            for u in chunk { params.push(u); }
-                                            let rows = stmt.query_map(rusqlite::params_from_iter(params), |r| r.get::<_, String>(0))?;
-                                            for id_res in rows { ids.push(id_res?); }
-                                        }
-                                        Ok(ids)
-                                    }).await;
-                                    if let Ok(Ok(ids)) = q {
-                                        remote_ids = ids;
+                            if let Some(pool) = &self.storage_pool
+                                && let Ok(conn) = pool.get().await
+                            {
+                                let uids_c = uids.clone();
+                                let fid = folder_remote_id.clone();
+                                let q = conn.interact(move |c| -> anyhow::Result<Vec<String>> {
+                                    let mut ids = Vec::new();
+                                    for chunk in uids_c.chunks(500) {
+                                        let placeholders = chunk.iter().map(|_| "?").collect::<Vec<_>>().join(",");
+                                        let sql = format!("SELECT remote_id FROM messages WHERE folder_id = ? AND remote_uid IN ({placeholders}) AND remote_id IS NOT NULL");
+                                        let mut stmt = c.prepare(&sql)?;
+                                        let mut params: Vec<&dyn rusqlite::ToSql> = Vec::with_capacity(chunk.len() + 1);
+                                        params.push(&fid);
+                                        for u in chunk { params.push(u); }
+                                        let rows = stmt.query_map(rusqlite::params_from_iter(params), |r| r.get::<_, String>(0))?;
+                                        for id_res in rows { ids.push(id_res?); }
                                     }
+                                    Ok(ids)
+                                }).await;
+                                if let Ok(Ok(ids)) = q {
+                                    remote_ids = ids;
                                 }
                             }
                             let res = if !remote_ids.is_empty() {
@@ -520,26 +520,26 @@ impl AccountWorker {
                                 for umsg in &updated_sync_msgs {
                                     let new_read = umsg.flags.contains(&vespetrel_core::Flag::Seen);
                                     let new_flagged = umsg.flags.contains(&vespetrel_core::Flag::Flagged);
-                                    if let Ok(mut rows) = stmt.query(rusqlite::params![fid, umsg.remote_uid as i64]) {
-                                        if let Ok(Some(row)) = rows.next() {
-                                            let id: String = row.get(0)?;
-                                            let cur_read: i64 = row.get(1)?;
-                                            let cur_flagged: i64 = row.get(2)?;
-                                            let is_read_changed = (cur_read != 0) != new_read;
-                                            let is_flagged_changed = (cur_flagged != 0) != new_flagged;
-                                            if is_read_changed || is_flagged_changed {
-                                                let _ = vespetrel_storage::repo::update_message_flags(
-                                                    c,
-                                                    &id,
-                                                    if is_read_changed { Some(new_read) } else { None },
-                                                    if is_flagged_changed { Some(new_flagged) } else { None },
-                                                );
-                                                events.push(SyncEvent::MessageFlagsUpdated {
-                                                    id,
-                                                    is_read: new_read,
-                                                    is_flagged: new_flagged,
-                                                });
-                                            }
+                                    if let Ok(mut rows) = stmt.query(rusqlite::params![fid, umsg.remote_uid as i64])
+                                        && let Ok(Some(row)) = rows.next()
+                                    {
+                                        let id: String = row.get(0)?;
+                                        let cur_read: i64 = row.get(1)?;
+                                        let cur_flagged: i64 = row.get(2)?;
+                                        let is_read_changed = (cur_read != 0) != new_read;
+                                        let is_flagged_changed = (cur_flagged != 0) != new_flagged;
+                                        if is_read_changed || is_flagged_changed {
+                                            let _ = vespetrel_storage::repo::update_message_flags(
+                                                c,
+                                                &id,
+                                                if is_read_changed { Some(new_read) } else { None },
+                                                if is_flagged_changed { Some(new_flagged) } else { None },
+                                            );
+                                            events.push(SyncEvent::MessageFlagsUpdated {
+                                                id,
+                                                is_read: new_read,
+                                                is_flagged: new_flagged,
+                                            });
                                         }
                                     }
                                 }
@@ -609,21 +609,21 @@ impl AccountWorker {
                     }
 
                     // Persist updated folder uid_validity and highest_mod_seq back to folders table
-                    if rf.uid_validity.is_some() || rf.highest_mod_seq.is_some() {
-                        if let Some(conn) = &storage_conn {
-                            let mut updated_folder = folder_record.clone();
-                            if let Some(uv) = rf.uid_validity {
-                                updated_folder.uid_validity = Some(uv);
-                            }
-                            if let Some(hms) = rf.highest_mod_seq {
-                                updated_folder.highest_mod_seq = Some(hms);
-                            }
-                            let _ = conn
-                                .interact(move |c| {
-                                    vespetrel_storage::repo::upsert_folder(c, &updated_folder)
-                                })
-                                .await;
+                    if (rf.uid_validity.is_some() || rf.highest_mod_seq.is_some())
+                        && let Some(conn) = &storage_conn
+                    {
+                        let mut updated_folder = folder_record.clone();
+                        if let Some(uv) = rf.uid_validity {
+                            updated_folder.uid_validity = Some(uv);
                         }
+                        if let Some(hms) = rf.highest_mod_seq {
+                            updated_folder.highest_mod_seq = Some(hms);
+                        }
+                        let _ = conn
+                            .interact(move |c| {
+                                vespetrel_storage::repo::upsert_folder(c, &updated_folder)
+                            })
+                            .await;
                     }
 
                     // Persist updated delta tokens and folder modseqs back to accounts table only when changed

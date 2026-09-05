@@ -92,11 +92,11 @@ where
 {
     let mut retry_count = 0;
     loop {
-        if let Some(ref rx) = shutdown {
-            if *rx.borrow() {
-                debug!("IMAP IDLE shutdown requested before connect");
-                return Ok(());
-            }
+        if let Some(ref rx) = shutdown
+            && *rx.borrow()
+        {
+            debug!("IMAP IDLE shutdown requested before connect");
+            return Ok(());
         }
 
         info!(host=%config.host, "starting IMAP IDLE connection");

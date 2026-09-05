@@ -396,7 +396,7 @@ pub fn find_xml_elements<'a>(xml: &'a str, local_name: &str) -> Vec<&'a str> {
         };
         let tag_header = xml[start_bracket + 1..end_bracket].trim();
         let tag_ident = tag_header.split_whitespace().next().unwrap_or("");
-        let tag_local = tag_ident.split(':').last().unwrap_or(tag_ident);
+        let tag_local = tag_ident.split(':').next_back().unwrap_or(tag_ident);
 
         if tag_local.eq_ignore_ascii_case(local_name) {
             if tag_header.ends_with('/') {
@@ -411,7 +411,7 @@ pub fn find_xml_elements<'a>(xml: &'a str, local_name: &str) -> Vec<&'a str> {
                 if let Some(close_end) = xml[abs_close_start..].find('>') {
                     let abs_close_end = abs_close_start + close_end;
                     let close_header = xml[abs_close_start + 2..abs_close_end].trim();
-                    let close_local = close_header.split(':').last().unwrap_or(close_header);
+                    let close_local = close_header.split(':').next_back().unwrap_or(close_header);
                     if close_local.eq_ignore_ascii_case(local_name) {
                         results.push(&xml[end_bracket + 1..abs_close_start]);
                         cursor = abs_close_end + 1;

@@ -3,7 +3,7 @@ use rusqlite::{Connection, OptionalExtension, params};
 use tracing::warn;
 
 use crate::StorageResult;
-use vespetrel_core::{Account, Folder, Message};
+use vespetrel_core::{Account, Attachment, Folder, Message};
 
 // Simple synchronous repository helpers - callers use deadpool-sqlite threadpool or blocking
 
@@ -153,6 +153,11 @@ pub fn get_account(conn: &Connection, id: &str) -> StorageResult<Option<Account>
     .map_err(Into::into)
 }
 
+pub fn delete_account(conn: &Connection, id: &str) -> StorageResult<()> {
+    conn.execute("DELETE FROM accounts WHERE id = ?1", params![id])?;
+    Ok(())
+}
+
 pub fn upsert_folder(conn: &Connection, folder: &Folder) -> StorageResult<()> {
     conn.execute(
         r#"INSERT INTO folders (id, account_id, remote_id, name, path, role, uid_validity, highest_mod_seq, total_count, unread_count, color)
@@ -298,6 +303,90 @@ pub fn insert_message(conn: &Connection, msg: &Message) -> StorageResult<()> {
     Ok(())
 }
 
+pub fn parse_message_row(row: &rusqlite::Row) -> rusqlite::Result<Message> {
+    let to_json: String = row.get(11)?;
+    let to_addresses = serde_json::from_str(&to_json).map_err(|e| {
+        rusqlite::Error::FromSqlConversionFailure(
+            11,
+            rusqlite::types::Type::Text,
+            Box::new(crate::StorageError::CorruptData(format!(
+                "Corrupted to_addresses JSON: {e}"
+            ))),
+        )
+    })?;
+    let cc_json: String = row.get(12)?;
+    let cc_addresses = serde_json::from_str(&cc_json).map_err(|e| {
+        rusqlite::Error::FromSqlConversionFailure(
+            12,
+            rusqlite::types::Type::Text,
+            Box::new(crate::StorageError::CorruptData(format!(
+                "Corrupted cc_addresses JSON: {e}"
+            ))),
+        )
+    })?;
+    let bcc_json: String = row.get(13)?;
+    let bcc_addresses = serde_json::from_str(&bcc_json).map_err(|e| {
+        rusqlite::Error::FromSqlConversionFailure(
+            13,
+            rusqlite::types::Type::Text,
+            Box::new(crate::StorageError::CorruptData(format!(
+                "Corrupted bcc_addresses JSON: {e}"
+            ))),
+        )
+    })?;
+    let reply_to = row
+        .get::<_, Option<String>>(14)?
+        .and_then(|s| serde_json::from_str(&s).ok());
+    let sent_ts: i64 = row.get(15)?;
+    let sent_at = DateTime::from_timestamp(sent_ts, 0).ok_or_else(|| {
+        rusqlite::Error::FromSqlConversionFailure(
+            15,
+            rusqlite::types::Type::Integer,
+            Box::new(crate::StorageError::CorruptData(format!(
+                "Invalid sent_at timestamp: {sent_ts}"
+            ))),
+        )
+    })?;
+    let recv_ts: i64 = row.get(16)?;
+    let received_at = DateTime::from_timestamp(recv_ts, 0).ok_or_else(|| {
+        rusqlite::Error::FromSqlConversionFailure(
+            16,
+            rusqlite::types::Type::Integer,
+            Box::new(crate::StorageError::CorruptData(format!(
+                "Invalid received_at timestamp: {recv_ts}"
+            ))),
+        )
+    })?;
+    Ok(Message {
+        id: row.get(0)?,
+        account_id: row.get(1)?,
+        folder_id: row.get(2)?,
+        thread_id: row.get(3)?,
+        remote_uid: row.get::<_, i64>(4)? as u32,
+        message_id_header: row.get(5)?,
+        in_reply_to: row.get(6)?,
+        references: row.get(7)?,
+        subject: row.get(8)?,
+        from_address: row.get(9)?,
+        from_name: row.get(10)?,
+        to_addresses,
+        cc_addresses,
+        bcc_addresses,
+        reply_to,
+        sent_at,
+        received_at,
+        is_read: row.get::<_, i64>(17)? != 0,
+        is_flagged: row.get::<_, i64>(18)? != 0,
+        is_draft: row.get::<_, i64>(19)? != 0,
+        has_attachments: row.get::<_, i64>(20)? != 0,
+        body_snippet: row.get(21)?,
+        body_text_preview: row.get(22)?,
+        blob_path: row.get(23)?,
+        size_bytes: row.get(24)?,
+        remote_id: row.get(25).ok(),
+    })
+}
+
 pub fn list_messages_in_folder(
     conn: &Connection,
     folder_id: &str,
@@ -305,92 +394,45 @@ pub fn list_messages_in_folder(
     offset: usize,
 ) -> StorageResult<Vec<Message>> {
     let mut stmt = conn.prepare(
-        "SELECT id, account_id, folder_id, thread_id, remote_uid, message_id_header, in_reply_to, references_header, subject, from_address, from_name, to_addresses, cc_addresses, bcc_addresses, reply_to, sent_at, received_at, is_read, is_flagged, is_draft, has_attachments, body_snippet, body_text_preview, blob_path, size_bytes, remote_id FROM messages WHERE folder_id = ?1 ORDER BY sent_at DESC LIMIT ?2 OFFSET ?3"
+        "SELECT id, account_id, folder_id, thread_id, remote_uid, message_id_header, in_reply_to, references_header, subject, from_address, from_name, to_addresses, cc_addresses, bcc_addresses, reply_to, sent_at, received_at, is_read, is_flagged, is_draft, has_attachments, body_snippet, body_text_preview, blob_path, size_bytes, remote_id FROM messages WHERE folder_id = ?1 OR folder_id = (SELECT id FROM folders WHERE remote_id = ?1 LIMIT 1) ORDER BY sent_at DESC LIMIT ?2 OFFSET ?3"
     )?;
-    let rows = stmt.query_map(params![folder_id, limit as i64, offset as i64], |row| {
-        let to_json: String = row.get(11)?;
-        let to_addresses = serde_json::from_str(&to_json).map_err(|e| {
-            rusqlite::Error::FromSqlConversionFailure(
-                11,
-                rusqlite::types::Type::Text,
-                Box::new(crate::StorageError::CorruptData(format!(
-                    "Corrupted to_addresses JSON: {e}"
-                ))),
-            )
-        })?;
-        let cc_json: String = row.get(12)?;
-        let cc_addresses = serde_json::from_str(&cc_json).map_err(|e| {
-            rusqlite::Error::FromSqlConversionFailure(
-                12,
-                rusqlite::types::Type::Text,
-                Box::new(crate::StorageError::CorruptData(format!(
-                    "Corrupted cc_addresses JSON: {e}"
-                ))),
-            )
-        })?;
-        let bcc_json: String = row.get(13)?;
-        let bcc_addresses = serde_json::from_str(&bcc_json).map_err(|e| {
-            rusqlite::Error::FromSqlConversionFailure(
-                13,
-                rusqlite::types::Type::Text,
-                Box::new(crate::StorageError::CorruptData(format!(
-                    "Corrupted bcc_addresses JSON: {e}"
-                ))),
-            )
-        })?;
-        let reply_to = row
-            .get::<_, Option<String>>(14)?
-            .and_then(|s| serde_json::from_str(&s).ok());
-        let sent_ts: i64 = row.get(15)?;
-        let sent_at = DateTime::from_timestamp(sent_ts, 0).ok_or_else(|| {
-            rusqlite::Error::FromSqlConversionFailure(
-                15,
-                rusqlite::types::Type::Integer,
-                Box::new(crate::StorageError::CorruptData(format!(
-                    "Invalid sent_at timestamp: {sent_ts}"
-                ))),
-            )
-        })?;
-        let recv_ts: i64 = row.get(16)?;
-        let received_at = DateTime::from_timestamp(recv_ts, 0).ok_or_else(|| {
-            rusqlite::Error::FromSqlConversionFailure(
-                16,
-                rusqlite::types::Type::Integer,
-                Box::new(crate::StorageError::CorruptData(format!(
-                    "Invalid received_at timestamp: {recv_ts}"
-                ))),
-            )
-        })?;
-        Ok(Message {
-            id: row.get(0)?,
-            account_id: row.get(1)?,
-            folder_id: row.get(2)?,
-            thread_id: row.get(3)?,
-            remote_uid: row.get::<_, i64>(4)? as u32,
-            message_id_header: row.get(5)?,
-            in_reply_to: row.get(6)?,
-            references: row.get(7)?,
-            subject: row.get(8)?,
-            from_address: row.get(9)?,
-            from_name: row.get(10)?,
-            to_addresses,
-            cc_addresses,
-            bcc_addresses,
-            reply_to,
-            sent_at,
-            received_at,
-            is_read: row.get::<_, i64>(17)? != 0,
-            is_flagged: row.get::<_, i64>(18)? != 0,
-            is_draft: row.get::<_, i64>(19)? != 0,
-            has_attachments: row.get::<_, i64>(20)? != 0,
-            body_snippet: row.get(21)?,
-            body_text_preview: row.get(22)?,
-            blob_path: row.get(23)?,
-            size_bytes: row.get(24)?,
-            remote_id: row.get(25).ok(),
-        })
-    })?;
+    let rows = stmt.query_map(
+        params![folder_id, limit as i64, offset as i64],
+        parse_message_row,
+    )?;
     rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+}
+
+pub fn list_unified_inbox_messages(
+    conn: &Connection,
+    limit: usize,
+    offset: usize,
+) -> StorageResult<Vec<Message>> {
+    let mut stmt = conn.prepare(
+        "SELECT id, account_id, folder_id, thread_id, remote_uid, message_id_header, in_reply_to, references_header, subject, from_address, from_name, to_addresses, cc_addresses, bcc_addresses, reply_to, sent_at, received_at, is_read, is_flagged, is_draft, has_attachments, body_snippet, body_text_preview, blob_path, size_bytes, remote_id FROM messages WHERE folder_id IN (SELECT id FROM folders WHERE role = 'inbox') OR folder_id IN (SELECT remote_id FROM folders WHERE role = 'inbox') ORDER BY sent_at DESC LIMIT ?1 OFFSET ?2"
+    )?;
+    let rows = stmt.query_map(params![limit as i64, offset as i64], parse_message_row)?;
+    rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+}
+
+pub fn get_folder_counts(
+    conn: &Connection,
+) -> StorageResult<std::collections::HashMap<String, (i64, i64)>> {
+    let mut stmt = conn.prepare(
+        "SELECT folder_id, COUNT(*), SUM(CASE WHEN is_read = 0 THEN 1 ELSE 0 END) FROM messages GROUP BY folder_id"
+    )?;
+    let rows = stmt.query_map([], |row| {
+        let fid: String = row.get(0)?;
+        let total: i64 = row.get(1)?;
+        let unread: i64 = row.get(2)?;
+        Ok((fid, (total, unread)))
+    })?;
+    let mut map = std::collections::HashMap::new();
+    for r in rows {
+        let (fid, stats) = r?;
+        map.insert(fid, stats);
+    }
+    Ok(map)
 }
 
 pub fn update_message_flags(
@@ -471,6 +513,96 @@ pub fn list_threads(
     rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
 }
 
+pub fn get_message(conn: &Connection, message_id: &str) -> StorageResult<Option<Message>> {
+    let mut stmt = conn.prepare(
+        "SELECT id, account_id, folder_id, thread_id, remote_uid, message_id_header, in_reply_to, references_header, subject, from_address, from_name, to_addresses, cc_addresses, bcc_addresses, reply_to, sent_at, received_at, is_read, is_flagged, is_draft, has_attachments, body_snippet, body_text_preview, blob_path, size_bytes, remote_id FROM messages WHERE id = ?1 LIMIT 1",
+    )?;
+    let mut rows = stmt.query_map(params![message_id], parse_message_row)?;
+    match rows.next() {
+        Some(Ok(msg)) => Ok(Some(msg)),
+        Some(Err(e)) => Err(e.into()),
+        None => Ok(None),
+    }
+}
+
+pub fn list_messages_by_ids(
+    conn: &Connection,
+    message_ids: &[String],
+) -> StorageResult<Vec<Message>> {
+    if message_ids.is_empty() {
+        return Ok(Vec::new());
+    }
+    let placeholders = vec!["?"; message_ids.len()].join(",");
+    let sql = format!(
+        "SELECT id, account_id, folder_id, thread_id, remote_uid, message_id_header, in_reply_to, references_header, subject, from_address, from_name, to_addresses, cc_addresses, bcc_addresses, reply_to, sent_at, received_at, is_read, is_flagged, is_draft, has_attachments, body_snippet, body_text_preview, blob_path, size_bytes, remote_id FROM messages WHERE id IN ({placeholders})"
+    );
+    let mut stmt = conn.prepare(&sql)?;
+    let params: Vec<&dyn rusqlite::ToSql> = message_ids
+        .iter()
+        .map(|id| id as &dyn rusqlite::ToSql)
+        .collect();
+    let rows = stmt.query_map(params.as_slice(), parse_message_row)?;
+    let mut map = std::collections::HashMap::new();
+    for msg in rows {
+        let m = msg?;
+        map.insert(m.id.clone(), m);
+    }
+    // Return in original search ranking order
+    let mut result = Vec::new();
+    for id in message_ids {
+        if let Some(m) = map.remove(id) {
+            result.push(m);
+        }
+    }
+    Ok(result)
+}
+
+pub fn list_attachments_for_message(
+    conn: &Connection,
+    message_id: &str,
+) -> StorageResult<Vec<Attachment>> {
+    let mut stmt = conn.prepare(
+        "SELECT id, message_id, content_id, filename, content_type, size_bytes, blob_path, is_inline FROM attachments WHERE message_id = ?1",
+    )?;
+    let rows = stmt.query_map(params![message_id], |r| {
+        Ok(Attachment {
+            id: r.get(0)?,
+            message_id: r.get(1)?,
+            content_id: r.get(2)?,
+            filename: r.get(3)?,
+            content_type: r.get(4)?,
+            size_bytes: r.get(5)?,
+            blob_path: r.get(6)?,
+            is_inline: r.get::<_, i64>(7)? != 0,
+        })
+    })?;
+    rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+}
+
+pub fn upsert_attachment(conn: &Connection, att: &Attachment) -> StorageResult<()> {
+    conn.execute(
+        "INSERT INTO attachments (id, message_id, content_id, filename, content_type, size_bytes, blob_path, is_inline)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+         ON CONFLICT(id) DO UPDATE SET
+            filename = excluded.filename,
+            content_type = excluded.content_type,
+            size_bytes = excluded.size_bytes,
+            blob_path = excluded.blob_path,
+            is_inline = excluded.is_inline",
+        params![
+            att.id,
+            att.message_id,
+            att.content_id,
+            att.filename,
+            att.content_type,
+            att.size_bytes,
+            att.blob_path,
+            if att.is_inline { 1 } else { 0 },
+        ],
+    )?;
+    Ok(())
+}
+
 pub fn upsert_contact(
     conn: &Connection,
     account_id: &str,
@@ -499,6 +631,20 @@ pub fn list_contacts(
 ) -> StorageResult<Vec<vespetrel_core::Contact>> {
     let mut stmt = conn.prepare("SELECT id, remote_id, display_name, email, vcard_data FROM contacts WHERE account_id = ?1 ORDER BY display_name ASC")?;
     let rows = stmt.query_map(params![account_id], |row| {
+        Ok(vespetrel_core::Contact {
+            id: row.get(0)?,
+            remote_id: row.get(1)?,
+            display_name: row.get(2)?,
+            email: row.get(3)?,
+            vcard_data: row.get(4)?,
+        })
+    })?;
+    rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+}
+
+pub fn list_all_contacts(conn: &Connection) -> StorageResult<Vec<vespetrel_core::Contact>> {
+    let mut stmt = conn.prepare("SELECT id, remote_id, display_name, email, vcard_data FROM contacts ORDER BY display_name ASC")?;
+    let rows = stmt.query_map([], |row| {
         Ok(vespetrel_core::Contact {
             id: row.get(0)?,
             remote_id: row.get(1)?,

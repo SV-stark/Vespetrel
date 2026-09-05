@@ -32,8 +32,7 @@ pub fn sanitize_attachment_filename(name: &str) -> String {
     let safe_base = base
         .replace("../", "")
         .replace("..\\", "")
-        .replace('/', "_")
-        .replace('\\', "_");
+        .replace(['/', '\\'], "_");
     if safe_base.is_empty() || safe_base == "." || safe_base == ".." {
         "attachment".to_string()
     } else {

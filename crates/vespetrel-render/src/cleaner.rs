@@ -179,7 +179,7 @@ pub fn clean_tracking_url(raw_url: &str) -> String {
         result.push_str(&cleaned_query_pairs.join("&"));
     }
 
-    if let Some(_) = frag_str {
+    if frag_str.is_some() {
         result.push('#');
         result.push_str(&cleaned_frag_pairs.join("&"));
     }
@@ -212,14 +212,14 @@ pub fn analyze_phishing_risk(href: &str, display_text: &str) -> PhishingRisk {
         .split(&['/', '?', '#'][..])
         .next()
         .unwrap_or("");
-    if let Some((user_info, host_part)) = authority.split_once('@') {
-        if !user_info.is_empty() {
-            let actual_host = host_part.split(':').next().unwrap_or(host_part);
-            return PhishingRisk::UserInfoSpoofing {
-                user_info: user_info.to_string(),
-                target_domain: actual_host.to_string(),
-            };
-        }
+    if let Some((user_info, host_part)) = authority.split_once('@')
+        && !user_info.is_empty()
+    {
+        let actual_host = host_part.split(':').next().unwrap_or(host_part);
+        return PhishingRisk::UserInfoSpoofing {
+            user_info: user_info.to_string(),
+            target_domain: actual_host.to_string(),
+        };
     }
 
     // Check for host indicators
@@ -319,6 +319,73 @@ fn domains_match(d1: &str, d2: &str) -> bool {
         }
     }
     false
+}
+
+/// Scan HTML or text content for any links containing phishing risks
+pub fn scan_content_for_phishing(content: &str) -> Option<PhishingRisk> {
+    // Check <a> tags with href attribute
+    let mut cursor = content;
+    while let Some(a_start) = cursor.find("<a ") {
+        let after_a = &cursor[a_start + 3..];
+        if let Some(tag_end) = after_a.find('>') {
+            let tag_attrs = &after_a[..tag_end];
+            let after_tag = &after_a[tag_end + 1..];
+
+            // Find href
+            let href_val = if let Some(href_pos) = tag_attrs.find("href=") {
+                let href_part = &tag_attrs[href_pos + 5..];
+                let quote = href_part.chars().next().unwrap_or(' ');
+                if quote == '"' || quote == '\'' {
+                    let inside = &href_part[1..];
+                    inside.split(quote).next().unwrap_or("")
+                } else {
+                    href_part.split_whitespace().next().unwrap_or("")
+                }
+            } else {
+                ""
+            };
+
+            // Find display text up to </a>
+            let display_text = if let Some(close_pos) = after_tag.find("</a>") {
+                &after_tag[..close_pos]
+            } else {
+                ""
+            };
+
+            if !href_val.is_empty() {
+                let risk = analyze_phishing_risk(href_val, display_text);
+                if risk != PhishingRisk::Safe {
+                    return Some(risk);
+                }
+            }
+
+            cursor = after_tag;
+        } else {
+            break;
+        }
+    }
+
+    // Also scan standalone URLs in plain text or content
+    for word in content.split_whitespace() {
+        let clean = word.trim_matches(|c: char| {
+            c == '('
+                || c == ')'
+                || c == '<'
+                || c == '>'
+                || c == '"'
+                || c == '\''
+                || c == '.'
+                || c == ','
+        });
+        if clean.starts_with("http://") || clean.starts_with("https://") {
+            let risk = analyze_phishing_risk(clean, clean);
+            if risk != PhishingRisk::Safe {
+                return Some(risk);
+            }
+        }
+    }
+
+    None
 }
 
 #[cfg(test)]

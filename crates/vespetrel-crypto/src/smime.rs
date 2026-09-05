@@ -147,11 +147,10 @@ impl SmimeEngine {
                                 .strip_prefix("emailAddress=")
                                 .or_else(|| part.strip_prefix("EMAIL="))
                                 .or_else(|| part.strip_prefix("CN="))
+                                && email.contains('@')
                             {
-                                if email.contains('@') {
-                                    matched_email = Some(email.to_string());
-                                    break;
-                                }
+                                matched_email = Some(email.to_string());
+                                break;
                             }
                         }
                         break;
@@ -168,17 +167,15 @@ impl SmimeEngine {
                 if let Some(signed_attrs) = &signer.signed_attrs {
                     for attr in signed_attrs.iter() {
                         // messageDigest OID: 1.2.840.113549.1.9.4
-                        if attr.oid.to_string() == "1.2.840.113549.1.9.4" {
-                            if let Some(first_val) = attr.values.iter().next() {
-                                if let Ok(expected_digest) =
-                                    der::asn1::OctetString::from_der(first_val.value())
-                                {
-                                    let actual_digest =
-                                        ring::digest::digest(&ring::digest::SHA256, econtent_bytes);
-                                    if expected_digest.as_bytes() != actual_digest.as_ref() {
-                                        digest_valid = false;
-                                    }
-                                }
+                        if attr.oid.to_string() == "1.2.840.113549.1.9.4"
+                            && let Some(first_val) = attr.values.iter().next()
+                            && let Ok(expected_digest) =
+                                der::asn1::OctetString::from_der(first_val.value())
+                        {
+                            let actual_digest =
+                                ring::digest::digest(&ring::digest::SHA256, econtent_bytes);
+                            if expected_digest.as_bytes() != actual_digest.as_ref() {
+                                digest_valid = false;
                             }
                         }
                     }
