@@ -9414,7 +9414,7 @@ name = "vespetrel-crypto"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "base64 0.22.1",
+ "base64 0.23.1",
  "chrono",
  "cms",
  "der",
@@ -9511,7 +9511,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "async-trait",
- "base64 0.22.1",
+ "base64 0.23.1",
  "chrono",
  "imap-codec",
  "imap-types",
@@ -9565,7 +9565,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "aws-lc-rs",
- "base64 0.22.1",
+ "base64 0.23.1",
  "chrono",
  "lettre",
  "serde",
