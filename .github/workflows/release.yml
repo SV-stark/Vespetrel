@@ -178,7 +178,7 @@ jobs:
           cat SHA256SUMS.txt
 
       - name: Publish or Update Nightly Release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           tag_name: nightly
           target_commitish: ${{ github.sha }}
@@ -223,7 +223,7 @@ jobs:
           cat SHA256SUMS.txt
 
       - name: Publish Official Release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           tag_name: ${{ github.ref_name }}
           name: "Vespetrel ${{ github.ref_name }}"
