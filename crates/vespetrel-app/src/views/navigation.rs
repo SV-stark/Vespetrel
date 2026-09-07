@@ -1,3 +1,4 @@
+use gpui_kit::component::IconName;
 use vespetrel_core::{Folder, FolderRole};
 
 pub struct NavigationTree {
@@ -28,15 +29,15 @@ impl NavigationTree {
         v
     }
 
-    pub fn folder_icon(role: &FolderRole) -> &'static str {
+    pub fn folder_icon(role: &FolderRole) -> IconName {
         match role {
-            FolderRole::Inbox => "📥",
-            FolderRole::Drafts => "📝",
-            FolderRole::Sent => "📤",
-            FolderRole::Archive => "📦",
-            FolderRole::Junk => "🚫",
-            FolderRole::Trash => "🗑️",
-            FolderRole::Custom => "📁",
+            FolderRole::Inbox => IconName::Inbox,
+            FolderRole::Drafts => IconName::FileText,
+            FolderRole::Sent => IconName::ArrowRight,
+            FolderRole::Archive => IconName::HardDrive,
+            FolderRole::Junk => IconName::CircleX,
+            FolderRole::Trash => IconName::Delete,
+            FolderRole::Custom => IconName::Folder,
         }
     }
 }
@@ -68,6 +69,9 @@ mod tests {
         assert_eq!(sorted[0].role, FolderRole::Inbox);
         assert_eq!(sorted[1].role, FolderRole::Sent);
         assert_eq!(sorted[2].role, FolderRole::Trash);
-        assert_eq!(NavigationTree::folder_icon(&FolderRole::Inbox), "📥");
+        assert!(matches!(
+            NavigationTree::folder_icon(&FolderRole::Inbox),
+            IconName::Inbox
+        ));
     }
 }

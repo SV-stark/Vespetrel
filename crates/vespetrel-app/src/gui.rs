@@ -10,6 +10,7 @@ pub mod gpui_app {
         quick_filter::QuickFilterState,
         tasks::TaskListView,
     };
+    pub use gpui_kit::assets::Assets;
     pub use gpui_kit::base;
     use gpui_kit::base::Selectable;
     pub use gpui_kit::component;
@@ -25,9 +26,11 @@ pub mod gpui_app {
     pub use gpui_kit::component::status_bar::StatusBar;
     pub use gpui_kit::component::tab::{Tab, TabBar};
     pub use gpui_kit::component::{
-        ActiveTheme, Sizable, ThemeStyled, TitleBar, VirtualList, WindowExt, v_virtual_list,
+        ActiveTheme, Icon, IconName, Sizable, ThemeStyled, TitleBar, VirtualList, WindowExt,
+        v_virtual_list,
     };
     pub use gpui_kit::gpui;
+    pub use gpui_kit::prelude::FluentBuilder;
 
     pub use gpui_kit::gpui::*;
     use vespetrel_core::{
@@ -513,9 +516,9 @@ pub mod gpui_app {
                         };
                         let subj = first.subject.as_deref().unwrap_or("(No subject)");
                         let toast_msg = if new_msgs.len() == 1 {
-                            format!("✉️ New email from {}: {}", sender, subj)
+                            format!("New email from {}: {}", sender, subj)
                         } else {
-                            format!("✉️ {} new emails (latest from {})", new_msgs.len(), sender)
+                            format!("{} new emails (latest from {})", new_msgs.len(), sender)
                         };
                         self.show_toast(toast_msg, false, cx);
                     }
@@ -545,7 +548,7 @@ pub mod gpui_app {
                     cx.notify();
                 }
                 SyncEvent::SyncError { folder, error } => {
-                    self.status_message = format!("⚠️ Sync error ({folder}): {error}");
+                    self.status_message = format!("Sync error ({folder}): {error}");
                     self.show_toast(format!("Sync error ({}): {}", folder, error), true, cx);
                     cx.notify();
                 }
@@ -1800,15 +1803,6 @@ pub mod gpui_app {
                 ));
             }
 
-            for toast in self.toasts.drain(..) {
-                let note = if toast.is_error {
-                    Notification::error(toast.message)
-                } else {
-                    Notification::success(toast.message)
-                };
-                window.push_notification(note, cx);
-            }
-
             div()
                 .flex()
                 .flex_col()
@@ -1825,7 +1819,7 @@ pub mod gpui_app {
                         .child(self.render_sidebar_tabs(cx))
                         .child(self.render_active_tab_content(cx)),
                 )
-                .child(self.render_status_bar())
+                .child(self.render_status_bar(cx))
                 .child(self.render_toasts(cx))
                 .child(self.render_modal_layer(window, cx))
         }
@@ -1867,57 +1861,53 @@ pub mod gpui_app {
                         } else {
                             rgb(0xa7f3d0)
                         })
-                        .child(div().child(if t.is_error { "⚠️" } else { "✓" }))
+                        .child(
+                            Icon::new(if t.is_error {
+                                IconName::TriangleAlert
+                            } else {
+                                IconName::Check
+                            })
+                            .small(),
+                        )
                         .child(div().child(t.message.clone()));
 
                     if let Some(ref outbox_id) = t.undo_outbox_id {
                         let out_id = outbox_id.clone();
                         toast_div = toast_div.child(
-                            div()
-                                .id(ElementId::Name(format!("undo-{}", t.id).into()))
-                                .px(px(6.0))
-                                .py(px(2.0))
-                                .rounded_md()
-                                .bg(rgb(0x047857))
-                                .border_1()
-                                .border_color(rgb(0x10b981))
-                                .text_xs()
-                                .font_weight(FontWeight::BOLD)
-                                .text_color(rgb(0xffffff))
-                                .cursor_pointer()
+                            Button::new(ElementId::Name(format!("undo-{}", t.id).into()))
+                                .small()
+                                .icon(IconName::Undo)
+                                .label("Undo")
                                 .on_click(cx.listener(move |this, _, _, cx| {
                                     this.undo_send(&out_id, cx);
-                                }))
-                                .child("Undo ↩"),
+                                })),
                         );
                     }
 
                     let toast_id = t.id.clone();
                     toast_div.child(
-                        div()
-                            .id(ElementId::Name(format!("dismiss-{}", t.id).into()))
-                            .cursor_pointer()
-                            .text_color(rgb(0x94a3b8))
+                        Button::new(ElementId::Name(format!("dismiss-{}", t.id).into()))
+                            .ghost()
+                            .icon(IconName::Close)
                             .on_click(cx.listener(move |this, _, _, cx| {
                                 this.dismiss_toast(&toast_id, cx);
-                            }))
-                            .child("✕"),
+                            })),
                     )
                 }))
         }
         fn render_header(&self, cx: &Context<Self>) -> impl IntoElement {
             let search_display = if self.search_query.is_empty() {
-                "Search messages, senders, attachments (FTS5)...".to_string()
+                "Search messages, senders, attachments (FTS5)…".to_string()
             } else {
                 self.search_query.clone()
             };
 
             let nav_tabs = [
-                (ActiveViewTab::Mail, "✉️ Mail"),
-                (ActiveViewTab::Calendar, "📅 Calendar"),
-                (ActiveViewTab::Contacts, "👥 Contacts"),
-                (ActiveViewTab::Tasks, "✅ Tasks"),
-                (ActiveViewTab::Settings, "⚙️ Settings"),
+                (ActiveViewTab::Mail, IconName::Inbox, "Mail"),
+                (ActiveViewTab::Calendar, IconName::Calendar, "Calendar"),
+                (ActiveViewTab::Contacts, IconName::User, "Contacts"),
+                (ActiveViewTab::Tasks, IconName::Check, "Tasks"),
+                (ActiveViewTab::Settings, IconName::Settings, "Settings"),
             ];
 
             TitleBar::new().child(
@@ -1960,14 +1950,23 @@ pub mod gpui_app {
                                     .child("Vespetrel"),
                             )
                             .child(TabBar::new("header-nav-tabbar").children(
-                                nav_tabs.into_iter().map(|(tab, label)| {
+                                nav_tabs.into_iter().map(|(tab, icon, label)| {
                                     let is_active = self.active_tab == tab;
-                                    Tab::new().label(label).selected(is_active).on_click(
-                                        cx.listener(move |this, _, _, cx| {
+                                    Tab::new()
+                                        .child(
+                                            div()
+                                                .flex()
+                                                .flex_row()
+                                                .items_center()
+                                                .gap(px(6.0))
+                                                .child(Icon::new(icon).small())
+                                                .child(label),
+                                        )
+                                        .selected(is_active)
+                                        .on_click(cx.listener(move |this, _, _, cx| {
                                             this.active_tab = tab;
                                             cx.notify();
-                                        }),
-                                    )
+                                        }))
                                 }),
                             )),
                     )
@@ -1998,13 +1997,16 @@ pub mod gpui_app {
                                     .flex_1()
                                     .items_center()
                                     .gap(px(8.0))
-                                    .cursor_pointer()
                                     .on_click(cx.listener(|this, _, _, cx| {
                                         this.command_palette.open();
                                         this.active_modal = ActiveModal::CommandPalette;
                                         cx.notify();
                                     }))
-                                    .child(div().text_xs().text_color(rgb(0x94a3b8)).child("🔍"))
+                                    .child(
+                                        Icon::new(IconName::Search)
+                                            .small()
+                                            .text_color(rgb(0x94a3b8)),
+                                    )
                                     .child(
                                         div()
                                             .text_xs()
@@ -2017,11 +2019,12 @@ pub mod gpui_app {
                                     ),
                             )
                             .children((!self.search_query.is_empty()).then(|| {
-                                Button::new("btn-clear-search").ghost().label("✕").on_click(
-                                    cx.listener(|this, _, _, cx| {
+                                Button::new("btn-clear-search")
+                                    .ghost()
+                                    .icon(IconName::Close)
+                                    .on_click(cx.listener(|this, _, _, cx| {
                                         this.clear_search(cx);
-                                    }),
-                                )
+                                    }))
                             })),
                     )
                     .child(
@@ -2033,7 +2036,8 @@ pub mod gpui_app {
                             .child(
                                 Button::new("btn-header-compose")
                                     .primary()
-                                    .label("✍️ Compose")
+                                    .icon(IconName::Plus)
+                                    .label("Compose")
                                     .on_click(cx.listener(|this, _, _, cx| {
                                         this.active_modal = ActiveModal::Compose;
                                         cx.notify();
@@ -2042,7 +2046,8 @@ pub mod gpui_app {
                             .child(
                                 Button::new("btn-header-sync")
                                     .secondary()
-                                    .label("🔄 Sync")
+                                    .icon(IconName::RotateCw)
+                                    .label("Sync")
                                     .on_click(cx.listener(|this, _, _, cx| {
                                         this.trigger_sync(cx);
                                     })),
@@ -2058,7 +2063,9 @@ pub mod gpui_app {
                             )
                             .child(
                                 Popover::new("header-info-popover")
-                                    .trigger(Button::new("btn-header-info").ghost().label("ℹ️"))
+                                    .trigger(
+                                        Button::new("btn-header-info").ghost().icon(IconName::Info),
+                                    )
                                     .content(|_, _, cx| {
                                         div()
                                             .p(px(10.0))
@@ -2066,23 +2073,8 @@ pub mod gpui_app {
                                             .border_1()
                                             .border_color(rgb(0x2d3748))
                                             .rounded_md()
-                                            .flex()
-                                            .flex_col()
-                                            .gap(px(4.0))
-                                            .child(
-                                                div()
-                                                    .text_xs()
-                                                    .font_weight(FontWeight::BOLD)
-                                                    .text_color(cx.theme().foreground)
-                                                    .child("Vespetrel v0.1.0"),
-                                            )
-                                            .child(
-                                                div()
-                                                    .text_xs()
-                                                    .text_color(rgb(0x94a3b8))
-                                                    .child("High-performance Native Mail Client"),
-                                            )
-                                            .into_any_element()
+                                            .text_xs()
+                                            .child("Vespetrel v0.1.0 • Pure Rust Desktop Client")
                                     }),
                             ),
                     ),
@@ -2091,11 +2083,11 @@ pub mod gpui_app {
 
         fn render_sidebar_tabs(&self, cx: &Context<Self>) -> impl IntoElement {
             let tabs = [
-                (ActiveViewTab::Mail, "✉️", "Mail"),
-                (ActiveViewTab::Calendar, "📅", "Calendar"),
-                (ActiveViewTab::Contacts, "👥", "Contacts"),
-                (ActiveViewTab::Tasks, "✅", "Tasks"),
-                (ActiveViewTab::Settings, "⚙️", "Settings"),
+                (ActiveViewTab::Mail, IconName::Inbox, "Mail"),
+                (ActiveViewTab::Calendar, IconName::Calendar, "Calendar"),
+                (ActiveViewTab::Contacts, IconName::User, "Contacts"),
+                (ActiveViewTab::Tasks, IconName::Check, "Tasks"),
+                (ActiveViewTab::Settings, IconName::Settings, "Settings"),
             ];
 
             div()
@@ -2120,7 +2112,7 @@ pub mod gpui_app {
                                     .items_center()
                                     .justify_center()
                                     .gap(px(2.0))
-                                    .child(div().text_base().child(icon))
+                                    .child(Icon::new(icon).small())
                                     .child(div().text_xs().child(label)),
                             )
                             .on_click(cx.listener(move |this, _, _, cx| {
@@ -2182,18 +2174,17 @@ pub mod gpui_app {
                                 .child("ACCOUNTS & FOLDERS"),
                         )
                         .child(
-                            div()
-                                .id("btn-add-account")
-                                .text_xs()
-                                .text_color(rgb(0x60a5fa))
-                                .cursor_pointer()
+                            Button::new("btn-add-account")
+                                .icon(IconName::Plus)
+                                .label("Add")
+                                .ghost()
+                                .small()
                                 .on_click(cx.listener(|this, _, _, cx| {
                                     this.login_wizard = LoginWizardState::new();
                                     this.wizard_inputs = None;
                                     this.active_modal = ActiveModal::AddAccount;
                                     cx.notify();
-                                }))
-                                .child("+ Add"),
+                                })),
                         ),
                 )
                 .children(if self.accounts.is_empty() {
@@ -2205,7 +2196,7 @@ pub mod gpui_app {
                             .p(px(8.0))
                             .rounded_md()
                             .bg(rgb(0x181f2f))
-                            .cursor_pointer()
+                            .hover(|s| s.bg(rgb(0x1e293b)))
                             .on_click(cx.listener(|this, _, _, cx| {
                                 this.login_wizard = LoginWizardState::new();
                                 this.wizard_inputs = None;
@@ -2260,22 +2251,17 @@ pub mod gpui_app {
                                         ),
                                 )
                                 .child(
-                                    div()
-                                        .id(ElementId::Name(
-                                            format!("btn-del-account-{}", idx).into(),
-                                        ))
-                                        .cursor_pointer()
-                                        .px(px(6.0))
-                                        .py(px(2.0))
-                                        .rounded_md()
-                                        .bg(rgb(0x2d1515))
-                                        .text_xs()
-                                        .text_color(rgb(0xf87171))
-                                        .hover(|s| s.bg(rgb(0x450a0a)))
-                                        .on_click(cx.listener(move |this, _, _, cx| {
+                                    Button::new(ElementId::Name(
+                                        format!("btn-del-account-{}", idx).into(),
+                                    ))
+                                    .ghost()
+                                    .danger()
+                                    .icon(IconName::Delete)
+                                    .on_click(cx.listener(
+                                        move |this, _, _, cx| {
                                             this.delete_account(&acc_id_clone, cx);
-                                        }))
-                                        .child("🗑️"),
+                                        },
+                                    )),
                                 )
                         })
                         .collect()
@@ -2311,7 +2297,6 @@ pub mod gpui_app {
                             } else {
                                 rgb(0xcbd5e1)
                             })
-                            .cursor_pointer()
                             .on_click(cx.listener(|this, _, _, cx| {
                                 this.select_unified_inbox(cx);
                             }))
@@ -2321,7 +2306,7 @@ pub mod gpui_app {
                                     .flex_row()
                                     .items_center()
                                     .gap(px(8.0))
-                                    .child(div().text_xs().child("📫"))
+                                    .child(Icon::new(IconName::Inbox).small())
                                     .child(
                                         div()
                                             .text_xs()
@@ -2374,7 +2359,6 @@ pub mod gpui_app {
                                 } else {
                                     rgb(0xcbd5e1)
                                 })
-                                .cursor_pointer()
                                 .on_click(cx.listener(move |this, _, _, cx| {
                                     this.select_folder(folder_id_clone.clone(), cx);
                                 }))
@@ -2384,7 +2368,7 @@ pub mod gpui_app {
                                         .flex_row()
                                         .items_center()
                                         .gap(px(8.0))
-                                        .child(div().text_xs().child(icon))
+                                        .child(Icon::new(icon).small())
                                         .child(
                                             div()
                                                 .text_xs()
@@ -2446,7 +2430,13 @@ pub mod gpui_app {
                 } else {
                     rgb(0x10141d)
                 })
-                .cursor_pointer()
+                .hover(|s| {
+                    s.bg(if is_selected {
+                        rgb(0x23314d)
+                    } else {
+                        rgb(0x182030)
+                    })
+                })
                 .on_click(cx.listener(move |this, _, _, cx| {
                     this.select_message(msg_id.clone(), cx);
                 }));
@@ -2489,20 +2479,33 @@ pub mod gpui_app {
                         .gap(px(6.0))
                         .child(if thread_count > 1 && !is_child {
                             Badge::new()
-                                .child(format!("🧵 {thread_count}"))
+                                .child(
+                                    div()
+                                        .flex()
+                                        .flex_row()
+                                        .items_center()
+                                        .gap(px(3.0))
+                                        .child(Icon::new(IconName::GalleryVerticalEnd).xsmall())
+                                        .child(thread_count.to_string()),
+                                )
                                 .into_any_element()
                         } else {
                             div().into_any_element()
                         })
                         .child(
-                            div()
-                                .text_xs()
+                            div().child(
+                                Icon::new(if msg.is_flagged {
+                                    IconName::StarFill
+                                } else {
+                                    IconName::Star
+                                })
+                                .xsmall()
                                 .text_color(if msg.is_flagged {
                                     rgb(0xfbbf24)
                                 } else {
                                     rgb(0x475569)
-                                })
-                                .child(if msg.is_flagged { "★" } else { "☆" }),
+                                }),
+                            ),
                         )
                         .child(div().text_xs().text_color(rgb(0x64748b)).child(date_str)),
                 );
@@ -2528,7 +2531,7 @@ pub mod gpui_app {
                 item_div =
                     item_div.child(div().pt(px(2.0)).text_xs().text_color(rgb(0x94a3b8)).child(
                         if snippet.len() > 100 {
-                            format!("{}...", &snippet[..100])
+                            format!("{}…", &snippet[..100])
                         } else {
                             snippet.to_string()
                         },
@@ -2537,7 +2540,7 @@ pub mod gpui_app {
                 item_div =
                     item_div.child(div().pt(px(2.0)).text_xs().text_color(rgb(0x94a3b8)).child(
                         if snippet.len() > 60 {
-                            format!("{}...", &snippet[..60])
+                            format!("{}…", &snippet[..60])
                         } else {
                             snippet.to_string()
                         },
@@ -2586,11 +2589,22 @@ pub mod gpui_app {
                                 .items_center()
                                 .p(px(8.0))
                                 .gap(px(4.0))
-                                .child(self.render_filter_chip("All", ListFilter::All, cx))
-                                .child(self.render_filter_chip("Unread", ListFilter::Unread, cx))
-                                .child(self.render_filter_chip("Starred", ListFilter::Flagged, cx))
+                                .child(self.render_filter_chip("All", None, ListFilter::All, cx))
                                 .child(self.render_filter_chip(
-                                    "📎 Files",
+                                    "Unread",
+                                    None,
+                                    ListFilter::Unread,
+                                    cx,
+                                ))
+                                .child(self.render_filter_chip(
+                                    "Starred",
+                                    Some(IconName::Star),
+                                    ListFilter::Flagged,
+                                    cx,
+                                ))
+                                .child(self.render_filter_chip(
+                                    "Files",
+                                    Some(IconName::File),
                                     ListFilter::WithAttachments,
                                     cx,
                                 )),
@@ -2611,7 +2625,8 @@ pub mod gpui_app {
                                         } else {
                                             gpui_kit::component::button::ButtonVariant::Secondary
                                         })
-                                        .label("🧵 Threaded")
+                                        .icon(IconName::GalleryVerticalEnd)
+                                        .label("Threaded")
                                         .on_click(cx.listener(|this, _, _, cx| {
                                             this.toggle_threading(cx);
                                         })),
@@ -2659,32 +2674,26 @@ pub mod gpui_app {
         fn render_filter_chip(
             &self,
             label: &'static str,
+            icon: Option<IconName>,
             filter: ListFilter,
             cx: &Context<Self>,
         ) -> impl IntoElement {
             let is_active = self.list_filter == filter;
-            div()
-                .id(ElementId::Name(format!("filter-chip-{}", label).into()))
-                .px(px(8.0))
-                .py(px(4.0))
-                .rounded_md()
-                .bg(if is_active {
-                    rgb(0x2563eb)
-                } else {
-                    rgb(0x1a2233)
-                })
-                .text_color(if is_active {
-                    rgb(0xffffff)
-                } else {
-                    rgb(0x94a3b8)
-                })
-                .text_xs()
-                .cursor_pointer()
+            let mut btn = Button::new(ElementId::Name(format!("filter-chip-{}", label).into()))
+                .small()
                 .on_click(cx.listener(move |this, _, _, cx| {
                     this.list_filter = filter;
                     cx.notify();
-                }))
-                .child(label)
+                }));
+            if let Some(ic) = icon {
+                btn = btn.icon(ic);
+            }
+            btn = btn.label(label);
+            if is_active {
+                btn.primary()
+            } else {
+                btn.ghost()
+            }
         }
 
         fn render_message_reader_pane(&self, cx: &Context<Self>) -> impl IntoElement {
@@ -2728,7 +2737,8 @@ pub mod gpui_app {
                                         .child(
                                             Button::new("btn-reply-message")
                                                 .primary()
-                                                .label("↩ Reply")
+                                                .icon(IconName::ArrowLeft)
+                                                .label("Reply")
                                                 .on_click(cx.listener({
                                                     let reply_to = msg.from_address.clone();
                                                     let reply_subj = if msg
@@ -2762,7 +2772,8 @@ pub mod gpui_app {
                                         .child(
                                             Button::new("btn-reply-all-message")
                                                 .secondary()
-                                                .label("👥 Reply All")
+                                                .icon(IconName::Undo2)
+                                                .label("Reply All")
                                                 .on_click(cx.listener({
                                                     let reply_to = msg.from_address.clone();
                                                     let reply_subj = if msg
@@ -2796,7 +2807,8 @@ pub mod gpui_app {
                                         .child(
                                             Button::new("btn-forward-message")
                                                 .secondary()
-                                                .label("↪ Forward")
+                                                .icon(IconName::ArrowRight)
+                                                .label("Forward")
                                                 .on_click(cx.listener({
                                                     let fwd_subj = if msg
                                                         .subject
@@ -2838,7 +2850,8 @@ pub mod gpui_app {
                                         .child(
                                             Button::new("btn-archive-message")
                                                 .secondary()
-                                                .label("📦 Archive")
+                                                .icon(IconName::HardDrive)
+                                                .label("Archive")
                                                 .on_click(cx.listener(|this, _, _, cx| {
                                                     this.archive_selected_message(cx);
                                                 })),
@@ -2846,7 +2859,8 @@ pub mod gpui_app {
                                         .child(
                                             Button::new("btn-delete-message")
                                                 .danger()
-                                                .label("🗑️ Delete")
+                                                .icon(IconName::Delete)
+                                                .label("Delete")
                                                 .on_click(cx.listener(|this, _, _, cx| {
                                                     this.delete_selected_message(cx);
                                                 })),
@@ -2860,21 +2874,40 @@ pub mod gpui_app {
                                         .items_center()
                                         .gap(px(6.0))
                                         .child(
-                                            Badge::new()
-                                                .child("✓ DKIM Pass"),
+                                            Badge::new().child(
+                                                div()
+                                                    .flex()
+                                                    .items_center()
+                                                    .gap(px(4.0))
+                                                    .child(Icon::new(IconName::Check).xsmall())
+                                                    .child("DKIM Pass"),
+                                            ),
                                         )
                                         .child(
-                                            Badge::new()
-                                                .child("✓ SPF Pass"),
+                                            Badge::new().child(
+                                                div()
+                                                    .flex()
+                                                    .items_center()
+                                                    .gap(px(4.0))
+                                                    .child(Icon::new(IconName::Check).xsmall())
+                                                    .child("SPF Pass"),
+                                            ),
                                         )
                                         .child(
-                                            Badge::new()
-                                                .child(match self.message_viewer.security_status {
-                                                    SecurityStatus::PgpSignedValid => "🔒 PGP Signed ✓",
-                                                    SecurityStatus::PgpEncryptedAndSigned => "🔒 PGP Encrypted & Signed ✓",
-                                                    SecurityStatus::SmimeValid => "🔏 S/MIME Valid (X.509) ✓",
-                                                    _ => "🔒 TLS Encrypted",
-                                                }),
+                                            Badge::new().child({
+                                                let (sec_icon, sec_label) = match self.message_viewer.security_status {
+                                                    SecurityStatus::PgpSignedValid => (IconName::Check, "PGP Signed"),
+                                                    SecurityStatus::PgpEncryptedAndSigned => (IconName::FolderClosed, "PGP Encrypted & Signed"),
+                                                    SecurityStatus::SmimeValid => (IconName::Check, "S/MIME Valid (X.509)"),
+                                                    _ => (IconName::FolderClosed, "TLS Encrypted"),
+                                                };
+                                                div()
+                                                    .flex()
+                                                    .items_center()
+                                                    .gap(px(4.0))
+                                                    .child(Icon::new(sec_icon).xsmall())
+                                                    .child(sec_label)
+                                            }),
                                         ),
                                 ),
                         )
@@ -2962,7 +2995,7 @@ pub mod gpui_app {
                                 .bg(rgb(0x450a0a))
                                 .border_b_1()
                                 .border_color(rgb(0xdc2626))
-                                .child(div().text_base().child("⚠️"))
+                                .child(Icon::new(IconName::TriangleAlert).small().text_color(rgb(0xf87171)))
                                 .child(
                                     div()
                                         .flex()
@@ -2997,28 +3030,46 @@ pub mod gpui_app {
                                 .border_color(rgb(0x1f293d))
                                 .child(
                                     div()
-                                        .text_xs()
-                                        .text_color(rgb(0x94a3b8))
-                                        .child(if self.block_remote_images {
-                                            "🛡️ Remote images blocked to protect your privacy & stop tracking pixels."
-                                        } else {
-                                            "⚠️ Remote images allowed for this session."
-                                        }),
+                                        .flex()
+                                        .flex_row()
+                                        .items_center()
+                                        .gap(px(8.0))
+                                        .child(
+                                            Icon::new(if self.block_remote_images {
+                                                IconName::CircleCheck
+                                            } else {
+                                                IconName::TriangleAlert
+                                            })
+                                            .small()
+                                            .text_color(if self.block_remote_images {
+                                                rgb(0x10b981)
+                                            } else {
+                                                rgb(0xf59e0b)
+                                            }),
+                                        )
+                                        .child(
+                                            div()
+                                                .text_xs()
+                                                .text_color(rgb(0x94a3b8))
+                                                .child(if self.block_remote_images {
+                                                    "Remote images blocked to protect your privacy & stop tracking pixels."
+                                                } else {
+                                                    "Remote images allowed for this session."
+                                                }),
+                                        ),
                                 )
                                 .child(
-                                    div()
-                                        .id("btn-toggle-images")
-                                        .text_xs()
-                                        .text_color(rgb(0x60a5fa))
-                                        .cursor_pointer()
-                                        .on_click(cx.listener(|this, _, _, cx| {
-                                            this.toggle_remote_images(cx);
-                                        }))
-                                        .child(if self.block_remote_images {
+                                    Button::new("btn-toggle-images")
+                                        .ghost()
+                                        .small()
+                                        .label(if self.block_remote_images {
                                             "Load Remote Images"
                                         } else {
                                             "Block Remote Images"
-                                        }),
+                                        })
+                                        .on_click(cx.listener(|this, _, _, cx| {
+                                            this.toggle_remote_images(cx);
+                                        })),
                                 ),
                         );
 
@@ -3041,10 +3092,18 @@ pub mod gpui_app {
                                 .gap(px(6.0))
                                 .child(
                                     div()
-                                        .text_xs()
-                                        .font_weight(FontWeight::BOLD)
-                                        .text_color(rgb(0x94a3b8))
-                                        .child(format!("📎 Attachments ({})", attachments.len())),
+                                        .flex()
+                                        .flex_row()
+                                        .items_center()
+                                        .gap(px(6.0))
+                                        .child(Icon::new(IconName::File).small())
+                                        .child(
+                                            div()
+                                                .text_xs()
+                                                .font_weight(FontWeight::BOLD)
+                                                .text_color(rgb(0x94a3b8))
+                                                .child(format!("Attachments ({})", attachments.len())),
+                                        ),
                                 )
                                 .child(
                                     div()
@@ -3075,14 +3134,15 @@ pub mod gpui_app {
                                                 .border_color(rgb(0x334155))
                                                 .text_xs()
                                                 .text_color(rgb(0xcbd5e1))
-                                                .child(div().child("📄"))
+                                                .child(Icon::new(IconName::File).small())
                                                 .child(div().child(fname.clone()))
                                                 .child(div().text_color(rgb(0x64748b)).child(format!("({sz_str})")))
                                                 .child(
-                                                    div()
-                                                        .id(ElementId::Name(format!("save-att-{}", fname).into()))
-                                                        .cursor_pointer()
-                                                        .text_color(rgb(0x60a5fa))
+                                                    Button::new(ElementId::Name(format!("save-att-{}", fname).into()))
+                                                        .ghost()
+                                                        .small()
+                                                        .icon(IconName::HardDrive)
+                                                        .label("Save")
                                                         .on_click(cx.listener({
                                                             let att_name = fname.clone();
                                                             let b_path = att.blob_path.clone();
@@ -3093,8 +3153,7 @@ pub mod gpui_app {
                                                                     cx,
                                                                 );
                                                             }
-                                                        }))
-                                                        .child("💾 Save"),
+                                                        })),
                                                 )
                                         })),
                                 )
@@ -3168,20 +3227,24 @@ pub mod gpui_app {
                         .justify_between()
                         .child(
                             div()
-                                .text_lg()
-                                .font_weight(FontWeight::BOLD)
-                                .text_color(rgb(0xf8fafc))
-                                .child("📅 Calendar (CalDAV RFC 4791 & iCalendar RFC 5545)"),
+                                .flex()
+                                .flex_row()
+                                .items_center()
+                                .gap(px(8.0))
+                                .child(Icon::new(IconName::Calendar).text_color(rgb(0x60a5fa)))
+                                .child(
+                                    div()
+                                        .text_lg()
+                                        .font_weight(FontWeight::BOLD)
+                                        .text_color(rgb(0xf8fafc))
+                                        .child("Calendar (CalDAV RFC 4791 & iCalendar RFC 5545)"),
+                                ),
                         )
                         .child(
-                            div()
-                                .px(px(12.0))
-                                .py(px(6.0))
-                                .rounded_md()
-                                .bg(rgb(0x2563eb))
-                                .text_color(rgb(0xffffff))
-                                .text_xs()
-                                .child("+ New Event"),
+                            Button::new("btn-new-event")
+                                .icon(IconName::Plus)
+                                .label("New Event")
+                                .primary(),
                         ),
                 )
                 .child(
@@ -3242,20 +3305,24 @@ pub mod gpui_app {
                         .justify_between()
                         .child(
                             div()
-                                .text_lg()
-                                .font_weight(FontWeight::BOLD)
-                                .text_color(rgb(0xf8fafc))
-                                .child("👥 Address Book (CardDAV & vCard 4.0)"),
+                                .flex()
+                                .flex_row()
+                                .items_center()
+                                .gap(px(8.0))
+                                .child(Icon::new(IconName::User).text_color(rgb(0x60a5fa)))
+                                .child(
+                                    div()
+                                        .text_lg()
+                                        .font_weight(FontWeight::BOLD)
+                                        .text_color(rgb(0xf8fafc))
+                                        .child("Address Book (CardDAV & vCard 4.0)"),
+                                ),
                         )
                         .child(
-                            div()
-                                .px(px(12.0))
-                                .py(px(6.0))
-                                .rounded_md()
-                                .bg(rgb(0x2563eb))
-                                .text_color(rgb(0xffffff))
-                                .text_xs()
-                                .child("+ Add Contact"),
+                            Button::new("btn-new-contact")
+                                .icon(IconName::Plus)
+                                .label("Add Contact")
+                                .primary(),
                         ),
                 )
                 .child(
@@ -3317,14 +3384,12 @@ pub mod gpui_app {
                                         ),
                                 )
                                 .child(
-                                    div()
-                                        .px(px(10.0))
-                                        .py(px(4.0))
-                                        .rounded_md()
-                                        .bg(rgb(0x1e293b))
-                                        .text_color(rgb(0x60a5fa))
-                                        .text_xs()
-                                        .child("Write Email"),
+                                    Button::new(ElementId::Name(
+                                        format!("btn-contact-email-{}", c.id).into(),
+                                    ))
+                                    .icon(IconName::Inbox)
+                                    .label("Write Email")
+                                    .xsmall(),
                                 )
                         })),
                 )
@@ -3348,20 +3413,24 @@ pub mod gpui_app {
                         .justify_between()
                         .child(
                             div()
-                                .text_lg()
-                                .font_weight(FontWeight::BOLD)
-                                .text_color(rgb(0xf8fafc))
-                                .child("✅ Tasks (RFC 5545 VTODO & CalDAV Tasks)"),
+                                .flex()
+                                .flex_row()
+                                .items_center()
+                                .gap(px(8.0))
+                                .child(Icon::new(IconName::Check).text_color(rgb(0x60a5fa)))
+                                .child(
+                                    div()
+                                        .text_lg()
+                                        .font_weight(FontWeight::BOLD)
+                                        .text_color(rgb(0xf8fafc))
+                                        .child("Tasks (RFC 5545 VTODO & CalDAV Tasks)"),
+                                ),
                         )
                         .child(
-                            div()
-                                .px(px(12.0))
-                                .py(px(6.0))
-                                .rounded_md()
-                                .bg(rgb(0x2563eb))
-                                .text_color(rgb(0xffffff))
-                                .text_xs()
-                                .child("+ Add Task"),
+                            Button::new("btn-new-task")
+                                .icon(IconName::Plus)
+                                .label("Add Task")
+                                .primary(),
                         ),
                 )
                 .child(div().flex().flex_col().gap(px(8.0)).children(
@@ -3383,11 +3452,20 @@ pub mod gpui_app {
                                     .flex_row()
                                     .items_center()
                                     .gap(px(10.0))
-                                    .child(div().text_sm().child(if is_done {
-                                        "☑️"
+                                    .child(if is_done {
+                                        Icon::new(IconName::CircleCheck)
+                                            .text_color(rgb(0x10b981))
+                                            .small()
+                                            .into_any_element()
                                     } else {
-                                        "⬜"
-                                    }))
+                                        div()
+                                            .w(px(14.0))
+                                            .h(px(14.0))
+                                            .rounded_sm()
+                                            .border_1()
+                                            .border_color(rgb(0x64748b))
+                                            .into_any_element()
+                                    })
                                     .child(
                                         div()
                                             .text_xs()
@@ -3440,10 +3518,18 @@ pub mod gpui_app {
                 .gap(px(16.0))
                 .child(
                     div()
-                        .text_lg()
-                        .font_weight(FontWeight::BOLD)
-                        .text_color(rgb(0xf8fafc))
-                        .child("⚙️ Configuration & Preferences"),
+                        .flex()
+                        .flex_row()
+                        .items_center()
+                        .gap(px(8.0))
+                        .child(Icon::new(IconName::Settings).text_color(rgb(0x60a5fa)))
+                        .child(
+                            div()
+                                .text_lg()
+                                .font_weight(FontWeight::BOLD)
+                                .text_color(rgb(0xf8fafc))
+                                .child("Configuration & Preferences"),
+                        ),
                 )
                 // Section 1: Appearance & Theme
                 .child(
@@ -3458,10 +3544,18 @@ pub mod gpui_app {
                         .gap(px(10.0))
                         .child(
                             div()
-                                .text_sm()
-                                .font_weight(FontWeight::BOLD)
-                                .text_color(rgb(0x60a5fa))
-                                .child("🎨 Appearance & Color Theme"),
+                                .flex()
+                                .flex_row()
+                                .items_center()
+                                .gap(px(8.0))
+                                .child(Icon::new(IconName::Palette).small().text_color(rgb(0x60a5fa)))
+                                .child(
+                                    div()
+                                        .text_sm()
+                                        .font_weight(FontWeight::BOLD)
+                                        .text_color(rgb(0x60a5fa))
+                                        .child("Appearance & Color Theme"),
+                                ),
                         )
                         .child(
                             TabBar::new("settings-theme-tabbar").children(
@@ -3490,10 +3584,22 @@ pub mod gpui_app {
                         .gap(px(10.0))
                         .child(
                             div()
-                                .text_sm()
-                                .font_weight(FontWeight::BOLD)
-                                .text_color(rgb(0x60a5fa))
-                                .child("📐 Message List Density"),
+                                .flex()
+                                .flex_row()
+                                .items_center()
+                                .gap(px(8.0))
+                                .child(
+                                    Icon::new(IconName::LayoutDashboard)
+                                        .small()
+                                        .text_color(rgb(0x60a5fa)),
+                                )
+                                .child(
+                                    div()
+                                        .text_sm()
+                                        .font_weight(FontWeight::BOLD)
+                                        .text_color(rgb(0x60a5fa))
+                                        .child("Message List Density"),
+                                ),
                         )
                         .child(
                             TabBar::new("settings-density-tabbar").children(
@@ -3522,10 +3628,22 @@ pub mod gpui_app {
                         .gap(px(12.0))
                         .child(
                             div()
-                                .text_sm()
-                                .font_weight(FontWeight::BOLD)
-                                .text_color(rgb(0x60a5fa))
-                                .child("🛡️ Privacy & Threat Defense"),
+                                .flex()
+                                .flex_row()
+                                .items_center()
+                                .gap(px(8.0))
+                                .child(
+                                    Icon::new(IconName::CircleCheck)
+                                        .small()
+                                        .text_color(rgb(0x60a5fa)),
+                                )
+                                .child(
+                                    div()
+                                        .text_sm()
+                                        .font_weight(FontWeight::BOLD)
+                                        .text_color(rgb(0x60a5fa))
+                                        .child("Privacy & Threat Defense"),
+                                ),
                         )
                         .child(
                             div()
@@ -3542,21 +3660,21 @@ pub mod gpui_app {
                                         .child(div().text_xs().text_color(rgb(0x94a3b8)).child("Automatically strip 1x1 tracking GIFs and known telemetry web beacons")),
                                 )
                                 .child(
-                                    div()
-                                        .id("btn-toggle-strip-trackers")
-                                        .px(px(12.0))
-                                        .py(px(4.0))
-                                        .rounded_md()
-                                        .bg(if self.settings.auto_strip_trackers { rgb(0x064e3b) } else { rgb(0x1e293b) })
-                                        .border_1()
-                                        .border_color(if self.settings.auto_strip_trackers { rgb(0x10b981) } else { rgb(0x334155) })
-                                        .text_xs()
-                                        .text_color(if self.settings.auto_strip_trackers { rgb(0xa7f3d0) } else { rgb(0x94a3b8) })
-                                        .cursor_pointer()
+                                    Button::new("btn-toggle-strip-trackers")
+                                        .icon(if self.settings.auto_strip_trackers {
+                                            IconName::Check
+                                        } else {
+                                            IconName::Close
+                                        })
+                                        .label(if self.settings.auto_strip_trackers {
+                                            "Enabled"
+                                        } else {
+                                            "Disabled"
+                                        })
+                                        .when(self.settings.auto_strip_trackers, |btn| btn.primary())
                                         .on_click(cx.listener(|this, _, _, cx| {
                                             this.toggle_settings_strip_trackers(cx);
-                                        }))
-                                        .child(if self.settings.auto_strip_trackers { "✓ Enabled" } else { "✕ Disabled" }),
+                                        })),
                                 ),
                         )
                         .child(
@@ -3574,21 +3692,21 @@ pub mod gpui_app {
                                         .child(div().text_xs().text_color(rgb(0x94a3b8)).child("Detect deceptive display domains, punycode homographs, and IP URLs")),
                                 )
                                 .child(
-                                    div()
-                                        .id("btn-toggle-phishing-warnings")
-                                        .px(px(12.0))
-                                        .py(px(4.0))
-                                        .rounded_md()
-                                        .bg(if self.settings.warn_on_phishing { rgb(0x064e3b) } else { rgb(0x1e293b) })
-                                        .border_1()
-                                        .border_color(if self.settings.warn_on_phishing { rgb(0x10b981) } else { rgb(0x334155) })
-                                        .text_xs()
-                                        .text_color(if self.settings.warn_on_phishing { rgb(0xa7f3d0) } else { rgb(0x94a3b8) })
-                                        .cursor_pointer()
+                                    Button::new("btn-toggle-phishing-warnings")
+                                        .icon(if self.settings.warn_on_phishing {
+                                            IconName::Check
+                                        } else {
+                                            IconName::Close
+                                        })
+                                        .label(if self.settings.warn_on_phishing {
+                                            "Enabled"
+                                        } else {
+                                            "Disabled"
+                                        })
+                                        .when(self.settings.warn_on_phishing, |btn| btn.primary())
                                         .on_click(cx.listener(|this, _, _, cx| {
                                             this.toggle_settings_warn_phishing(cx);
-                                        }))
-                                        .child(if self.settings.warn_on_phishing { "✓ Enabled" } else { "✕ Disabled" }),
+                                        })),
                                 ),
                         ),
                 )
@@ -3605,10 +3723,18 @@ pub mod gpui_app {
                         .gap(px(10.0))
                         .child(
                             div()
-                                .text_sm()
-                                .font_weight(FontWeight::BOLD)
-                                .text_color(rgb(0x60a5fa))
-                                .child("✉️ Compose & Undo Send Delay"),
+                                .flex()
+                                .flex_row()
+                                .items_center()
+                                .gap(px(8.0))
+                                .child(Icon::new(IconName::Inbox).small().text_color(rgb(0x60a5fa)))
+                                .child(
+                                    div()
+                                        .text_sm()
+                                        .font_weight(FontWeight::BOLD)
+                                        .text_color(rgb(0x60a5fa))
+                                        .child("Compose & Undo Send Delay"),
+                                ),
                         )
                         .child(
                             div()
@@ -3617,22 +3743,12 @@ pub mod gpui_app {
                                 .gap(px(8.0))
                                 .children(undo_delays.into_iter().map(|(secs, label)| {
                                     let is_active = self.settings.undo_send_seconds == secs;
-                                    div()
-                                        .id(ElementId::Name(format!("btn-undo-{}", secs).into()))
-                                        .px(px(12.0))
-                                        .py(px(6.0))
-                                        .rounded_md()
-                                        .bg(if is_active { rgb(0x1e3a8a) } else { rgb(0x0f172a) })
-                                        .border_1()
-                                        .border_color(if is_active { rgb(0x3b82f6) } else { rgb(0x334155) })
-                                        .text_xs()
-                                        .text_color(if is_active { rgb(0x93c5fd) } else { rgb(0x94a3b8) })
-                                        .font_weight(if is_active { FontWeight::BOLD } else { FontWeight::NORMAL })
-                                        .cursor_pointer()
+                                    Button::new(ElementId::Name(format!("btn-undo-{}", secs).into()))
+                                        .label(label)
+                                        .when(is_active, |btn| btn.primary())
                                         .on_click(cx.listener(move |this, _, _, cx| {
                                             this.set_settings_undo_seconds(secs, cx);
                                         }))
-                                        .child(format!("{}{}", if is_active { "● " } else { "" }, label))
                                 })),
                         ),
                 )
@@ -3649,10 +3765,18 @@ pub mod gpui_app {
                         .gap(px(8.0))
                         .child(
                             div()
-                                .text_sm()
-                                .font_weight(FontWeight::BOLD)
-                                .text_color(rgb(0x60a5fa))
-                                .child("⚡ Storage & Security Architecture"),
+                                .flex()
+                                .flex_row()
+                                .items_center()
+                                .gap(px(8.0))
+                                .child(Icon::new(IconName::HardDrive).small().text_color(rgb(0x60a5fa)))
+                                .child(
+                                    div()
+                                        .text_sm()
+                                        .font_weight(FontWeight::BOLD)
+                                        .text_color(rgb(0x60a5fa))
+                                        .child("Storage & Security Architecture"),
+                                ),
                         )
                         .child(div().text_xs().text_color(rgb(0xcbd5e1)).child(
                             "• Database: SQLite 3 with WAL Mode and Memory-Mapped I/O (256MB)",
@@ -3677,13 +3801,14 @@ pub mod gpui_app {
                 )
         }
 
-        fn render_status_bar(&self) -> impl IntoElement {
-            let is_error_or_offline = self.status_message.starts_with("⚠️")
-                || self.status_message.to_lowercase().contains("offline")
-                || self.status_message.to_lowercase().contains("error");
+        fn render_status_bar(&self, _cx: &Context<Self>) -> impl IntoElement {
+            let is_error_or_offline = self.status_message.to_lowercase().contains("offline")
+                || self.status_message.to_lowercase().contains("error")
+                || self.status_message.to_lowercase().contains("failed");
             let indicator_color = if is_error_or_offline {
                 rgb(0xef4444)
             } else if self.status_message.contains("...")
+                || self.status_message.contains("…")
                 || self.status_message.to_lowercase().contains("syncing")
             {
                 rgb(0x3b82f6)
@@ -3828,23 +3953,29 @@ pub mod gpui_app {
                                     .justify_between()
                                     .child(
                                         div()
-                                            .text_base()
-                                            .font_weight(FontWeight::BOLD)
-                                            .text_color(rgb(0xf8fafc))
-                                            .child("✍️ New Message Composer"),
+                                            .flex()
+                                            .flex_row()
+                                            .items_center()
+                                            .gap(px(8.0))
+                                            .child(Icon::new(IconName::Plus).text_color(rgb(0x60a5fa)))
+                                            .child(
+                                                div()
+                                                    .text_base()
+                                                    .font_weight(FontWeight::BOLD)
+                                                    .text_color(rgb(0xf8fafc))
+                                                    .child("New Message Composer"),
+                                            ),
                                     )
                                     .child(
-                                        div()
-                                            .id("btn-close-compose")
-                                            .text_sm()
-                                            .text_color(rgb(0x94a3b8))
-                                            .cursor_pointer()
+                                        Button::new("btn-close-compose")
+                                            .icon(IconName::Close)
+                                            .ghost()
+                                            .xsmall()
                                             .on_click(cx.listener(|this, _, _, cx| {
                                                 this.active_modal = ActiveModal::None;
                                                 this.compose_inputs = None;
                                                 cx.notify();
-                                            }))
-                                            .child("✕"),
+                                            })),
                                     ),
                             )
                             // Recipient "To:" Input + Autocomplete Chips via Form & Field
@@ -3888,6 +4019,10 @@ pub mod gpui_app {
                                                     .id(ElementId::Name(
                                                         format!("chip-contact-{}", contact.id).into(),
                                                     ))
+                                                    .flex()
+                                                    .flex_row()
+                                                    .items_center()
+                                                    .gap(px(6.0))
                                                     .px(px(8.0))
                                                     .py(px(2.0))
                                                     .rounded_md()
@@ -3896,7 +4031,6 @@ pub mod gpui_app {
                                                     .border_color(rgb(0x3b82f6))
                                                     .text_xs()
                                                     .text_color(rgb(0x93c5fd))
-                                                    .cursor_pointer()
                                                     .on_click(cx.listener(move |this, _, window, cx| {
                                                         if let Some(inputs) = &this.compose_inputs {
                                                             inputs.to.update(cx, |inp, cx| {
@@ -3909,7 +4043,8 @@ pub mod gpui_app {
                                                         }
                                                         cx.notify();
                                                     }))
-                                                    .child(format!("👤 {display} <{}>", contact.email))
+                                                    .child(Icon::new(IconName::User).xsmall())
+                                                    .child(format!("{display} <{}>", contact.email))
                                             }))
                                     } else {
                                         div()
@@ -3959,43 +4094,24 @@ pub mod gpui_app {
                                         .items_center()
                                         .gap(px(8.0))
                                         .child(
-                                            div()
-                                                .id("btn-toggle-markdown")
-                                                .px(px(8.0))
-                                                .py(px(4.0))
-                                                .rounded_md()
-                                                .bg(if self.compose_is_markdown {
-                                                    rgb(0x064e3b)
+                                            Button::new("btn-toggle-markdown")
+                                                .icon(IconName::FileText)
+                                                .label(if self.compose_is_markdown {
+                                                    "Markdown: ON"
                                                 } else {
-                                                    rgb(0x1e293b)
+                                                    "Markdown: OFF"
                                                 })
-                                                .border_1()
-                                                .border_color(if self.compose_is_markdown {
-                                                    rgb(0x10b981)
-                                                } else {
-                                                    rgb(0x334155)
-                                                })
-                                                .text_xs()
-                                                .text_color(if self.compose_is_markdown {
-                                                    rgb(0x34d399)
-                                                } else {
-                                                    rgb(0x94a3b8)
-                                                })
-                                                .cursor_pointer()
+                                                .when(self.compose_is_markdown, |btn| btn.primary())
                                                 .on_click(cx.listener(|this, _, _, cx| {
                                                     this.compose_is_markdown =
                                                         !this.compose_is_markdown;
                                                     cx.notify();
-                                                }))
-                                                .child(if self.compose_is_markdown {
-                                                    "📝 Markdown: ON"
-                                                } else {
-                                                    "📝 Markdown: OFF"
-                                                }),
+                                                })),
                                         )
                                         .child(
                                             Button::new("btn-add-attachment")
-                                                .label("📎 Add Attachment")
+                                                .icon(IconName::File)
+                                                .label("Add Attachment")
                                                 .on_click(cx.listener(|this, _, _, cx| {
                                                     let idx = this.compose_attachments.len() + 1;
                                                     this.compose_attachments.push(
@@ -4016,7 +4132,8 @@ pub mod gpui_app {
                                 )
                                 .child(
                                     Button::new("btn-save-draft")
-                                        .label("💾 Save Draft")
+                                        .icon(IconName::HardDrive)
+                                        .label("Save Draft")
                                         .on_click(cx.listener(|this, _, _, cx| {
                                             this.save_draft(cx);
                                         })),
@@ -4077,7 +4194,7 @@ pub mod gpui_app {
                                                 .border_color(rgb(0x334155))
                                                 .text_xs()
                                                 .text_color(rgb(0xcbd5e1))
-                                                .child(div().child("📄"))
+                                                .child(Icon::new(IconName::File).xsmall())
                                                 .child(div().child(fname.clone()))
                                                 .child(
                                                     div()
@@ -4085,27 +4202,26 @@ pub mod gpui_app {
                                                         .child(format!("({sz_str})")),
                                                 )
                                                 .child(
-                                                    div()
-                                                        .id(ElementId::Name(
-                                                            format!("rm-compose-att-{}", idx)
-                                                                .into(),
-                                                        ))
-                                                        .cursor_pointer()
-                                                        .text_color(rgb(0xf87171))
-                                                        .on_click(cx.listener(
-                                                            move |this, _, _, cx| {
-                                                                if idx
-                                                                    < this
-                                                                        .compose_attachments
-                                                                        .len()
-                                                                {
-                                                                    this.compose_attachments
-                                                                        .remove(idx);
-                                                                    cx.notify();
-                                                                }
-                                                            },
-                                                        ))
-                                                        .child("✕"),
+                                                    Button::new(ElementId::Name(
+                                                        format!("rm-compose-att-{}", idx)
+                                                            .into(),
+                                                    ))
+                                                    .icon(IconName::Close)
+                                                    .ghost()
+                                                    .xsmall()
+                                                    .on_click(cx.listener(
+                                                        move |this, _, _, cx| {
+                                                            if idx
+                                                                < this
+                                                                    .compose_attachments
+                                                                    .len()
+                                                            {
+                                                                this.compose_attachments
+                                                                    .remove(idx);
+                                                                cx.notify();
+                                                            }
+                                                        },
+                                                    )),
                                                 )
                                         }),
                                 )
@@ -4124,7 +4240,7 @@ pub mod gpui_app {
                                         .flex_row()
                                         .items_center()
                                         .gap(px(6.0))
-                                        .child(div().text_xs().child("🔒"))
+                                        .child(Icon::new(IconName::FolderClosed).xsmall().text_color(rgb(0x34d399)))
                                         .child(
                                             div()
                                                 .text_xs()
@@ -4152,7 +4268,8 @@ pub mod gpui_app {
                                         )
                                         .child(
                                             Button::new("btn-send-compose")
-                                                .label("Send 🚀")
+                                                .icon(IconName::ArrowRight)
+                                                .label("Send")
                                                 .primary()
                                                 .on_click(cx.listener(|this, _, _, cx| {
                                                     this.send_composed_message(cx);
@@ -4214,7 +4331,11 @@ pub mod gpui_app {
                                     .border_1()
                                     .border_color(rgb(0x232c40))
                                     .gap(px(8.0))
-                                    .child(div().text_sm().child("⌘"))
+                                    .child(
+                                        Icon::new(IconName::Search)
+                                            .small()
+                                            .text_color(rgb(0x94a3b8)),
+                                    )
                                     .child(
                                         div()
                                             .text_xs()
@@ -4224,7 +4345,7 @@ pub mod gpui_app {
                                                 rgb(0xf1f5f9)
                                             })
                                             .child(if self.command_palette.query.is_empty() {
-                                                "Type a command or search action...".to_string()
+                                                "Type a command or search action…".to_string()
                                             } else {
                                                 self.command_palette.query.clone()
                                             }),
@@ -4250,7 +4371,7 @@ pub mod gpui_app {
                                             } else {
                                                 rgb(0x00000000)
                                             })
-                                            .cursor_pointer()
+                                            .hover(|s| s.bg(rgb(0x1e293b)))
                                             .on_click(cx.listener(move |this, _, _, cx| {
                                                 match act_id_clone.as_str() {
                                                     "mail.compose" => {
@@ -4337,25 +4458,25 @@ pub mod gpui_app {
                     ProviderType::Gmail,
                     "Google (Gmail)",
                     "OAuth2 PKCE • IMAP/SMTP",
-                    "🌐",
+                    IconName::Globe,
                 ),
                 (
                     ProviderType::Graph,
                     "Microsoft 365",
                     "Graph API • Outlook/Exchange",
-                    "🏢",
+                    IconName::Building2,
                 ),
                 (
                     ProviderType::Jmap,
                     "Fastmail (JMAP)",
                     "RFC 8620 • Ultra-fast Push",
-                    "⚡",
+                    IconName::Cpu,
                 ),
                 (
                     ProviderType::Imap,
                     "Custom IMAP",
                     "TLS 993 • SMTP 587 Submission",
-                    "🔒",
+                    IconName::FolderClosed,
                 ),
             ];
 
@@ -4414,10 +4535,21 @@ pub mod gpui_app {
                                         .gap(px(2.0))
                                         .child(
                                             div()
-                                                .text_base()
-                                                .font_weight(FontWeight::BOLD)
-                                                .text_color(rgb(0xf8fafc))
-                                                .child("✉️ New Mail Setup Wizard"),
+                                                .flex()
+                                                .flex_row()
+                                                .items_center()
+                                                .gap(px(8.0))
+                                                .child(
+                                                    Icon::new(IconName::Inbox)
+                                                        .text_color(rgb(0x60a5fa)),
+                                                )
+                                                .child(
+                                                    div()
+                                                        .text_base()
+                                                        .font_weight(FontWeight::BOLD)
+                                                        .text_color(rgb(0xf8fafc))
+                                                        .child("New Mail Setup Wizard"),
+                                                ),
                                         )
                                         .child(
                                             div()
@@ -4427,17 +4559,15 @@ pub mod gpui_app {
                                         ),
                                 )
                                 .child(
-                                    div()
-                                        .id("btn-close-wizard")
-                                        .text_sm()
-                                        .text_color(rgb(0x94a3b8))
-                                        .cursor_pointer()
+                                    Button::new("btn-close-wizard")
+                                        .icon(IconName::Close)
+                                        .ghost()
+                                        .xsmall()
                                         .on_click(cx.listener(|this, _, _, cx| {
                                             this.active_modal = ActiveModal::None;
                                             this.wizard_inputs = None;
                                             cx.notify();
-                                        }))
-                                        .child("✕"),
+                                        })),
                                 ),
                         )
                         // Step 1: Provider Selection Grid
@@ -4472,7 +4602,7 @@ pub mod gpui_app {
                                                 .bg(if is_sel { rgb(0x1e293b) } else { rgb(0x181f2f) })
                                                 .border_1()
                                                 .border_color(if is_sel { rgb(0x3b82f6) } else { rgb(0x232d42) })
-                                                .cursor_pointer()
+                                                .hover(|s| s.bg(rgb(0x232d42)))
                                                 .on_click(cx.listener(move |this, _, window, cx| {
                                                     this.login_wizard.select_provider(p_choice.clone());
                                                     if let Some(inputs) = &this.wizard_inputs {
@@ -4489,7 +4619,7 @@ pub mod gpui_app {
                                                         .flex_row()
                                                         .items_center()
                                                         .gap(px(6.0))
-                                                        .child(div().text_sm().child(icon))
+                                                        .child(Icon::new(icon).small().text_color(if is_sel { rgb(0x60a5fa) } else { rgb(0x94a3b8) }))
                                                         .child(
                                                             div()
                                                                 .text_xs()
@@ -4538,7 +4668,8 @@ pub mod gpui_app {
                                                     .rounded_md()
                                                     .child({
                                                         let mut btn = Button::new("auth-mode-oauth2")
-                                                            .label("🌐 Browser OAuth2")
+                                                            .icon(IconName::Globe)
+                                                            .label("Browser OAuth2")
                                                             .on_click(cx.listener(|this, _, _, cx| {
                                                                 this.login_wizard.auth_mode = AuthModeChoice::OAuth2;
                                                                 cx.notify();
@@ -4549,8 +4680,9 @@ pub mod gpui_app {
                                                         btn
                                                     })
                                                     .child({
-                                                        let label = if selected_p == ProviderType::Gmail { "🔑 App Password (IMAP)" } else { "🔑 Password / IMAP" };
+                                                        let label = if selected_p == ProviderType::Gmail { "App Password (IMAP)" } else { "Password / IMAP" };
                                                         let mut btn = Button::new("auth-mode-password")
+                                                            .icon(IconName::FolderClosed)
                                                             .label(label)
                                                             .on_click(cx.listener(|this, _, _, cx| {
                                                                 this.login_wizard.auth_mode = AuthModeChoice::Password;
@@ -4565,7 +4697,7 @@ pub mod gpui_app {
                                                 div()
                                             }
                                         ),
-                                )
+                                 )
                                 .child(
                                     // Conditional form body based on provider and auth_mode
                                     if is_oauth {
@@ -4585,7 +4717,7 @@ pub mod gpui_app {
                                                     .flex_row()
                                                     .items_center()
                                                     .gap(px(10.0))
-                                                    .child(div().text_lg().child(if selected_p == ProviderType::Gmail { "🌐" } else { "🏢" }))
+                                                    .child(Icon::new(if selected_p == ProviderType::Gmail { IconName::Globe } else { IconName::Building2 }).text_color(rgb(0x60a5fa)))
                                                     .child(
                                                         div()
                                                             .flex()
@@ -4632,6 +4764,9 @@ pub mod gpui_app {
                                                 if let Some(status_str) = &self.login_wizard.oauth_status {
                                                     div()
                                                         .flex()
+                                                        .flex_row()
+                                                        .items_center()
+                                                        .gap(px(6.0))
                                                         .p(px(8.0))
                                                         .rounded_md()
                                                         .bg(rgb(0x1e3a8a))
@@ -4639,7 +4774,8 @@ pub mod gpui_app {
                                                         .border_color(rgb(0x3b82f6))
                                                         .text_xs()
                                                         .text_color(rgb(0x93c5fd))
-                                                        .child(format!("⏳ {}", status_str))
+                                                        .child(Icon::new(IconName::LoaderCircle).small())
+                                                        .child(status_str.clone())
                                                 } else {
                                                     div()
                                                 },
@@ -4658,14 +4794,21 @@ pub mod gpui_app {
                                             .child(
                                                 div()
                                                     .flex()
+                                                    .flex_row()
+                                                    .items_center()
+                                                    .gap(px(8.0))
                                                     .p(px(8.0))
                                                     .rounded_md()
                                                     .bg(rgb(0x1e293b))
                                                     .border_1()
                                                     .border_color(rgb(0x334155))
-                                                    .text_xs()
-                                                    .text_color(rgb(0x38bdf8))
-                                                    .child("💡 Google App Password: In your Google Account, go to Security → 2-Step Verification → App passwords. Generate a 16-character password and enter it below."),
+                                                    .child(Icon::new(IconName::Info).small().text_color(rgb(0x38bdf8)))
+                                                    .child(
+                                                        div()
+                                                            .text_xs()
+                                                            .text_color(rgb(0x38bdf8))
+                                                            .child("Google App Password: In your Google Account, go to Security → 2-Step Verification → App passwords. Generate a 16-character password and enter it below."),
+                                                    ),
                                             )
                                             .child(
                                                 Form::vertical()
@@ -4873,15 +5016,10 @@ pub mod gpui_app {
                                         .flex_row()
                                         .gap(px(6.0))
                                         .child(
-                                            div()
-                                                .id("chip-personal")
-                                                .px(px(8.0))
-                                                .py(px(4.0))
-                                                .rounded_md()
-                                                .bg(rgb(0x1e293b))
-                                                .text_xs()
-                                                .text_color(rgb(0x94a3b8))
-                                                .cursor_pointer()
+                                            Button::new("chip-personal")
+                                                .label("Personal")
+                                                .ghost()
+                                                .small()
                                                 .on_click(cx.listener(move |this, _, window, cx| {
                                                     let suffix = match this.login_wizard.provider_type {
                                                         ProviderType::Gmail => "gmail.com",
@@ -4905,19 +5043,13 @@ pub mod gpui_app {
                                                         inputs.outgoing_port.update(cx, |inp, cx| inp.set_value(this.login_wizard.outgoing_port.to_string(), window, cx));
                                                     }
                                                     cx.notify();
-                                                }))
-                                                .child("Personal"),
+                                                })),
                                         )
                                         .child(
-                                            div()
-                                                .id("chip-work")
-                                                .px(px(8.0))
-                                                .py(px(4.0))
-                                                .rounded_md()
-                                                .bg(rgb(0x1e293b))
-                                                .text_xs()
-                                                .text_color(rgb(0x94a3b8))
-                                                .cursor_pointer()
+                                            Button::new("chip-work")
+                                                .label("Work")
+                                                .ghost()
+                                                .small()
                                                 .on_click(cx.listener(move |this, _, window, cx| {
                                                     let suffix = match this.login_wizard.provider_type {
                                                         ProviderType::Gmail => "gmail.com",
@@ -4941,19 +5073,13 @@ pub mod gpui_app {
                                                         inputs.outgoing_port.update(cx, |inp, cx| inp.set_value(this.login_wizard.outgoing_port.to_string(), window, cx));
                                                     }
                                                     cx.notify();
-                                                }))
-                                                .child("Work"),
+                                                })),
                                         )
                                         .child(
-                                            div()
-                                                .id("chip-support")
-                                                .px(px(8.0))
-                                                .py(px(4.0))
-                                                .rounded_md()
-                                                .bg(rgb(0x1e293b))
-                                                .text_xs()
-                                                .text_color(rgb(0x94a3b8))
-                                                .cursor_pointer()
+                                            Button::new("chip-support")
+                                                .label("Team / Support")
+                                                .ghost()
+                                                .small()
                                                 .on_click(cx.listener(move |this, _, window, cx| {
                                                     let suffix = match this.login_wizard.provider_type {
                                                         ProviderType::Gmail => "gmail.com",
@@ -4977,8 +5103,7 @@ pub mod gpui_app {
                                                         inputs.outgoing_port.update(cx, |inp, cx| inp.set_value(this.login_wizard.outgoing_port.to_string(), window, cx));
                                                     }
                                                     cx.notify();
-                                                }))
-                                                .child("Team / Support"),
+                                                })),
                                         ),
                                 ),
                         )
@@ -4986,6 +5111,9 @@ pub mod gpui_app {
                         .child(if let WizardStep::Failed(err) = &self.login_wizard.step {
                             div()
                                 .flex()
+                                .flex_row()
+                                .items_center()
+                                .gap(px(6.0))
                                 .p(px(8.0))
                                 .rounded_md()
                                 .bg(rgb(0x450a0a))
@@ -4993,7 +5121,8 @@ pub mod gpui_app {
                                 .border_color(rgb(0xef4444))
                                 .text_xs()
                                 .text_color(rgb(0xfca5a5))
-                                .child(format!("⚠️ {}", err))
+                                .child(Icon::new(IconName::TriangleAlert).small().text_color(rgb(0xef4444)))
+                                .child(err.clone())
                         } else {
                             div()
                         })
@@ -5018,12 +5147,13 @@ pub mod gpui_app {
                                 )
                                 .child(
                                     if is_oauth {
-                                        let btn_label = match selected_p {
-                                            ProviderType::Gmail => "Sign in with Google (Browser) 🌐",
-                                            ProviderType::Graph => "Sign in with Microsoft (Browser) 🏢",
-                                            _ => "Sign in with Browser 🌐",
+                                        let (btn_label, btn_icon) = match selected_p {
+                                            ProviderType::Gmail => ("Sign in with Google (Browser)", IconName::Globe),
+                                            ProviderType::Graph => ("Sign in with Microsoft (Browser)", IconName::Building2),
+                                            _ => ("Sign in with Browser", IconName::Globe),
                                         };
                                         Button::new("wizard-btn-oauth")
+                                            .icon(btn_icon)
                                             .label(btn_label)
                                             .primary()
                                             .on_click(cx.listener(|this, _, window, cx| {
@@ -5163,8 +5293,8 @@ pub mod gpui_app {
                                                                 view.selected_folder_id = local_folders.first().map(|f| f.id.clone());
                                                                 view.folders.extend(local_folders);
                                                                 view.accounts.push(acct_clone.clone());
-                                                                view.status_message = format!("✓ Successfully connected {} ({:?})", acct_clone.email, acct_clone.provider_type);
-                                                                view.show_toast(format!("✓ Account {} connected successfully", acct_clone.email), false, cx);
+                                                                view.status_message = format!("Successfully connected {} ({:?})", acct_clone.email, acct_clone.provider_type);
+                                                                view.show_toast(format!("Account {} connected successfully", acct_clone.email), false, cx);
                                                                 view.active_modal = ActiveModal::None;
                                                                 view.wizard_inputs = None;
                                                                 view.login_wizard.step = WizardStep::Completed;
@@ -5174,8 +5304,8 @@ pub mod gpui_app {
                                                         }
                                                         Err(e) => {
                                                             let _ = this.update(cx, |view, cx| {
-                                                                view.status_message = format!("⚠️ Connection error: {e}");
-                                                                view.show_toast(format!("⚠️ Connection error: {e}"), true, cx);
+                                                                view.status_message = format!("Connection error: {e}");
+                                                                view.show_toast(format!("Connection error: {e}"), true, cx);
                                                                 view.login_wizard.step = WizardStep::Failed(format!("{e}"));
                                                                 cx.notify();
                                                             });
@@ -5419,8 +5549,8 @@ pub mod gpui_app {
                             view.selected_folder_id = local_folders.first().map(|f| f.id.clone());
                             view.folders.extend(local_folders);
                             view.accounts.push(acct.clone());
-                            view.status_message = format!("✓ Successfully connected {} via OAuth2", acct.email);
-                            view.show_toast(format!("✓ Successfully connected {} via OAuth2", acct.email), false, cx);
+                            view.status_message = format!("Successfully connected {} via OAuth2", acct.email);
+                            view.show_toast(format!("Successfully connected {} via OAuth2", acct.email), false, cx);
                             view.active_modal = ActiveModal::None;
                             view.wizard_inputs = None;
                             view.login_wizard.step = WizardStep::Completed;
@@ -5430,8 +5560,8 @@ pub mod gpui_app {
                     }
                     Err(e) => {
                         let _ = this.update(cx, |view, cx| {
-                            view.status_message = format!("⚠️ Connection error: {e}");
-                            view.show_toast(format!("⚠️ Connection error: {e}"), true, cx);
+                            view.status_message = format!("Connection error: {e}");
+                            view.show_toast(format!("Connection error: {e}"), true, cx);
                             view.login_wizard.step = WizardStep::Failed(format!("{e}"));
                             cx.notify();
                         });
@@ -5495,26 +5625,28 @@ pub mod gpui_app {
         sync_tx: flume::Sender<SyncEvent>,
         storage_pool: Option<vespetrel_storage::db::StoragePool>,
     ) {
-        gpui_kit::application().run(move |cx: &mut App| {
-            gpui_kit::init(cx);
-            let rx = sync_rx.clone();
-            let tx = sync_tx.clone();
-            let pool = storage_pool.clone();
-            let _ = cx.open_window(
-                WindowOptions {
-                    titlebar: Some(TitlebarOptions {
-                        title: Some("Vespetrel Mail".into()),
-                        appears_transparent: false,
-                        traffic_light_position: None,
-                    }),
-                    window_min_size: Some(size(px(900.0), px(600.0))),
-                    ..Default::default()
-                },
-                move |window, cx| {
-                    let view = cx.new(|cx| MainWindow::from_storage(cx, rx, tx, pool));
-                    cx.new(|cx| gpui_kit::component::Root::new(view, window, cx))
-                },
-            );
-        });
+        gpui_kit::application()
+            .with_assets(Assets)
+            .run(move |cx: &mut App| {
+                gpui_kit::init(cx);
+                let rx = sync_rx.clone();
+                let tx = sync_tx.clone();
+                let pool = storage_pool.clone();
+                let _ = cx.open_window(
+                    WindowOptions {
+                        titlebar: Some(TitlebarOptions {
+                            title: Some("Vespetrel Mail".into()),
+                            appears_transparent: false,
+                            traffic_light_position: None,
+                        }),
+                        window_min_size: Some(size(px(900.0), px(600.0))),
+                        ..Default::default()
+                    },
+                    move |window, cx| {
+                        let view = cx.new(|cx| MainWindow::from_storage(cx, rx, tx, pool));
+                        cx.new(|cx| gpui_kit::component::Root::new(view, window, cx))
+                    },
+                );
+            });
     }
 }

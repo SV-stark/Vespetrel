@@ -115,6 +115,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Fixed fallback host handling in domain autodiscovery when unrecognized domains are provided, ensuring valid default host/port configuration.
 
 ### Changed
+- **Design Guides & Official Icon Migration (`gpui-kit-design-guides`)**:
+  - Replaced 100% of emojis across navigation tree, folder lists, toolbars, reader banners, task lists, settings, status bars, and dialogs with official Lucide `IconName` variants (`Inbox`, `Search`, `Plus`, `RotateCw`, `Close`, `TriangleAlert`, `CircleCheck`, `GalleryVerticalEnd`, `StarFill`, `Calendar`, `User`, `Settings`, etc.).
+  - Configured native SVG asset provider `Assets` via `gpui_kit::application().with_assets(Assets)` in `run_gpui_app`.
+  - Replaced web pointing-hand cursors (`.cursor_pointer()`) across message rows, banner cards, command items, and provider grid cards with standard desktop arrow cursor and `.hover(...)` affordances, strictly adhering to `gpui-kit-design-guides`.
+  - Upgraded "+ Add" account trigger and preset chips (`chip-personal`, `chip-work`, `chip-support`) from raw clickable `div` elements to native `Button::new(...)` components.
+  - Standardized UI typography by replacing raw triple dots (`...`) with typographical horizontal ellipses (`…`).
+  - Purged side-effects (`self.toasts.drain(..)`) from the render pass to ensure pure functional view rendering.
 - **Migrated UI Stack to `gpui-kit 0.6.0`**:
   - Replaced raw git `gpui` dependency with crates.io `gpui-kit`, utilizing standard component layers (`gpui_kit::component::Root`, `gpui_kit::init`, `gpui_kit::component::input`).
   - Installed `aws-lc-rs` default crypto provider to eliminate dual-crypto-provider ambiguity on Windows.
