@@ -58,7 +58,7 @@ url = "2.5"
 
 
 # PIM (Calendar & Contacts)
-libdav = "0.10"
+libdav = "0.11"
 icalendar = "0.17"
 vcard4 = "0.7"
 
