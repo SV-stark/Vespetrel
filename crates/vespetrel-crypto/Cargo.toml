@@ -22,7 +22,7 @@ keyring = { workspace = true }
 rpgp = { workspace = true }
 x509-cert = "0.2"
 cms = { workspace = true }
-der = { version = "0.7", features = ["derive", "alloc"] }
+der = { version = "0.8", features = ["derive", "alloc"] }
 zeroize = { workspace = true }
 rustls = { workspace = true }
 reqwest = { workspace = true }
