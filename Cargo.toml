@@ -46,7 +46,7 @@ vespetrel-render = { path = "crates/vespetrel-render", version = "0.1.0" }
 rusqlite = { version = "0.40", features = ["bundled", "chrono", "serde_json"] }
 deadpool-sqlite = "0.14"
 lz4_flex = "0.14"
-zstd = "0.13"
+zstd = "0.14"
 
 # Mail & Protocols
 mail-parser = "0.11"
