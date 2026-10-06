@@ -1,5 +1,5 @@
 #[allow(unused_imports)]
-use tracing::{debug, info};
+use tracing::{debug, info, warn};
 use vespetrel_core::message::ComposedMessage;
 
 #[derive(Clone)]
@@ -192,13 +192,11 @@ impl SmtpClient {
             &self.config.dkim_selector,
             &self.config.dkim_key,
         ) {
-            if domain.is_empty()
-                || selector.is_empty()
-                || selector
-                    .chars()
-                    .any(|c| !c.is_alphanumeric() && c != '-' && c != '_')
-            {
-                anyhow::bail!("invalid DKIM selector or domain: syntax check failed");
+            if !is_valid_dkim_domain(domain) {
+                anyhow::bail!("invalid DKIM signing domain: syntax check failed");
+            }
+            if !is_valid_dkim_selector(selector) {
+                anyhow::bail!("invalid DKIM selector: syntax check failed");
             }
             use base64::Engine;
             use sha2::Digest;
@@ -242,38 +240,37 @@ impl SmtpClient {
             hasher.update(&canon_body);
             let bh = base64::engine::general_purpose::STANDARD.encode(hasher.finalize());
 
-            let signed_headers = if msg.cc.is_empty() {
-                "from:to:subject:date"
-            } else {
-                "from:to:cc:subject:date"
-            };
+            // Canonicalize the signed headers from the *serialized* message, not from the
+            // in-memory model. The two differ whenever lettre rewrites a value: a non-ASCII
+            // subject or display name comes out RFC 2047 encoded, long address lists are
+            // folded, and the `From` display name is quoted differently. Signing the model
+            // produced a signature over bytes the receiving agent never sees, so DKIM
+            // verification failed for every message with a non-ASCII subject or sender name.
+            let mut signed_names: Vec<&str> = vec!["from", "to", "subject", "date"];
+            if !msg.cc.is_empty() {
+                signed_names.insert(2, "cc");
+            }
+            let signed_headers = signed_names.join(":");
 
             let sig_input = format!(
                 "v=1; a=rsa-sha256; d={domain}; s={selector}; c=relaxed/relaxed; q=dns/txt; h={signed_headers}; bh={bh}; b="
             );
 
-            // Canonicalize headers in order of h= followed by DKIM-Signature up to b=
-            let mut headers_to_sign = String::new();
-            headers_to_sign.push_str(&canonicalize_relaxed_header("from", &msg.from.to_string()));
-            let to_str = msg
-                .to
-                .iter()
-                .map(|a| a.to_string())
-                .collect::<Vec<_>>()
-                .join(", ");
-            headers_to_sign.push_str(&canonicalize_relaxed_header("to", &to_str));
-            if !msg.cc.is_empty() {
-                let cc_str = msg
-                    .cc
-                    .iter()
-                    .map(|a| a.to_string())
-                    .collect::<Vec<_>>()
-                    .join(", ");
-                headers_to_sign.push_str(&canonicalize_relaxed_header("cc", &cc_str));
-            }
-            headers_to_sign.push_str(&canonicalize_relaxed_header("subject", &msg.subject));
-            headers_to_sign.push_str(&canonicalize_relaxed_header("date", &date_str));
-            headers_to_sign.push_str(&canonicalize_relaxed_header("dkim-signature", &sig_input));
+            let headers_to_sign = canonicalize_signed_headers(&preview_raw, &signed_names)
+                .ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "DKIM: the serialized message is missing one of the signed headers \
+                         ({signed_headers}); refusing to emit an unverifiable signature"
+                    )
+                })?;
+
+            // The `dkim-signature` field is not in the serialized bytes yet: it is the
+            // signature being computed. RFC 6376 §3.5 signs it with the `b=` value removed,
+            // which is exactly `sig_input`, and it is always the last field in `h=`.
+            let mut signed_bytes = headers_to_sign;
+            signed_bytes.extend_from_slice(
+                canonicalize_relaxed_header("dkim-signature", &sig_input).as_bytes(),
+            );
 
             // RSA PKCS#1 v1.5 signing via aws-lc-rs
             let der_bytes = if key.contains("-----BEGIN") {
@@ -306,7 +303,7 @@ impl SmtpClient {
                 .sign(
                     &aws_lc_rs::signature::RSA_PKCS1_SHA256,
                     &rng,
-                    headers_to_sign.as_bytes(),
+                    &signed_bytes,
                     &mut sig,
                 )
                 .map_err(|_| {
@@ -385,9 +382,33 @@ impl SmtpClient {
             AsyncSmtpTransport::<Tokio1Executor>::relay(&self.config.host)?
                 .tls(Tls::Wrapper(tls_params))
         } else if self.config.use_starttls {
+            // `starttls_relay` maps to lettre's `Tls::Required`, which is *opportunistic*:
+            // if the server (or a MITM stripping the STARTTLS advertisement) does not offer
+            // TLS, the connection silently continues in plaintext. Say so, because the user
+            // asked for STARTTLS and will otherwise believe the mail was encrypted.
+            if !self.config.auth_token.is_empty() {
+                warn!(
+                    host=%self.config.host,
+                    port=self.config.port,
+                    "STARTTLS is opportunistic: if the server does not advertise STARTTLS, \
+                     credentials and the message are transmitted in cleartext"
+                );
+            }
             AsyncSmtpTransport::<Tokio1Executor>::starttls_relay(&self.config.host)?
         } else {
-            AsyncSmtpTransport::<Tokio1Executor>::relay(&self.config.host)?
+            // `use_starttls = false` means plaintext. The previous code called
+            // `relay()`, which selects *implicit* TLS (`Tls::Wrapper`) and only works on
+            // 465; pointing it at 587 attempted a TLS handshake on the submission port and
+            // the connection failed for every server that speaks plaintext there.
+            if !self.config.auth_token.is_empty() {
+                warn!(
+                    host=%self.config.host,
+                    port=self.config.port,
+                    "STARTTLS is disabled for a remote host: sending the message and the \
+                     credentials unencrypted"
+                );
+            }
+            AsyncSmtpTransport::<Tokio1Executor>::builder_dangerous(&self.config.host)
         };
 
         transport_builder = transport_builder.port(self.config.port);
@@ -472,6 +493,103 @@ pub fn canonicalize_relaxed_header(name: &str, value: &str) -> String {
     format!("{lower_name}:{canon_val}\r\n")
 }
 
+/// Canonicalize the named headers, in `names` order, from an actual serialized RFC 5322
+/// message, per RFC 6376 §3.4.2 relaxed header canonicalization.
+///
+/// Returns `None` when any named header is absent, so the caller fails closed rather than
+/// emitting a signature whose `h=` list promises a header the message does not contain.
+///
+/// When a header appears more than once, the bottom-most instance is used: that is what a
+/// verifier does, and any other choice produces a signature that can never validate.
+pub fn canonicalize_signed_headers(raw: &[u8], names: &[&str]) -> Option<Vec<u8>> {
+    let fields = split_header_fields(raw);
+    let mut out = Vec::new();
+    for name in names {
+        let want = name.trim().to_ascii_lowercase();
+        let value = fields
+            .iter()
+            .rev()
+            .find(|(n, _)| *n == want)
+            .map(|(_, v)| v.as_str())?;
+        out.extend_from_slice(canonicalize_relaxed_header(name, value).as_bytes());
+    }
+    Some(out)
+}
+
+/// Split a serialized message into unfolded header fields as `(lowercase name, value)`.
+///
+/// A bare LF is accepted as a line terminator as well as CRLF: some servers and test
+/// fixtures emit LF-only messages, and rejecting them would mean signing nothing.
+fn split_header_fields(raw: &[u8]) -> Vec<(String, String)> {
+    let text = String::from_utf8_lossy(raw);
+    let header_end = text.find("\r\n\r\n").or_else(|| text.find("\n\n"));
+    let block = match header_end {
+        Some(i) => &text[..i],
+        // No body separator: treat the whole input as the header block.
+        None => &text[..],
+    };
+
+    let mut fields: Vec<(String, String)> = Vec::new();
+    for line in block.split_inclusive(['\r', '\n']) {
+        let line = line.trim_end_matches(['\r', '\n']);
+        if line.is_empty() {
+            continue;
+        }
+        if line.starts_with(' ') || line.starts_with('\t') {
+            // Continuation of the previous field. RFC 5322 unfolding removes the line
+            // break but keeps the folding whitespace; relaxed canonicalization then
+            // collapses the run, so a single space is appended.
+            if let Some(last) = fields.last_mut() {
+                last.1.push(' ');
+                last.1.push_str(line);
+            }
+            continue;
+        }
+        if let Some((name, value)) = line.split_once(':') {
+            fields.push((name.trim().to_ascii_lowercase(), value.to_string()));
+        }
+    }
+    fields
+}
+
+/// A DKIM `d=` value must be a DNS domain name that can be looked up for a TXT record.
+///
+/// Rejecting anything that is not a plain ASCII LDH domain is what keeps a CR/LF, a space
+/// or a Unicode character from ending up inside the `DKIM-Signature` header value.
+pub fn is_valid_dkim_domain(domain: &str) -> bool {
+    if domain.is_empty() || domain.len() > 255 {
+        return false;
+    }
+    // A trailing dot is legal in a presentation-format FQDN but not in a DKIM `d=`.
+    if domain.ends_with('.') {
+        return false;
+    }
+    domain.split('.').all(valid_ldh_label)
+}
+
+/// A DKIM `s=` value is a sub-domain: dot-separated LDH labels (RFC 6376 §3.1,
+/// `selector = sub-domain ;`).
+///
+/// The previous check rejected the dot entirely, so any provider using a nested selector
+/// (`mail.sel1.sel2`) was rejected as invalid; and it accepted non-ASCII letters, producing
+/// a `s=` value that is not a legal DNS label.
+pub fn is_valid_dkim_selector(selector: &str) -> bool {
+    if selector.is_empty() || selector.len() > 255 {
+        return false;
+    }
+    selector.split('.').all(valid_ldh_label)
+}
+
+fn valid_ldh_label(label: &str) -> bool {
+    !label.is_empty()
+        && label.len() <= 63
+        && label
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+        && !label.starts_with('-')
+        && !label.ends_with('-')
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -542,6 +660,92 @@ mod tests {
         assert!(raw_str.contains("DKIM-Signature:"));
         assert!(raw_str.contains("d=example.com"));
         assert!(raw_str.contains("s=default"));
+    }
+
+    /// The signed bytes must be derived from the headers the receiver actually parses.
+    ///
+    /// Signing the in-memory model broke verification as soon as lettre rewrote a value:
+    /// a non-ASCII subject comes out RFC 2047 encoded, and the signature was computed over
+    /// the raw UTF-8 instead. Reconstructing the canonicalized `h=` fields from the
+    /// serialized bytes and checking they match is the invariant that was violated.
+    #[test]
+    fn dkim_signs_the_serialized_headers_not_the_model() {
+        let raw = b"From: =?utf-8?B?w4FsaWNl?= <alice@example.com>\r\n\
+To: Bob <bob@example.com>\r\n\
+Subject: =?utf-8?Q?Caf=C3=A9_meeting?=\r\n\
+Date: Mon, 01 Jan 2024 00:00:00 +0000\r\n\
+\r\n\
+body\r\n";
+        let canon =
+            canonicalize_signed_headers(raw, &["from", "to", "subject", "date"]).expect("headers");
+        let canon = String::from_utf8(canon).unwrap();
+        // RFC 6376 §3.4.2: `name:value` with no space after the colon.
+        assert_eq!(
+            canon,
+            "from:=?utf-8?B?w4FsaWNl?= <alice@example.com>\r\n\
+             to:Bob <bob@example.com>\r\n\
+             subject:=?utf-8?Q?Caf=C3=A9_meeting?=\r\n\
+             date:Mon, 01 Jan 2024 00:00:00 +0000\r\n"
+                .replace("             ", "")
+        );
+    }
+
+    /// A `bh=`/`b=` that is computed over headers the message does not contain can never
+    /// verify. Fail closed instead of emitting one.
+    #[test]
+    fn dkim_canonicalization_fails_closed_on_missing_header() {
+        let raw = b"From: a@b.com\r\nTo: c@d.com\r\n\r\nbody\r\n";
+        assert!(canonicalize_signed_headers(raw, &["from", "to", "subject"]).is_none());
+    }
+
+    /// Verifiers use the bottom-most instance of a duplicated header. Signing any other
+    /// instance yields a signature that can never validate, so a message carrying an
+    /// attacker-supplied first `Subject:` must still sign the real one.
+    #[test]
+    fn dkim_uses_the_bottom_most_instance_of_a_duplicated_header() {
+        let raw = b"Subject: attacker\r\n\
+To: c@d.com\r\n\
+Subject: real\r\n\
+\r\nbody\r\n";
+        let canon = canonicalize_signed_headers(raw, &["subject"]).expect("headers");
+        assert_eq!(String::from_utf8(canon).unwrap(), "subject:real\r\n");
+    }
+
+    /// Folding whitespace must be undone before canonicalization, and the relaxation must
+    /// collapse it to a single space.
+    #[test]
+    fn dkim_unfolds_continuation_lines() {
+        let raw = b"To: Bob <bob@example.com>,\r\n  Carol <carol@example.com>\r\n\r\nbody\r\n";
+        let canon = canonicalize_signed_headers(raw, &["to"]).expect("headers");
+        assert_eq!(
+            String::from_utf8(canon).unwrap(),
+            "to:Bob <bob@example.com>, Carol <carol@example.com>\r\n"
+        );
+    }
+
+    /// The old selector check rejected the dot, so providers with a nested selector could
+    /// not sign at all, and it accepted non-ASCII letters, which are not legal in a DNS
+    /// label and would corrupt the `DKIM-Signature` header value.
+    #[test]
+    fn dkim_selector_and_domain_syntax() {
+        assert!(is_valid_dkim_selector("default"));
+        assert!(is_valid_dkim_selector("s1"));
+        assert!(is_valid_dkim_selector("mail.sel1.sel2"));
+        assert!(!is_valid_dkim_selector(""));
+        assert!(!is_valid_dkim_selector("has space"));
+        assert!(!is_valid_dkim_selector("crlf\r\nInjected: x"));
+        assert!(!is_valid_dkim_selector("selé"));
+        assert!(!is_valid_dkim_selector(".leading"));
+        assert!(!is_valid_dkim_selector("trailing."));
+        assert!(!is_valid_dkim_selector("-lead"));
+
+        assert!(is_valid_dkim_domain("example.com"));
+        assert!(is_valid_dkim_domain("mx1.eu-west-1.amazonses.com"));
+        assert!(!is_valid_dkim_domain(""));
+        assert!(!is_valid_dkim_domain("example.com."));
+        assert!(!is_valid_dkim_domain("bad domain.com"));
+        assert!(!is_valid_dkim_domain("evil\r\nX-Injected: 1"));
+        assert!(!is_valid_dkim_domain("exämple.com"));
     }
 
     #[test]

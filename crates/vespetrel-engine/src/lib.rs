@@ -29,7 +29,8 @@ pub use migrator::{
 pub use outbox::{OutboxQueue, ScheduledMessage, UndoSendBuffer};
 pub use plugin::{PluginAction, PluginEvent, PluginHost, PluginManifest, PluginPermission};
 pub use pop3::{
-    Pop3Command, Pop3MessageInfo, Pop3UidlCache, parse_pop3_status, parse_pop3_uidl_response,
+    Pop3Command, Pop3MessageInfo, Pop3UidlCache, merge_sizes, parse_pop3_list_response,
+    parse_pop3_status, parse_pop3_uidl_response,
 };
 pub use sieve::{ManageSieveCommand, SieveResponse, SieveScript, SieveValidator};
 pub use snooze::{SnoozeManager, SnoozedThread};
@@ -160,6 +161,86 @@ mod tests {
 
         assert!(got_folders);
         assert!(got_messages);
+        coord.stop_all();
+    }
+
+    /// A burst of sync requests for one account must collapse to a single queued command.
+    ///
+    /// The previous guard counted requests and was never decremented, so after four syncs
+    /// *in the life of the process* every later request was silently dropped and manual
+    /// "Sync" did nothing. The debounce must reopen once the window elapses.
+    #[tokio::test]
+    async fn coordinator_coalesces_bursts_but_eventually_forwards_again() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        struct CountingProvider(Arc<AtomicUsize>);
+        #[async_trait]
+        impl MailProvider for CountingProvider {
+            async fn sync_folder_list(&self) -> Result<Vec<RemoteFolder>, ProviderError> {
+                Ok(vec![RemoteFolder {
+                    remote_id: "INBOX".into(),
+                    name: "INBOX".into(),
+                    path: "INBOX".into(),
+                    role_hint: Some("inbox".into()),
+                    uid_validity: Some(1),
+                    highest_mod_seq: Some(10),
+                }])
+            }
+            async fn sync_messages(
+                &self,
+                _folder: &Folder,
+                _state: SyncState,
+            ) -> Result<SyncDelta, ProviderError> {
+                self.0.fetch_add(1, Ordering::SeqCst);
+                Ok(SyncDelta::default())
+            }
+            async fn fetch_raw_message(&self, _id: &str) -> Result<Vec<u8>, ProviderError> {
+                Ok(vec![])
+            }
+            async fn send_message(&self, _m: &ComposedMessage) -> Result<(), ProviderError> {
+                Ok(())
+            }
+            async fn update_flags(
+                &self,
+                _u: &[u32],
+                _a: &[Flag],
+                _r: &[Flag],
+            ) -> Result<(), ProviderError> {
+                Ok(())
+            }
+        }
+
+        let calls = Arc::new(AtomicUsize::new(0));
+        let (mut coord, _rx) = SyncCoordinator::create_bounded(256);
+        let account = "user-debounce@domain.com";
+        coord.spawn_worker(account, Arc::new(CountingProvider(calls.clone())));
+
+        // Give the worker a moment to drain the initial full sync it runs on spawn.
+        tokio::time::sleep(std::time::Duration::from_millis(80)).await;
+        let baseline = calls.load(Ordering::SeqCst);
+
+        // 200 requests inside the debounce window must not become 200 full syncs.
+        for _ in 0..200 {
+            coord.trigger_sync(account);
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(120)).await;
+        let after_burst = calls.load(Ordering::SeqCst);
+        assert!(
+            after_burst - baseline <= 4,
+            "burst was not coalesced: {baseline} -> {after_burst}"
+        );
+
+        // The gate must reopen: a request after the window still gets through. This is the
+        // regression the monotonic counter caused, where it never reopened.
+        tokio::time::sleep(std::time::Duration::from_millis(400)).await;
+        let before_late = calls.load(Ordering::SeqCst);
+        coord.trigger_sync(account);
+        tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+        assert!(
+            calls.load(Ordering::SeqCst) > before_late,
+            "a sync request after the debounce window was dropped"
+        );
+
         coord.stop_all();
     }
 }

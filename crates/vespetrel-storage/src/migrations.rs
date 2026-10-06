@@ -298,6 +298,7 @@ pub fn run_migrations(conn: &mut Connection) -> StorageResult<()> {
 
             CREATE TRIGGER IF NOT EXISTS messages_au AFTER UPDATE ON messages
             WHEN old.subject IS NOT new.subject
+              OR old.account_id IS NOT new.account_id
               OR old.from_address IS NOT new.from_address
               OR old.from_name IS NOT new.from_name
               OR old.to_addresses IS NOT new.to_addresses
@@ -399,14 +400,69 @@ pub fn run_migrations(conn: &mut Connection) -> StorageResult<()> {
         conn.execute_batch("PRAGMA user_version = 4")?;
     }
 
+    // Migration v5: restore the `account_id` arm of the messages_au trigger.
+    // v2 recreated that trigger and dropped `OR old.account_id IS NOT new.account_id`.
+    // `account_id` is an UNINDEXED column of messages_fts and is the tenancy filter in
+    // search_messages, so without this arm a message moved between accounts keeps its old
+    // account tag: invisible to its new owner and still returned to the old one.
+    let is_v5_applied: bool = user_ver >= 5
+        || conn
+            .query_row(
+                "SELECT count(*) FROM _schema_migrations WHERE version = 5",
+                [],
+                |r| r.get::<_, i64>(0),
+            )
+            .map(|count| count > 0)
+            .unwrap_or(false);
+
+    if !is_v5_applied {
+        let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Exclusive)?;
+        tx.execute_batch(
+            r#"
+            DROP TRIGGER IF EXISTS messages_au;
+            CREATE TRIGGER messages_au AFTER UPDATE ON messages
+            WHEN old.subject IS NOT new.subject
+              OR old.account_id IS NOT new.account_id
+              OR old.from_address IS NOT new.from_address
+              OR old.from_name IS NOT new.from_name
+              OR old.to_addresses IS NOT new.to_addresses
+              OR old.body_text_preview IS NOT new.body_text_preview
+              OR old.body_snippet IS NOT new.body_snippet
+            BEGIN
+              DELETE FROM messages_fts WHERE message_id = old.id;
+              INSERT INTO messages_fts(message_id, account_id, subject, from_address, from_name, to_addresses, body_content)
+              VALUES (new.id, new.account_id, new.subject, new.from_address, new.from_name, new.to_addresses, COALESCE(new.body_text_preview, new.body_snippet, ''));
+            END;
+            "#,
+        )?;
+
+        let now = chrono::Utc::now().timestamp();
+        tx.execute(
+            "INSERT OR IGNORE INTO _schema_migrations (version, name, applied_at) VALUES (5, 'fts5_update_trigger_account_id', ?1)",
+            [now],
+        )?;
+        tx.commit()?;
+        conn.execute_batch("PRAGMA user_version = 5")?;
+    }
+
     Ok(())
 }
 
-/// Explicit job to rebuild FTS5 index from the messages table
+/// Explicit job to rebuild the FTS5 index from the `messages` table.
+///
+/// `messages_fts` is a *standalone* FTS5 table (not `content='messages'`), so
+/// `INSERT INTO messages_fts(messages_fts) VALUES('rebuild')` is a no-op here: `'rebuild'`
+/// only re-tokenizes an external-content table from its content table, and on a standalone
+/// table it merely re-indexes rows that are already self-consistent. It would silently
+/// succeed while leaving any index drift in place. Re-populate from `messages` instead.
 pub fn rebuild_fts(conn: &Connection) -> StorageResult<()> {
     conn.execute_batch(
         r#"
-        INSERT INTO messages_fts(messages_fts) VALUES('rebuild');
+        DELETE FROM messages_fts;
+        INSERT INTO messages_fts(message_id, account_id, subject, from_address, from_name, to_addresses, body_content)
+          SELECT id, account_id, subject, from_address, from_name, to_addresses,
+                 COALESCE(body_text_preview, body_snippet, '')
+          FROM messages;
         "#,
     )?;
     Ok(())

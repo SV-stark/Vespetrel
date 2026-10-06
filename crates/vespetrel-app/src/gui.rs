@@ -1,11 +1,16 @@
 #[cfg(feature = "gpui")]
 pub mod gpui_app {
+    use crate::actions::*;
+    use crate::keybindings::{KeyAction, KeybindingMap, to_gpui_keystroke};
+    use crate::views::compose::ComposeState;
+    use crate::views::message_list::MessageSelection;
+    use crate::views::settings::{SettingsTab, SettingsViewState};
     use crate::views::{
         calendar::CalendarView,
         contacts::ContactsView,
         login_wizard::{AuthModeChoice, LoginWizardState, WizardStep},
         message_list::{ListFilter, MessageRowDensity},
-        message_viewer::{AttachmentInfo, MessageViewer, SecurityStatus},
+        message_viewer::{AttachmentInfo, AuthState, BodyKind, MessageViewer, SecurityStatus},
         navigation::NavigationTree,
         quick_filter::QuickFilterState,
         tasks::TaskListView,
@@ -14,17 +19,21 @@ pub mod gpui_app {
     pub use gpui_kit::base;
     use gpui_kit::base::Selectable;
     pub use gpui_kit::component;
+    pub use gpui_kit::component::alert::Alert;
     pub use gpui_kit::component::badge::Badge;
     pub use gpui_kit::component::button::{Button, ButtonVariants};
     pub use gpui_kit::component::command::{Command, CommandGroup, CommandItem, CommandState};
     pub use gpui_kit::component::dialog::Dialog;
     pub use gpui_kit::component::form::{Field, Form};
+    pub use gpui_kit::component::kbd::Kbd;
     pub use gpui_kit::component::notification::Notification;
     pub use gpui_kit::component::popover::Popover;
     use gpui_kit::component::resizable::{h_resizable, v_resizable};
     pub use gpui_kit::component::sheet::Sheet;
     pub use gpui_kit::component::status_bar::StatusBar;
     pub use gpui_kit::component::tab::{Tab, TabBar};
+    use gpui_kit::component::text::TextView;
+    pub use gpui_kit::component::theme::{Theme, ThemeMode};
     pub use gpui_kit::component::{
         ActiveTheme, Icon, IconName, Sizable, ThemeStyled, TitleBar, VirtualList, WindowExt,
         v_virtual_list,
@@ -37,6 +46,279 @@ pub mod gpui_app {
         Account, CalendarEvent, Contact, Folder, FolderRole, MessageSummary, ProviderType,
         TaskItem, UserSettings, provider::SyncEvent,
     };
+
+    /// The command-palette shortcut as a `Keystroke`, so the header can show a real key cap
+    /// instead of a hardcoded glyph.
+    ///
+    /// macOS binds the Command key, which GPUI reports as `platform`; Windows and Linux bind
+    /// Control. Rendering `⌘K` on every platform told a Windows user to press a key their
+    /// keyboard does not have.
+    pub fn command_palette_keystroke() -> Keystroke {
+        let modifiers = Modifiers {
+            // `cfg!` rather than `#[cfg]` so both arms are always type-checked.
+            platform: cfg!(target_os = "macos"),
+            control: !cfg!(target_os = "macos"),
+            ..Default::default()
+        };
+        Keystroke {
+            modifiers,
+            key: "k".into(),
+            key_char: Some("k".into()),
+        }
+    }
+
+    /// Truncate to at most `max_chars` characters, appending a single `…` when cut.
+    ///
+    /// Slicing a `&str` by byte index panics as soon as the index lands inside a
+    /// multi-byte character, so anything user- or locale-supplied has to be walked by
+    /// `char`. Used for message snippets, sender display names and folder labels.
+    pub fn elide(text: &str, max_chars: usize) -> String {
+        if text.chars().count() <= max_chars {
+            return text.to_string();
+        }
+        let kept: String = text.chars().take(max_chars).collect();
+        format!("{kept}\u{2026}")
+    }
+
+    /// One destination in the folder tree.
+    ///
+    /// Grouped rather than passed as seven positional arguments, so adding a field to a row
+    /// cannot silently reorder the call sites.
+    pub struct FolderRow<'a> {
+        pub id: ElementId,
+        pub icon: IconName,
+        pub label: &'a str,
+        pub unread: i64,
+        pub is_selected: bool,
+    }
+
+    /// The state the status bar presents.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub enum StatusState {
+        NoAccount,
+        Failed,
+        Busy,
+        Ready,
+    }
+
+    /// Is this attachment an S/MIME `pkcs7-mime` signature part?
+    ///
+    /// Both the media type and the conventional extensions are checked, because
+    /// senders disagree: Thunderbird writes `.p7s`, Outlook writes `.p7m`, and some
+    /// servers relabel the part as `application/octet-stream`.
+    pub fn is_smime_part(content_type: &str, filename: &str) -> bool {
+        let ct = content_type.to_ascii_lowercase();
+        if ct.contains("pkcs7-mime") || ct.contains("pkcs7-signature") {
+            return true;
+        }
+        let name = filename.to_ascii_lowercase();
+        name.ends_with(".p7s") || name.ends_with(".p7m")
+    }
+
+    /// A keymap token rendered for a person, rather than for a parser.
+    ///
+    /// The stored form is what a config file needs (`Ctrl+Shift+r`); the display form is
+    /// what a shortcut table needs (`Ctrl+Shift+R`). Only the display side is
+    /// platform-aware, because the stored form has to survive a round trip unchanged.
+    pub fn format_shortcut(token: &str) -> String {
+        token
+            .split_whitespace()
+            .map(|part| match part.to_ascii_lowercase().as_str() {
+                "ctrl+" | "ctrl" => if cfg!(target_os = "macos") {
+                    "\u{2318}"
+                } else {
+                    "Ctrl"
+                }
+                .to_string(),
+                "shift+" => "\u{21E7}".to_string(),
+                "alt+" => if cfg!(target_os = "macos") {
+                    "\u{2325}"
+                } else {
+                    "Alt"
+                }
+                .to_string(),
+                // Anything else is a key name, which reads better in caps in a table.
+                _ => part.to_uppercase(),
+            })
+            .collect::<Vec<_>>()
+            .join(" ")
+    }
+
+    /// The reader's verdict after a CMS check.
+    ///
+    /// `verified` is `Some(true)` only when a signature checked out. `None` means no
+    /// blob could be read, so nothing was established and the reader must stay silent
+    /// rather than imply a result. `saw_signature` distinguishes "no signature" from
+    /// "a signature I could not check", which is the difference between showing
+    /// nothing and showing "not verified".
+    pub fn smime_verdict(
+        verified: Option<bool>,
+        saw_signature: bool,
+    ) -> crate::views::message_viewer::SecurityStatus {
+        use crate::views::message_viewer::SecurityStatus;
+        match verified {
+            Some(true) => SecurityStatus::SignatureValid,
+            Some(false) => SecurityStatus::SignatureInvalid,
+            None if saw_signature => SecurityStatus::SignedUnverified,
+            // Nothing readable was present, so there is no signature to talk about.
+            None => SecurityStatus::Unsigned,
+        }
+    }
+
+    /// Split a recipient field into addresses.
+    ///
+    /// Accepts the forms people actually type: `a@b.com`, `Name <a@b.com>`, several
+    /// separated by commas, semicolons or whitespace. A token with no `@` is dropped:
+    /// `lettre` would otherwise pass it to the MTA and the user would learn about the
+    /// typo from a bounce, minutes later, with the message already gone.
+    pub fn parse_address_list(raw: &str) -> Vec<vespetrel_core::Address> {
+        let mut out = Vec::new();
+        for token in raw.split([',', ';']) {
+            for piece in token.split_whitespace() {
+                let piece = piece.trim_matches(['<', '>', ',']);
+                if piece.is_empty() || !piece.contains('@') {
+                    continue;
+                }
+                out.push(vespetrel_core::Address {
+                    name: None,
+                    email: piece.to_string(),
+                });
+            }
+        }
+        out
+    }
+
+    /// Expand a leading `~` to the user's home directory.
+    ///
+    /// Returns `None` when the path needs expansion but no home directory can be
+    /// resolved, so the caller can say so instead of reporting a confusing "no such
+    /// file".
+    pub fn expand_home(raw: &str) -> Option<String> {
+        let rest = raw.strip_prefix('~')?;
+        let rest = match rest.strip_prefix('/').or_else(|| rest.strip_prefix('\\')) {
+            Some(r) => r,
+            // `~otheruser` is not this user's home; leave it alone and let the read fail
+            // with an accurate error.
+            None => return Some(raw.to_string()),
+        };
+        let home = std::env::var_os("HOME")
+            .or_else(|| std::env::var_os("USERPROFILE"))
+            .map(std::path::PathBuf::from)?;
+        Some(home.join(rest).to_string_lossy().into_owned())
+    }
+
+    /// The final path component, for a display name.
+    pub fn file_name_of(path: &str) -> String {
+        path.rsplit(['/', '\\'])
+            .find(|s| !s.is_empty())
+            .unwrap_or(path)
+            .to_string()
+    }
+
+    /// A conservative media type for an outgoing attachment.
+    ///
+    /// Attachment typing is advisory: the recipient's client decides how to open it. A
+    /// wrong guess costs a double click; a missing type makes some clients treat a PDF as
+    /// plain text. Only extensions with a well-known mapping are claimed.
+    pub fn guess_content_type(filename: &str) -> &'static str {
+        let ext = filename
+            .rsplit_once('.')
+            .map(|(_, e)| e.to_ascii_lowercase())
+            .unwrap_or_default();
+        match ext.as_str() {
+            "pdf" => "application/pdf",
+            "png" => "image/png",
+            "jpg" | "jpeg" => "image/jpeg",
+            "gif" => "image/gif",
+            "webp" => "image/webp",
+            "svg" => "image/svg+xml",
+            "txt" | "log" | "md" => "text/plain",
+            "csv" => "text/csv",
+            "html" | "htm" => "text/html",
+            "json" => "application/json",
+            "xml" => "application/xml",
+            "zip" => "application/zip",
+            "doc" => "application/msword",
+            "docx" => "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            "xls" => "application/vnd.ms-excel",
+            "xlsx" => "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            "ics" => "text/calendar",
+            "vcf" => "text/vcard",
+            "eml" => "message/rfc822",
+            _ => "application/octet-stream",
+        }
+    }
+
+    /// Add a reply or forward prefix unless the subject already carries one.
+    ///
+    /// The previous code sliced `s[..3]` to test the prefix. A subject is
+    /// attacker-controlled and frequently non-ASCII, so a subject whose third byte fell
+    /// inside a multi-byte character panicked the reader — `"Rd 日本"` is enough.
+    pub fn prefixed_subject(subject: Option<&str>, prefix: &str) -> String {
+        let Some(subject) = subject else {
+            return prefix.to_string();
+        };
+        let existing = subject.split_once(':').map(|(head, _)| head).unwrap_or("");
+        if existing.eq_ignore_ascii_case(prefix.trim_end_matches(':')) {
+            subject.to_string()
+        } else {
+            format!("{prefix} {subject}")
+        }
+    }
+
+    /// Does this body carry HTML rather than plain text?
+    ///
+    /// The reader used to test for the literal substrings `<html`, `<div` and `<p`.
+    /// A plain-text message that discusses HTML ("see `<p>` below") was then run
+    /// through the sanitizer and shown as a wall of markup, and a body using only
+    /// `<table>` or `<br>` was shown as raw source. Requiring a tag that carries
+    /// structure is a closer test and fails toward the safer branch, because plain
+    /// text is escaped before display and never shown as markup.
+    pub fn looks_like_html(content: &str) -> bool {
+        const STRUCTURAL: [&str; 8] = [
+            "<html", "<body", "<div", "<table", "<br", "<p>", "<p ", "<a href",
+        ];
+        let lowered = content.to_ascii_lowercase();
+        STRUCTURAL.iter().any(|tag| lowered.contains(tag))
+    }
+
+    /// Classify a status message into a state.
+    ///
+    /// Split out from the view so the mapping can be tested. Deciding the state from words
+    /// inside a free-text message is fragile — a folder named "Errors" or a subject
+    /// containing "failed" would otherwise turn the whole window's indicator red — so the
+    /// caller is expected to pass a message that is about the connection.
+    pub fn classify_status(accounts: usize, message: &str) -> StatusState {
+        if accounts == 0 {
+            return StatusState::NoAccount;
+        }
+        let text = message.to_ascii_lowercase();
+        const FAILURE: [&str; 8] = [
+            "offline",
+            "error",
+            "failed",
+            "failure",
+            "unavailable",
+            "denied",
+            "couldn't",
+            "timed out",
+        ];
+        const BUSY: [&str; 5] = ["syncing", "loading", "connecting", "...", "\u{2026}"];
+        if FAILURE.iter().any(|w| text.contains(w)) {
+            StatusState::Failed
+        } else if BUSY.iter().any(|w| text.contains(w)) {
+            StatusState::Busy
+        } else {
+            StatusState::Ready
+        }
+    }
+
+    /// Rows fetched for the message list per load.
+    ///
+    /// A page size, not a display cap: the virtual list scrolls over whatever is loaded, and the
+    /// previous value of 100 meant a busy mailbox simply stopped existing below the fold. Kept
+    /// bounded so one load stays cheap.
+    pub const MESSAGE_PAGE_SIZE: usize = 500;
 
     /// Interactive input field handles for the Login Setup Wizard
     pub struct WizardInputEntities {
@@ -155,8 +437,13 @@ pub mod gpui_app {
 
     pub struct ComposeInputEntities {
         pub to: Entity<component::input::InputState>,
+        pub cc: Entity<component::input::InputState>,
         pub subject: Entity<component::input::InputState>,
-        pub body: Entity<component::input::InputState>,
+        /// A multi-line field, not a single-line one: the body of a mail is
+        /// paragraphs, and the previous `Input` rendered one line and scrolled the
+        /// rest out of sight.
+        pub body: Entity<component::input::TextareaState>,
+        pub attach_path: Entity<component::input::InputState>,
     }
 
     impl ComposeInputEntities {
@@ -175,12 +462,19 @@ pub mod gpui_app {
                     to_val,
                     false,
                 ),
+                cc: make_text_input(window, cx, "Cc (optional)", "", false),
                 subject: make_text_input(window, cx, "Subject", subj_val, false),
-                body: make_text_input(
+                body: cx.new(|cx| {
+                    component::input::TextareaState::new(window, cx)
+                        .placeholder("Write your message…")
+                        .auto_grow(4, 14)
+                        .default_value(body_val)
+                }),
+                attach_path: make_text_input(
                     window,
                     cx,
-                    "Write your email message here...",
-                    body_val,
+                    "Full path of a file to attach",
+                    "",
                     false,
                 ),
             }
@@ -219,6 +513,15 @@ pub mod gpui_app {
         pub is_child: bool,
     }
 
+    /// Row data owned outright, so a render-time cache can outlive any one borrow of
+    /// `self.messages` instead of holding one across the frame.
+    #[derive(Debug, Clone)]
+    pub struct CachedRow {
+        pub summary: MessageSummary,
+        pub thread_count: usize,
+        pub is_child: bool,
+    }
+
     #[derive(Debug, Clone)]
     pub struct Toast {
         pub id: String,
@@ -235,9 +538,15 @@ pub mod gpui_app {
         pub selected_folder_id: Option<String>,
         pub is_unified_inbox: bool,
         pub messages: Vec<MessageSummary>,
+        /// The reader's current row and the bulk-action range, kept together so a
+        /// selection cannot outlive the message it points at.
+        pub selection: MessageSelection,
         pub selected_message_id: Option<String>,
         pub list_filter: ListFilter,
         pub search_query: String,
+        /// Whether the folder pane is shown. A keyboard shortcut toggles it, so it has
+        /// to be state rather than a constant in the render function.
+        pub folder_tree_visible: bool,
         pub block_remote_images: bool,
         pub message_viewer: MessageViewer,
         pub is_threaded: bool,
@@ -250,13 +559,41 @@ pub mod gpui_app {
         pub tasks: Vec<TaskItem>,
         // Settings
         pub settings: UserSettings,
+        /// Keyboard-driven command state: focus target, keymap and the typed Action
+        /// handlers. Without a tracked focus handle on the root, no `KeyBinding`
+        /// reaches a handler and every shortcut is inert.
+        pub focus_handle: FocusHandle,
+        pub keybindings: KeybindingMap,
+        /// The settings surface's own tab/dirty state.
+        pub settings_view: SettingsViewState,
+        /// Compose rules that outlive one modal: recipient chips, validation and the
+        /// Markdown decision.
+        pub compose_state: ComposeState,
+        /// Cached result of `threaded_messages()` for the current load.
+        ///
+        /// The message list previously rebuilt the whole filtered-and-threaded vector on every
+        /// render — twice, in fact: once to count rows for the virtual list's size table and
+        /// again inside the row-render closure for each visible window. That is O(n log n) of
+        /// sorting plus a subject-normalising pass per row, per frame, while scrolling.
+        ///
+        /// Invalidated by `refresh_message_cache()` whenever anything feeding it changes:
+        /// `messages`, `list_filter`, `quick_filter_state`, `search_query`, `is_threaded` or
+        /// `sort_order`. The entries borrow `self.messages`, so the cache is cleared before
+        /// `messages` is reassigned rather than storing owned summaries.
+        message_cache: std::cell::RefCell<Option<std::rc::Rc<Vec<CachedRow>>>>,
+        /// The header search field. The list could not be searched at all before this
+        /// existed: `search_query` was only ever read, never written by any control.
+        pub search_input: Option<Entity<component::input::InputState>>,
         // Compose State
         pub compose_to: String,
         pub compose_subject: String,
         pub compose_body: String,
         pub compose_inputs: Option<ComposeInputEntities>,
-        pub compose_is_markdown: bool,
         pub compose_attachments: Vec<vespetrel_core::message::ComposedAttachment>,
+        /// Full path typed into the composer's attach field. A path input rather than
+        /// a native picker: `gpuui-kit` has no file dialog, and inventing attachment
+        /// bytes is worse than asking for a path.
+        pub compose_attach_path: String,
         pub compose_reply_to_id: Option<String>,
         pub compose_draft_id: Option<String>,
         // Command Palette
@@ -276,16 +613,18 @@ pub mod gpui_app {
         /// Creates a mock `MainWindow` with in-memory sample fixtures (for tests or headless mock preview).
         /// In production runtime, use [`MainWindow::from_storage`] with an initialized SQLite storage pool.
         pub fn new(
+            window: &mut Window,
             cx: &mut Context<Self>,
             sync_rx: flume::Receiver<SyncEvent>,
             sync_tx: flume::Sender<SyncEvent>,
         ) -> Self {
-            Self::from_storage(cx, sync_rx, sync_tx, None)
+            Self::from_storage(window, cx, sync_rx, sync_tx, None)
         }
 
         /// Production entry point: creates `MainWindow` and initializes asynchronous hydration from the storage pool.
         #[allow(clippy::type_complexity)]
         pub fn from_storage(
+            window: &mut Window,
             cx: &mut Context<Self>,
             sync_rx: flume::Receiver<SyncEvent>,
             sync_tx: flume::Sender<SyncEvent>,
@@ -337,9 +676,12 @@ pub mod gpui_app {
                                 }
 
                                 let mut initial_messages = Vec::new();
-                                let msgs =
-                                    vespetrel_storage::repo::list_unified_inbox_messages(c, 100, 0)
-                                        .unwrap_or_default();
+                                let msgs = vespetrel_storage::repo::list_unified_inbox_messages(
+                                    c,
+                                    MESSAGE_PAGE_SIZE,
+                                    0,
+                                )
+                                .unwrap_or_default();
                                 if !msgs.is_empty() {
                                     initial_messages =
                                         msgs.into_iter().map(|m| m.summary()).collect();
@@ -436,6 +778,7 @@ pub mod gpui_app {
                                     view.selected_folder_id = Some(first_fld.id.clone());
                                 }
                                 view.messages = msgs;
+                                view.invalidate_message_cache();
                                 view.contacts = cnts;
                                 view.calendar_events = cals;
                                 view.tasks = tsks;
@@ -460,6 +803,20 @@ pub mod gpui_app {
             .detach();
 
             Self {
+                focus_handle: cx.focus_handle(),
+                keybindings: KeybindingMap::new(crate::keybindings::preset_from_settings(
+                    vespetrel_core::KeymapPreset::default(),
+                )),
+                settings_view: SettingsViewState::default(),
+                compose_state: ComposeState::new(vespetrel_core::Address {
+                    name: None,
+                    email: String::new(),
+                }),
+                search_input: Some(cx.new(|cx| {
+                    component::input::InputState::new(window, cx)
+                        .placeholder("Search messages (FTS5)")
+                })),
+                compose_inputs: None,
                 active_tab: ActiveViewTab::Mail,
                 active_modal: ActiveModal::None,
                 accounts,
@@ -468,14 +825,17 @@ pub mod gpui_app {
                 selected_message_id: messages.first().map(|m: &MessageSummary| m.id.clone()),
                 folders,
                 messages,
+                selection: MessageSelection::new(),
                 list_filter: ListFilter::All,
                 search_query: String::new(),
+                folder_tree_visible: true,
                 block_remote_images: true,
                 message_viewer: MessageViewer::new(),
                 is_threaded: false,
                 sort_order: MessageSortOrder::DateDescending,
                 row_density: MessageRowDensity::Comfortable,
                 quick_filter_state: QuickFilterState::new(),
+                message_cache: std::cell::RefCell::new(None),
                 calendar_events,
                 contacts,
                 tasks,
@@ -483,9 +843,8 @@ pub mod gpui_app {
                 compose_to: "team@vespetrel.example".into(),
                 compose_subject: "Hello from Pure Rust GPUI Mail".into(),
                 compose_body: "Hi team,\n\nWriting this from the pure Rust GPUI mail client.\n\nBest regards,\nVespetrel User".into(),
-                compose_inputs: None,
-                compose_is_markdown: false,
                 compose_attachments: Vec::new(),
+                compose_attach_path: String::new(),
                 compose_reply_to_id: None,
                 compose_draft_id: None,
                 palette_query: String::new(),
@@ -538,6 +897,7 @@ pub mod gpui_app {
                 }
                 SyncEvent::MessagesDeleted(ids) => {
                     self.messages.retain(|m| !ids.contains(&m.id));
+                    self.invalidate_message_cache();
                     if self
                         .selected_message_id
                         .as_ref()
@@ -563,14 +923,79 @@ pub mod gpui_app {
             }
         }
 
+        /// Move the reader by `delta` rows in the order the list is drawn.
+        ///
+        /// Movement runs over the *rendered* rows rather than `self.messages`, so a
+        /// shortcut lands on the next row the user can see. Under an active filter or
+        /// a search, stepping through raw storage jumped past rows that were not on
+        /// screen.
+        pub fn move_selection(&mut self, delta: isize, cx: &mut Context<Self>) {
+            let rows: Vec<String> = self
+                .cached_rows()
+                .iter()
+                .map(|row| row.summary.id.clone())
+                .collect();
+            if rows.is_empty() {
+                return;
+            }
+            let next = match self
+                .selection
+                .current()
+                .and_then(|cur| rows.iter().position(|id| id == cur))
+            {
+                Some(idx) => (idx as isize + delta).rem_euclid(rows.len() as isize) as usize,
+                // No current row: enter the list at whichever end the direction implies.
+                None if delta < 0 => rows.len() - 1,
+                None => 0,
+            };
+            let target = rows[next].clone();
+            self.select_message(target, cx);
+        }
+
+        /// Add or remove a row from the bulk-action range.
+        ///
+        /// Takes the id rather than reading the current row, because the row being
+        /// clicked is by definition not current until after the click is handled.
+        pub fn toggle_selection_of(&mut self, id: &str) {
+            self.selection.toggle(id);
+        }
+
+        pub fn select_all_visible(&mut self, cx: &mut Context<Self>) {
+            let ids: Vec<String> = self
+                .cached_rows()
+                .iter()
+                .map(|row| row.summary.id.clone())
+                .collect();
+            self.selection.extend(ids);
+            cx.notify();
+        }
+
+        /// Ids a bulk action should apply to right now.
+        pub fn action_targets(&self) -> Vec<String> {
+            let targets = self.selection.target_ids();
+            if targets.is_empty() {
+                Vec::new()
+            } else {
+                targets
+            }
+        }
+
+        /// Drop selected ids that the last load did not return.
+        pub fn prune_selection(&mut self) {
+            let present: std::collections::HashSet<String> =
+                self.messages.iter().map(|m| m.id.clone()).collect();
+            self.selection.retain(&present);
+        }
+
         pub fn selected_message(&self) -> Option<&MessageSummary> {
-            self.selected_message_id
-                .as_ref()
-                .and_then(|id| self.messages.iter().find(|m| &m.id == id))
+            self.selection
+                .current()
+                .and_then(|id| self.messages.iter().find(|m| m.id == id))
                 .or_else(|| self.messages.first())
         }
 
         pub fn select_message(&mut self, message_id: String, cx: &mut Context<Self>) {
+            self.selection.set_current(message_id.clone());
             self.selected_message_id = Some(message_id.clone());
             if let Some(m) = self.messages.iter_mut().find(|m| m.id == message_id) {
                 m.is_read = true;
@@ -584,7 +1009,7 @@ pub mod gpui_app {
                 self.message_viewer.sent_at = Some(m.sent_at);
                 self.message_viewer.block_remote_images = self.block_remote_images;
                 let snippet = m.snippet.as_deref().unwrap_or("No content available.");
-                if snippet.contains("<html") || snippet.contains("<div") || snippet.contains("<p") {
+                if looks_like_html(snippet) {
                     self.message_viewer
                         .load_html(snippet, self.block_remote_images);
                 } else {
@@ -599,79 +1024,117 @@ pub mod gpui_app {
                 let mid = message_id.clone();
                 let block_images = self.block_remote_images;
                 cx.spawn(async move |this, cx| {
-                    if let Ok(conn) = pool.get().await {
-                        let res = conn
-                            .interact(move |c| {
-                                let _ = vespetrel_storage::repo::update_message_flags(
-                                    c,
-                                    &mid,
-                                    Some(true),
-                                    None,
-                                );
-                                let full_msg =
-                                    vespetrel_storage::repo::get_message(c, &mid).ok().flatten();
-                                let atts =
-                                    vespetrel_storage::repo::list_attachments_for_message(c, &mid)
-                                        .unwrap_or_default();
-                                (full_msg, atts)
-                            })
-                            .await;
-                        if let Ok((Some(full), atts)) = res {
-                            let _ = this.update(cx, |view, cx| {
-                                if view.selected_message_id.as_deref() == Some(&full.id) {
-                                    view.message_viewer.subject = full.subject.clone();
-                                    view.message_viewer.from =
-                                        Some(vespetrel_core::message::Address {
-                                            name: full.from_name.clone(),
-                                            email: full.from_address.clone(),
-                                        });
-                                    view.message_viewer.sent_at = Some(full.sent_at);
-                                    // Detect S/MIME or OpenPGP security status
-                                    let has_smime = atts.iter().any(|a| {
-                                        a.content_type.contains("pkcs7")
-                                            || a.filename.ends_with(".p7s")
-                                            || a.filename.ends_with(".p7m")
-                                    });
-                                    view.message_viewer.attachments = atts
-                                        .into_iter()
-                                        .map(|a| AttachmentInfo {
-                                            filename: a.filename,
-                                            content_type: a.content_type,
-                                            size_bytes: a.size_bytes as usize,
-                                            blob_path: a.blob_path,
-                                        })
-                                        .collect();
-                                    let content = full
-                                        .body_text_preview
-                                        .as_deref()
-                                        .or(full.body_snippet.as_deref())
-                                        .unwrap_or("No content available.");
+                    // The pool's error type is not `Send`-safe as an opaque object, so
+                    // a failed checkout becomes a `None` rather than an error value
+                    // carried across the task boundary.
+                    let Some(conn) = pool.get().await.ok() else {
+                        return;
+                    };
+                    let (full_msg, atts) = conn
+                        .interact(move |c| {
+                            let _ = vespetrel_storage::repo::update_message_flags(
+                                c,
+                                &mid,
+                                Some(true),
+                                None,
+                            );
+                            let full_msg =
+                                vespetrel_storage::repo::get_message(c, &mid).ok().flatten();
+                            let atts =
+                                vespetrel_storage::repo::list_attachments_for_message(c, &mid)
+                                    .unwrap_or_default();
+                            (full_msg, atts)
+                        })
+                        .await
+                        .unwrap_or((None, Vec::new()));
+                    let Some(full) = full_msg else {
+                        return;
+                    };
 
-                                    if has_smime {
-                                        view.message_viewer.security_status =
-                                            SecurityStatus::SmimeValid;
-                                    } else if content.contains("-----BEGIN PGP MESSAGE-----") {
-                                        view.message_viewer.security_status =
-                                            SecurityStatus::PgpEncryptedAndSigned;
-                                    } else if content.contains("-----BEGIN PGP SIGNED MESSAGE-----")
-                                    {
-                                        view.message_viewer.security_status =
-                                            SecurityStatus::PgpSignedValid;
-                                    }
+                    // Report only a signature that was actually checked.
+                    //
+                    // The previous code decided the verdict from the *shape* of the
+                    // message: a `.p7s` attachment made it "S/MIME valid", a PGP armor
+                    // header made it "encrypted and signed". No signature was ever
+                    // verified, so a forged or expired one still showed a green tick.
+                    let smime_blobs: Vec<String> = atts
+                        .iter()
+                        .filter(|a| is_smime_part(&a.content_type, &a.filename))
+                        .map(|a| a.blob_path.clone())
+                        .collect();
 
-                                    if content.contains("<html")
-                                        || content.contains("<div")
-                                        || content.contains("<p")
-                                    {
-                                        view.message_viewer.load_html(content, block_images);
-                                    } else {
-                                        view.message_viewer.load_text(content);
-                                    }
-                                    cx.notify();
-                                }
-                            });
+                    let _ = this.update(cx, |view, cx| {
+                        if view.selected_message_id.as_deref() != Some(full.id.as_str()) {
+                            return;
                         }
+                        view.message_viewer.subject = full.subject.clone();
+                        view.message_viewer.from = Some(vespetrel_core::message::Address {
+                            name: full.from_name.clone(),
+                            email: full.from_address.clone(),
+                        });
+                        view.message_viewer.sent_at = Some(full.sent_at);
+                        view.message_viewer.attachments = atts
+                            .into_iter()
+                            .map(|a| AttachmentInfo {
+                                filename: a.filename,
+                                content_type: a.content_type,
+                                size_bytes: a.size_bytes as usize,
+                                blob_path: a.blob_path,
+                            })
+                            .collect();
+                        let content = full
+                            .body_text_preview
+                            .as_deref()
+                            .or(full.body_snippet.as_deref())
+                            .unwrap_or("No content available.");
+
+                        // Reset before assigning: the previous verdict belonged to a
+                        // different message and must not survive the switch.
+                        view.message_viewer.security_status = SecurityStatus::Unsigned;
+                        if looks_like_html(content) {
+                            view.message_viewer.load_html(content, block_images);
+                        } else {
+                            view.message_viewer.load_text(content);
+                        }
+                        cx.notify();
+                    });
+
+                    if smime_blobs.is_empty() {
+                        return;
                     }
+
+                    // A real cryptographic check, off the UI thread, against the stored
+                    // CMS blob. A pass is reported only if `SmimeEngine::verify`
+                    // accepted the signature value, the signer certificate's validity
+                    // window and the signed message digest.
+                    let verify_for = message_id.clone();
+                    let verdict = tokio::task::spawn_blocking(move || {
+                        let engine = vespetrel_crypto::SmimeEngine::new();
+                        let mut saw_signature = false;
+                        for blob_path in &smime_blobs {
+                            let Ok(bytes) = std::fs::read(blob_path) else {
+                                continue;
+                            };
+                            if bytes.is_empty() {
+                                continue;
+                            }
+                            saw_signature = true;
+                            if engine.verify(&bytes).is_ok() {
+                                return smime_verdict(Some(true), saw_signature);
+                            }
+                        }
+                        smime_verdict(None, saw_signature)
+                    })
+                    .await
+                    .unwrap_or_else(|_| smime_verdict(None, false));
+
+                    let _ = this.update(cx, |view, cx| {
+                        if view.selected_message_id.as_deref() != Some(verify_for.as_str()) {
+                            return;
+                        }
+                        view.message_viewer.security_status = verdict;
+                        cx.notify();
+                    });
                 })
                 .detach();
             }
@@ -680,6 +1143,7 @@ pub mod gpui_app {
         pub fn execute_fts_search(&mut self, query: &str, cx: &mut Context<Self>) {
             let q = query.trim().to_string();
             self.search_query = q.clone();
+            self.invalidate_message_cache();
             if q.is_empty() {
                 self.reload_messages_for_current_folder(cx);
                 return;
@@ -709,6 +1173,7 @@ pub mod gpui_app {
                     if let Ok(Ok(results)) = search_res {
                         let _ = this.update(cx, |view, cx| {
                             view.messages = results;
+                            view.invalidate_message_cache();
                             view.selected_message_id = view.messages.first().map(|m| m.id.clone());
                             view.status_message =
                                 format!("FTS5 Search: {} message(s) found", view.messages.len());
@@ -733,6 +1198,7 @@ pub mod gpui_app {
 
         pub fn toggle_threading(&mut self, cx: &mut Context<Self>) {
             self.is_threaded = !self.is_threaded;
+            self.invalidate_message_cache();
             cx.notify();
         }
 
@@ -741,6 +1207,7 @@ pub mod gpui_app {
                 MessageSortOrder::DateDescending => MessageSortOrder::DateAscending,
                 MessageSortOrder::DateAscending => MessageSortOrder::DateDescending,
             };
+            self.invalidate_message_cache();
             cx.notify();
         }
 
@@ -781,12 +1248,24 @@ pub mod gpui_app {
             .detach();
         }
 
+        /// Apply a colour theme.
+        ///
+        /// The old implementation only wrote the value to settings and repainted. Nothing
+        /// ever read it back, so the Appearance control was inert: picking "Light Paper"
+        /// changed the selection state and nothing else. `System` now means what its label
+        /// says, following the operating system's appearance.
         pub fn set_settings_theme(
             &mut self,
             theme: vespetrel_core::ColorTheme,
             cx: &mut Context<Self>,
         ) {
             self.settings.theme = theme;
+            let mode = match theme {
+                vespetrel_core::ColorTheme::LightPaper => ThemeMode::Light,
+                vespetrel_core::ColorTheme::System => crate::platform::theme_mode(),
+                _ => ThemeMode::Dark,
+            };
+            Theme::change(mode, None, cx);
             self.save_settings(cx);
             cx.notify();
         }
@@ -824,6 +1303,76 @@ pub mod gpui_app {
             cx.notify();
         }
 
+        /// Apply a preset and say when it takes effect.
+        ///
+        /// The bindings are installed at launch. Rebinding mid-session would need
+        /// `cx.clear_key_bindings`, which also drops the component defaults
+        /// `gpui_kit::init` registered, so the change is applied on next start and
+        /// the user is told rather than left wondering.
+        pub fn set_keymap_preset(
+            &mut self,
+            preset: crate::keybindings::KeyPreset,
+            cx: &mut Context<Self>,
+        ) {
+            self.keybindings = KeybindingMap::new(preset);
+            self.settings.keymap_preset = match preset {
+                crate::keybindings::KeyPreset::Gmail => vespetrel_core::KeymapPreset::Gmail,
+                crate::keybindings::KeyPreset::Thunderbird => {
+                    vespetrel_core::KeymapPreset::Thunderbird
+                }
+                crate::keybindings::KeyPreset::Vim => vespetrel_core::KeymapPreset::Vim,
+                crate::keybindings::KeyPreset::Custom => vespetrel_core::KeymapPreset::Custom,
+            };
+            self.save_settings(cx);
+            if preset != crate::keybindings::KeyPreset::Custom {
+                self.show_toast(
+                    format!(
+                        "{} shortcuts apply the next time Vespetrel starts",
+                        preset.label()
+                    ),
+                    false,
+                    cx,
+                );
+            }
+            cx.notify();
+        }
+
+        pub fn set_remote_image_policy(&mut self, block: bool, cx: &mut Context<Self>) {
+            self.block_remote_images = block;
+            self.message_viewer.toggle_remote_images();
+            self.settings.remote_image_policy = if block {
+                vespetrel_core::RemoteImagePolicy::BlockAll
+            } else {
+                vespetrel_core::RemoteImagePolicy::AllowAll
+            };
+            self.save_settings(cx);
+            cx.notify();
+        }
+
+        pub fn set_sender_avatars(&mut self, show: bool, cx: &mut Context<Self>) {
+            self.settings.show_sender_avatars = show;
+            self.save_settings(cx);
+            cx.notify();
+        }
+
+        pub fn set_preview_snippets(&mut self, show: bool, cx: &mut Context<Self>) {
+            self.settings.show_preview_snippets = show;
+            self.save_settings(cx);
+            cx.notify();
+        }
+
+        pub fn set_strip_trackers(&mut self, enabled: bool, cx: &mut Context<Self>) {
+            self.settings.auto_strip_trackers = enabled;
+            self.save_settings(cx);
+            cx.notify();
+        }
+
+        pub fn set_warn_phishing(&mut self, enabled: bool, cx: &mut Context<Self>) {
+            self.settings.warn_on_phishing = enabled;
+            self.save_settings(cx);
+            cx.notify();
+        }
+
         pub fn filtered_messages(&self) -> Vec<&MessageSummary> {
             let mut qf = self.quick_filter_state.clone();
             qf.search_query = self.search_query.clone();
@@ -853,6 +1402,35 @@ pub mod gpui_app {
                 }
             }
             filtered
+        }
+
+        /// Cached rows for the message list, keyed on every input that can change them.
+        ///
+        /// Returns an `Rc` so the render closure can hold it across the frame without a borrow
+        /// of `self`. Any mutation of `messages` or of the filter/sort state must call
+        /// `invalidate_message_cache()`.
+        fn cached_rows(&self) -> std::rc::Rc<Vec<CachedRow>> {
+            if let Some(rows) = self.message_cache.borrow().as_ref() {
+                return rows.clone();
+            }
+            let rows = std::rc::Rc::new(self.build_threaded_rows());
+            *self.message_cache.borrow_mut() = Some(rows.clone());
+            rows
+        }
+
+        fn invalidate_message_cache(&self) {
+            *self.message_cache.borrow_mut() = None;
+        }
+
+        fn build_threaded_rows(&self) -> Vec<CachedRow> {
+            self.threaded_messages()
+                .into_iter()
+                .map(|row| CachedRow {
+                    summary: row.summary.clone(),
+                    thread_count: row.thread_count,
+                    is_child: row.is_child,
+                })
+                .collect()
         }
 
         pub fn threaded_messages(&self) -> Vec<ThreadedMessage<'_>> {
@@ -922,7 +1500,18 @@ pub mod gpui_app {
                     return;
                 }
                 for acct in accounts {
-                    let provider = vespetrel_engine::make_provider(&acct);
+                    let provider = match vespetrel_engine::make_provider(&acct) {
+                        Ok(p) => p,
+                        Err(e) => {
+                            // Credentials unreadable: report it instead of hammering a
+                            // provider built from an empty token.
+                            let _ = tx.send(SyncEvent::SyncError {
+                                folder: acct.email.clone(),
+                                error: e.to_string(),
+                            });
+                            continue;
+                        }
+                    };
                     match provider.sync_folder_list().await {
                         Ok(folders) => {
                             let _ = tx.send(SyncEvent::FolderListUpdated(folders.clone()));
@@ -981,43 +1570,133 @@ pub mod gpui_app {
             .detach();
         }
 
-        pub fn toggle_flag(&mut self, cx: &mut Context<Self>) {
-            if let Some(id) = self.selected_message_id.clone()
-                && let Some(m) = self.messages.iter_mut().find(|m| m.id == id)
-            {
-                m.is_flagged = !m.is_flagged;
-                let is_flagged = m.is_flagged;
-                let is_read = m.is_read;
-                cx.notify();
-
-                if let Some(pool) = &self.storage_pool {
-                    let pool = pool.clone();
-                    let msg_id = id.clone();
-                    cx.spawn(async move |_this, _cx| {
-                        if let Ok(conn) = pool.get().await {
-                            let _ = conn
-                                .interact(move |c| {
-                                    c.execute(
-                                        "UPDATE messages SET is_flagged = ?1 WHERE id = ?2",
-                                        rusqlite::params![is_flagged, msg_id],
-                                    )
-                                })
-                                .await;
-                        }
-                    })
-                    .detach();
+        /// Add, remove or flip the star on a set of messages.
+        ///
+        /// `desired` is `Some` for an explicit value and `None` to flip. Batch actions
+        /// pass `Some`, because flipping each row independently would scatter a star
+        /// across a range the user selected in one action.
+        pub fn set_flag(
+            &mut self,
+            ids: &[String],
+            desired: Option<bool>,
+            cx: &mut Context<Self>,
+        ) -> usize {
+            let mut changed = Vec::new();
+            for id in ids {
+                if let Some(m) = self.messages.iter_mut().find(|m| &m.id == id) {
+                    m.is_flagged = desired.unwrap_or(!m.is_flagged);
+                    changed.push((id.clone(), m.is_flagged, m.is_read));
                 }
+            }
+            if changed.is_empty() {
+                return 0;
+            }
+            let count = changed.len();
+            cx.notify();
 
+            if let Some(pool) = &self.storage_pool {
+                let pool = pool.clone();
+                let writes = changed.clone();
+                cx.spawn(async move |_this, _cx| {
+                    if let Ok(conn) = pool.get().await {
+                        let _ = conn
+                            .interact(move |c| {
+                                for (id, flagged, _read) in &writes {
+                                    let _ = vespetrel_storage::repo::update_message_flags(
+                                        c,
+                                        id,
+                                        None,
+                                        Some(*flagged),
+                                    );
+                                }
+                            })
+                            .await;
+                    }
+                })
+                .detach();
+            }
+
+            for (id, is_flagged, is_read) in self
+                .messages
+                .iter()
+                .filter(|m| ids.iter().any(|t| t == &m.id))
+                .map(|m| (m.id.clone(), m.is_flagged, m.is_read))
+                .collect::<Vec<_>>()
+            {
                 let _ = self.sync_sender.send(SyncEvent::MessageFlagsUpdated {
                     id,
                     is_read,
                     is_flagged,
                 });
             }
+            count
+        }
+
+        pub fn toggle_flag(&mut self, cx: &mut Context<Self>) {
+            self.set_flag(&self.action_targets(), None, cx);
+        }
+
+        /// Mark a set of messages read or unread.
+        pub fn set_read(&mut self, ids: &[String], desired: bool, cx: &mut Context<Self>) -> usize {
+            let mut changed = Vec::new();
+            for id in ids {
+                if let Some(m) = self.messages.iter_mut().find(|m| &m.id == id) {
+                    m.is_read = desired;
+                    changed.push((id.clone(), m.is_flagged, m.is_read));
+                }
+            }
+            if changed.is_empty() {
+                return 0;
+            }
+            let count = changed.len();
+            cx.notify();
+
+            if let Some(pool) = &self.storage_pool {
+                let pool = pool.clone();
+                let writes = changed.clone();
+                cx.spawn(async move |_this, _cx| {
+                    if let Ok(conn) = pool.get().await {
+                        let _ = conn
+                            .interact(move |c| {
+                                for (id, _flagged, read) in &writes {
+                                    let _ = vespetrel_storage::repo::update_message_flags(
+                                        c,
+                                        id,
+                                        Some(*read),
+                                        None,
+                                    );
+                                }
+                            })
+                            .await;
+                    }
+                })
+                .detach();
+            }
+
+            for (id, is_flagged, is_read) in changed {
+                let _ = self.sync_sender.send(SyncEvent::MessageFlagsUpdated {
+                    id,
+                    is_read,
+                    is_flagged,
+                });
+            }
+            count
         }
 
         pub fn delete_selected_message(&mut self, cx: &mut Context<Self>) {
-            if let Some(id) = self.selected_message_id.clone() {
+            let targets = self.action_targets();
+            if targets.is_empty() {
+                return;
+            }
+            self.delete_messages(&targets, cx);
+        }
+
+        /// Remove a set of messages from the list and from storage.
+        pub fn delete_messages(&mut self, ids: &[String], cx: &mut Context<Self>) -> usize {
+            if ids.is_empty() {
+                return 0;
+            }
+            {
                 let pool_opt = self.storage_pool.clone();
                 let current_folder_id = self.selected_folder_id.clone();
                 let is_in_trash = self.folders.iter().any(|f| {
@@ -1025,27 +1704,54 @@ pub mod gpui_app {
                         && f.role == vespetrel_core::FolderRole::Trash
                 });
 
-                self.messages.retain(|m| m.id != id);
-                self.selected_message_id = self.messages.first().map(|m| m.id.clone());
+                self.messages.retain(|m| !ids.contains(&m.id));
+                self.invalidate_message_cache();
+                if self
+                    .selection
+                    .current()
+                    .is_some_and(|cur| ids.iter().any(|d| d == cur))
+                {
+                    let next = self.messages.first().map(|m| m.id.clone());
+                    self.selected_message_id = next.clone();
+                    match next {
+                        Some(n) => self.selection.set_current(n),
+                        None => self.selection.clear_current(),
+                    }
+                }
+                self.prune_selection();
+                let count = ids.len();
 
                 if is_in_trash {
                     self.show_toast("Message permanently deleted", false, cx);
                     if let Some(pool) = pool_opt {
-                        let msg_id = id.clone();
+                        let victims = ids.to_vec();
                         cx.spawn(async move |_this, _cx| {
                             if let Ok(conn) = pool.get().await {
                                 let _ = conn
                                     .interact(move |c| {
-                                        vespetrel_storage::repo::delete_message(c, &msg_id)
+                                        for msg_id in &victims {
+                                            let _ =
+                                                vespetrel_storage::repo::delete_message(c, msg_id);
+                                        }
                                     })
                                     .await;
                             }
                         })
                         .detach();
                     }
-                    let _ = self.sync_sender.send(SyncEvent::MessagesDeleted(vec![id]));
+                    let _ = self
+                        .sync_sender
+                        .send(SyncEvent::MessagesDeleted(ids.to_vec()));
                 } else {
-                    self.show_toast("Message moved to Trash", false, cx);
+                    self.show_toast(
+                        if count == 1 {
+                            "Message moved to Trash".to_string()
+                        } else {
+                            format!("{count} messages moved to Trash")
+                        },
+                        false,
+                        cx,
+                    );
                     let trash_folder_id = self
                         .folders
                         .iter()
@@ -1055,15 +1761,18 @@ pub mod gpui_app {
                     if let Some(trash_id) = trash_folder_id
                         && let Some(pool) = pool_opt
                     {
-                        let msg_id = id.clone();
+                        let victims = ids.to_vec();
                         cx.spawn(async move |this, cx| {
                             if let Ok(conn) = pool.get().await {
                                 let _ = conn
                                     .interact(move |c| {
-                                        c.execute(
-                                            "UPDATE messages SET folder_id = ?1 WHERE id = ?2",
-                                            rusqlite::params![trash_id, msg_id],
-                                        )
+                                        for msg_id in &victims {
+                                            c.execute(
+                                                "UPDATE messages SET folder_id = ?1 WHERE id = ?2",
+                                                rusqlite::params![trash_id, msg_id],
+                                            )?;
+                                        }
+                                        Ok::<(), vespetrel_storage::StorageError>(())
                                     })
                                     .await;
                                 let _ = this.update(cx, |view, cx| {
@@ -1075,47 +1784,87 @@ pub mod gpui_app {
                     }
                 }
                 cx.notify();
+                count
             }
         }
 
         pub fn archive_selected_message(&mut self, cx: &mut Context<Self>) {
-            if let Some(id) = self.selected_message_id.clone() {
-                self.messages.retain(|m| m.id != id);
-                self.selected_message_id = self.messages.first().map(|m| m.id.clone());
-                self.show_toast("Message archived", false, cx);
-                cx.notify();
+            let targets = self.action_targets();
+            if targets.is_empty() {
+                return;
+            }
+            self.archive_messages(&targets, cx);
+        }
 
-                if let Some(pool) = &self.storage_pool {
-                    let pool = pool.clone();
-                    let msg_id = id.clone();
-                    cx.spawn(async move |this, cx| {
-                        if let Ok(conn) = pool.get().await {
-                            let _ = conn
-                                .interact(move |c| {
-                                    let archive_id: Option<String> = c
-                                        .query_row(
-                                            "SELECT id FROM folders WHERE role = 'archive' LIMIT 1",
-                                            [],
-                                            |r| r.get(0),
-                                        )
-                                        .ok();
-                                    if let Some(arch_id) = archive_id {
+        /// Move a set of messages into the account's Archive folder.
+        pub fn archive_messages(&mut self, ids: &[String], cx: &mut Context<Self>) -> usize {
+            if ids.is_empty() {
+                return 0;
+            }
+            self.messages.retain(|m| !ids.contains(&m.id));
+            self.invalidate_message_cache();
+            if self
+                .selection
+                .current()
+                .is_some_and(|cur| ids.iter().any(|d| d == cur))
+            {
+                match self.messages.first().map(|m| m.id.clone()) {
+                    Some(n) => {
+                        self.selected_message_id = Some(n.clone());
+                        self.selection.set_current(n);
+                    }
+                    None => {
+                        self.selected_message_id = None;
+                        self.selection.clear_current();
+                    }
+                }
+            }
+            self.prune_selection();
+            let count = ids.len();
+            self.show_toast(
+                if count == 1 {
+                    "Message archived".to_string()
+                } else {
+                    format!("{count} messages archived")
+                },
+                false,
+                cx,
+            );
+            cx.notify();
+
+            if let Some(pool) = &self.storage_pool {
+                let pool = pool.clone();
+                let victims = ids.to_vec();
+                cx.spawn(async move |this, cx| {
+                    if let Ok(conn) = pool.get().await {
+                        let _ = conn
+                            .interact(move |c| {
+                                let archive_id: Option<String> = c
+                                    .query_row(
+                                        "SELECT id FROM folders WHERE role = 'archive' LIMIT 1",
+                                        [],
+                                        |r| r.get(0),
+                                    )
+                                    .ok();
+                                if let Some(arch_id) = archive_id {
+                                    for msg_id in &victims {
                                         c.execute(
                                             "UPDATE messages SET folder_id = ?1 WHERE id = ?2",
                                             rusqlite::params![arch_id, msg_id],
                                         )?;
                                     }
-                                    Ok::<(), vespetrel_storage::StorageError>(())
-                                })
-                                .await;
-                            let _ = this.update(cx, |view, cx| {
-                                view.reload_folder_counts(cx);
-                            });
-                        }
-                    })
-                    .detach();
-                }
+                                }
+                                Ok::<(), vespetrel_storage::StorageError>(())
+                            })
+                            .await;
+                        let _ = this.update(cx, |view, cx| {
+                            view.reload_folder_counts(cx);
+                        });
+                    }
+                })
+                .detach();
             }
+            count
         }
 
         pub fn show_toast(
@@ -1173,6 +1922,11 @@ pub mod gpui_app {
         }
 
         pub fn save_draft(&mut self, cx: &mut Context<Self>) {
+            let cc_val = self
+                .compose_inputs
+                .as_ref()
+                .map(|i| i.cc.read(cx).value().trim().to_string())
+                .unwrap_or_default();
             let (to_val, subj_val, body_val) = if let Some(inputs) = &self.compose_inputs {
                 (
                     inputs.to.read(cx).value().trim().to_string(),
@@ -1243,7 +1997,7 @@ pub mod gpui_app {
                         email: to_val,
                     }]
                 },
-                cc_addresses: vec![],
+                cc_addresses: parse_address_list(&cc_val),
                 bcc_addresses: vec![],
                 reply_to: None,
                 sent_at: chrono::Utc::now(),
@@ -1367,11 +2121,24 @@ pub mod gpui_app {
                     let msgs = conn
                         .interact(move |c| {
                             if is_unified {
-                                vespetrel_storage::repo::list_unified_inbox_messages(c, 100, 0)
+                                vespetrel_storage::repo::list_unified_inbox_messages(
+                                    c,
+                                    MESSAGE_PAGE_SIZE,
+                                    0,
+                                )
                             } else if let Some(fid) = &fid_c {
-                                vespetrel_storage::repo::list_messages_in_folder(c, fid, 100, 0)
+                                vespetrel_storage::repo::list_messages_in_folder(
+                                    c,
+                                    fid,
+                                    MESSAGE_PAGE_SIZE,
+                                    0,
+                                )
                             } else {
-                                vespetrel_storage::repo::list_unified_inbox_messages(c, 100, 0)
+                                vespetrel_storage::repo::list_unified_inbox_messages(
+                                    c,
+                                    MESSAGE_PAGE_SIZE,
+                                    0,
+                                )
                             }
                         })
                         .await;
@@ -1380,6 +2147,7 @@ pub mod gpui_app {
                             loaded_msgs.into_iter().map(|m| m.summary()).collect();
                         let _ = this.update(cx, |view, cx| {
                             view.messages = summaries;
+                            view.invalidate_message_cache();
                             view.selected_message_id = view.messages.first().map(|m| m.id.clone());
                             view.reload_folder_counts(cx);
                             cx.notify();
@@ -1388,37 +2156,34 @@ pub mod gpui_app {
                 }
 
                 // Incremental background sync if an account and folder match
-                if let (Some(acct), Some(fld)) = (acct_opt, folder_obj) {
-                    let provider = vespetrel_engine::make_provider(&acct);
-                    if let Ok(delta) = provider.sync_messages(&fld, Default::default()).await
-                        && !delta.inserted.is_empty()
-                    {
-                        let new_summaries: Vec<MessageSummary> = delta
-                            .inserted
-                            .into_iter()
-                            .map(|sm| MessageSummary {
-                                id: sm
-                                    .remote_id
-                                    .clone()
-                                    .unwrap_or_else(|| sm.remote_uid.to_string()),
-                                thread_id: None,
-                                subject: Some(format!("Message {}", sm.remote_uid)),
-                                from_address: acct.email.clone(),
-                                from_name: None,
-                                snippet: None,
-                                sent_at: chrono::Utc::now(),
-                                is_read: sm.flags.contains(&vespetrel_core::message::Flag::Seen),
-                                is_flagged: sm
-                                    .flags
-                                    .contains(&vespetrel_core::message::Flag::Flagged),
-                                has_attachments: false,
-                            })
-                            .collect();
-                        let _ = this.update(cx, |view, cx| {
-                            view.messages.splice(0..0, new_summaries);
-                            cx.notify();
-                        });
-                    }
+                if let (Some(acct), Some(fld)) = (acct_opt, folder_obj)
+                    && let Ok(provider) = vespetrel_engine::make_provider(&acct)
+                    && let Ok(delta) = provider.sync_messages(&fld, Default::default()).await
+                    && !delta.inserted.is_empty()
+                {
+                    let new_summaries: Vec<MessageSummary> = delta
+                        .inserted
+                        .into_iter()
+                        .map(|sm| MessageSummary {
+                            id: sm
+                                .remote_id
+                                .clone()
+                                .unwrap_or_else(|| sm.remote_uid.to_string()),
+                            thread_id: None,
+                            subject: Some(format!("Message {}", sm.remote_uid)),
+                            from_address: acct.email.clone(),
+                            from_name: None,
+                            snippet: None,
+                            sent_at: chrono::Utc::now(),
+                            is_read: sm.flags.contains(&vespetrel_core::message::Flag::Seen),
+                            is_flagged: sm.flags.contains(&vespetrel_core::message::Flag::Flagged),
+                            has_attachments: false,
+                        })
+                        .collect();
+                    let _ = this.update(cx, |view, cx| {
+                        view.messages.splice(0..0, new_summaries);
+                        cx.notify();
+                    });
                 }
             })
             .detach();
@@ -1459,6 +2224,7 @@ pub mod gpui_app {
             if self.folders.is_empty() {
                 self.selected_folder_id = None;
                 self.messages.clear();
+                self.invalidate_message_cache();
                 self.selected_message_id = None;
             } else {
                 self.selected_folder_id = self.folders.first().map(|f| f.id.clone());
@@ -1487,6 +2253,11 @@ pub mod gpui_app {
         }
 
         pub fn send_composed_message(&mut self, cx: &mut Context<Self>) {
+            let cc_val = self
+                .compose_inputs
+                .as_ref()
+                .map(|i| i.cc.read(cx).value().trim().to_string())
+                .unwrap_or_default();
             let (to_val, subj_val, body_val) = if let Some(inputs) = &self.compose_inputs {
                 (
                     inputs.to.read(cx).value().trim().to_string(),
@@ -1501,8 +2272,28 @@ pub mod gpui_app {
                 )
             };
 
-            if to_val.is_empty() {
-                self.show_toast("Please specify a recipient", true, cx);
+            // Validate before anything is persisted or transmitted.
+            //
+            // The old check was `to_val.is_empty()`, which accepted `alice`, rejected a
+            // valid message with only a Cc recipient, and let an empty subject through.
+            // The rules come from `ComposeState::validate_compose_fields`, which was
+            // already written and tested but never called.
+            let errors = self
+                .compose_state
+                .validate_compose_fields(&to_val, &subj_val, &body_val);
+            if !errors.is_valid() {
+                let mut messages = Vec::new();
+                for err in [
+                    errors.recipient_error,
+                    errors.subject_error,
+                    errors.body_error,
+                ]
+                .into_iter()
+                .flatten()
+                {
+                    messages.push(err);
+                }
+                self.show_toast(messages.join(" · "), true, cx);
                 return;
             }
 
@@ -1554,11 +2345,17 @@ pub mod gpui_app {
                 }
             });
 
-            let body_html = if self.compose_is_markdown {
-                Some(format!(
-                    "<div class=\"markdown-body\">{}</div>",
-                    body_val.replace('\n', "<br/>\n")
-                ))
+            // Real Markdown, when Markdown is on.
+            //
+            // The previous body was `body_val.replace('\n', "<br/>\n")` wrapped in a
+            // `markdown-body` div: every `**bold**`, `# heading` and `- list` marker
+            // reached the recipient as literal characters. `RichTextDocument` already
+            // parsed all of those; it was simply never called from here.
+            let body_html = if self.compose_state.is_markdown_mode {
+                Some(
+                    vespetrel_core::richtext::RichTextDocument::parse_markdown(&body_val)
+                        .to_html_with_font(Some(&self.settings.default_composer_font)),
+                )
             } else {
                 None
             };
@@ -1572,7 +2369,7 @@ pub mod gpui_app {
                     name: None,
                     email: recipient_email.clone(),
                 }],
-                cc: vec![],
+                cc: parse_address_list(&cc_val),
                 bcc: vec![],
                 subject: subj_val.clone(),
                 body_text: body_val.clone(),
@@ -1790,6 +2587,13 @@ pub mod gpui_app {
             if self.command_state.is_none() {
                 self.command_state = Some(cx.new(|cx| CommandState::new(window, cx)));
             }
+            if self.search_input.is_none() {
+                self.search_input = Some(cx.new(|cx| {
+                    component::input::InputState::new(window, cx)
+                        .placeholder("Search messages (FTS5)")
+                }));
+                self.subscribe_search_input(window, cx);
+            }
             if self.active_modal == ActiveModal::AddAccount && self.wizard_inputs.is_none() {
                 self.wizard_inputs = Some(WizardInputEntities::new(window, cx, &self.login_wizard));
             }
@@ -1809,6 +2613,38 @@ pub mod gpui_app {
                 .size_full()
                 .bg(cx.theme().background)
                 .text_color(cx.theme().foreground)
+                // The keyboard route. Every `KeyBinding` is scoped to
+                // `WINDOW_CONTEXT`, and that context is only eligible when it sits on
+                // the focused element's dispatch path. Without `track_focus` here, no
+                // shortcut in the keymap can reach a handler: the previous build had a
+                // complete `KeybindingMap` and no focus handle, so nothing was bound
+                // to anything and the header's key cap was decoration.
+                .track_focus(&self.focus_handle)
+                .key_context(WINDOW_CONTEXT)
+                .on_action(cx.listener(Self::on_action_select_next))
+                .on_action(cx.listener(Self::on_action_select_previous))
+                .on_action(cx.listener(Self::on_action_archive))
+                .on_action(cx.listener(Self::on_action_delete))
+                .on_action(cx.listener(Self::on_action_toggle_star))
+                .on_action(cx.listener(Self::on_action_toggle_read))
+                .on_action(cx.listener(Self::on_action_compose))
+                .on_action(cx.listener(Self::on_action_reply))
+                .on_action(cx.listener(Self::on_action_reply_all))
+                .on_action(cx.listener(Self::on_action_forward))
+                .on_action(cx.listener(Self::on_action_save_draft))
+                .on_action(cx.listener(Self::on_action_focus_search))
+                .on_action(cx.listener(Self::on_action_sync))
+                .on_action(cx.listener(Self::on_action_go_to_inbox))
+                .on_action(cx.listener(Self::on_action_go_to_sent))
+                .on_action(cx.listener(Self::on_action_go_to_drafts))
+                .on_action(cx.listener(Self::on_action_toggle_threading))
+                .on_action(cx.listener(Self::on_action_toggle_remote_images))
+                .on_action(cx.listener(Self::on_action_cycle_sort))
+                .on_action(cx.listener(Self::on_action_cycle_density))
+                .on_action(cx.listener(Self::on_action_toggle_folder_tree))
+                .on_action(cx.listener(Self::on_action_show_palette))
+                .on_action(cx.listener(Self::on_action_show_settings))
+                .on_action(cx.listener(Self::on_action_dismiss))
                 .child(self.render_header(cx))
                 .child(
                     div()
@@ -1826,15 +2662,510 @@ pub mod gpui_app {
     }
 
     impl MainWindow {
+        /// Wire the header's search field to the FTS5 query path.
+        ///
+        /// The search box was a `div` that displayed a `search_query` nothing ever
+        /// wrote, and `execute_fts_search` had no caller: the list could not be
+        /// searched at all. Enter commits the query, Escape clears it, and a change
+        /// updates the in-memory filter immediately so typing feels live before the
+        /// index round-trip returns.
+        fn subscribe_search_input(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+            let Some(input) = self.search_input.clone() else {
+                return;
+            };
+            cx.subscribe_in(
+                &input,
+                window,
+                |this, _state, event, window, cx| match event {
+                    component::input::InputEvent::Change => {
+                        let query = this
+                            .search_input
+                            .as_ref()
+                            .map(|i| i.read(cx).value().to_string())
+                            .unwrap_or_default();
+                        this.on_search_query_changed(query, window, cx);
+                    }
+                    component::input::InputEvent::PressEnter { .. } => {
+                        let query = this
+                            .search_input
+                            .as_ref()
+                            .map(|i| i.read(cx).value().to_string())
+                            .unwrap_or_default();
+                        this.execute_fts_search(&query, cx);
+                    }
+                    _ => {}
+                },
+            )
+            .detach();
+        }
+
+        /// Reflect the typed query in the list, and run the full-text search.
+        fn on_search_query_changed(
+            &mut self,
+            query: String,
+            window: &mut Window,
+            cx: &mut Context<Self>,
+        ) {
+            let trimmed = query.trim().to_string();
+            self.search_query = trimmed.clone();
+            self.quick_filter_state.search_query = trimmed.clone();
+            self.invalidate_message_cache();
+            if trimmed.is_empty() {
+                self.reload_messages_for_current_folder(cx);
+            } else {
+                // Immediate in-memory narrowing while the FTS5 query is in flight.
+                cx.notify();
+            }
+            self.execute_fts_search(&trimmed, cx);
+            let _ = window;
+        }
+
+        /// Put keyboard focus on the header's search field.
+        fn focus_search_input(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+            if let Some(input) = self.search_input.clone() {
+                input.update(cx, |state, cx| state.focus(window, cx));
+            }
+        }
+
+        fn on_action_focus_search(
+            &mut self,
+            _: &FocusSearch,
+            window: &mut Window,
+            cx: &mut Context<Self>,
+        ) {
+            self.focus_search_input(window, cx);
+        }
+
+        fn on_action_select_next(
+            &mut self,
+            _: &SelectNextMessage,
+            _: &mut Window,
+            cx: &mut Context<Self>,
+        ) {
+            self.move_selection(1, cx);
+        }
+
+        fn on_action_select_previous(
+            &mut self,
+            _: &SelectPreviousMessage,
+            _: &mut Window,
+            cx: &mut Context<Self>,
+        ) {
+            self.move_selection(-1, cx);
+        }
+
+        fn on_action_archive(&mut self, _: &Archive, _: &mut Window, cx: &mut Context<Self>) {
+            self.archive_selected_message(cx);
+        }
+
+        fn on_action_delete(&mut self, _: &Delete, _: &mut Window, cx: &mut Context<Self>) {
+            self.delete_selected_message(cx);
+        }
+
+        fn on_action_toggle_star(
+            &mut self,
+            _: &ToggleStar,
+            _: &mut Window,
+            cx: &mut Context<Self>,
+        ) {
+            self.toggle_flag(cx);
+        }
+
+        /// Flip read state for the current row or the selected range.
+        fn on_action_toggle_read(
+            &mut self,
+            _: &ToggleRead,
+            _: &mut Window,
+            cx: &mut Context<Self>,
+        ) {
+            let targets = self.action_targets();
+            if targets.is_empty() {
+                return;
+            }
+            // Every target in one batch must land on the same value, so the decision is
+            // taken from the current row rather than from each row's own flag.
+            let current_is_read = self.selected_message().map(|m| m.is_read).unwrap_or(false);
+            self.set_read(&targets, !current_is_read, cx);
+        }
+
+        fn on_action_compose(&mut self, _: &Compose, _: &mut Window, cx: &mut Context<Self>) {
+            self.open_compose(cx);
+        }
+
+        fn on_action_reply(&mut self, _: &Reply, _: &mut Window, cx: &mut Context<Self>) {
+            self.open_reply(false, cx);
+        }
+
+        fn on_action_reply_all(&mut self, _: &ReplyAll, _: &mut Window, cx: &mut Context<Self>) {
+            self.open_reply(true, cx);
+        }
+
+        fn on_action_forward(&mut self, _: &Forward, _: &mut Window, cx: &mut Context<Self>) {
+            self.open_forward(cx);
+        }
+
+        fn on_action_save_draft(&mut self, _: &SaveDraft, _: &mut Window, cx: &mut Context<Self>) {
+            if self.active_modal == ActiveModal::Compose {
+                self.save_draft(cx);
+            }
+        }
+
+        fn on_action_sync(&mut self, _: &SyncNow, _: &mut Window, cx: &mut Context<Self>) {
+            self.trigger_sync(cx);
+        }
+
+        fn on_action_go_to_inbox(&mut self, _: &GoToInbox, _: &mut Window, cx: &mut Context<Self>) {
+            self.go_to_role_folder(vespetrel_core::FolderRole::Inbox, cx);
+        }
+
+        fn on_action_go_to_sent(&mut self, _: &GoToSent, _: &mut Window, cx: &mut Context<Self>) {
+            self.go_to_role_folder(vespetrel_core::FolderRole::Sent, cx);
+        }
+
+        fn on_action_go_to_drafts(
+            &mut self,
+            _: &GoToDrafts,
+            _: &mut Window,
+            cx: &mut Context<Self>,
+        ) {
+            self.go_to_role_folder(vespetrel_core::FolderRole::Drafts, cx);
+        }
+
+        fn on_action_toggle_threading(
+            &mut self,
+            _: &ToggleThreading,
+            _: &mut Window,
+            cx: &mut Context<Self>,
+        ) {
+            self.toggle_threading(cx);
+        }
+
+        fn on_action_toggle_remote_images(
+            &mut self,
+            _: &ToggleRemoteImages,
+            _: &mut Window,
+            cx: &mut Context<Self>,
+        ) {
+            self.toggle_remote_images(cx);
+        }
+
+        fn on_action_cycle_sort(
+            &mut self,
+            _: &CycleSortOrder,
+            _: &mut Window,
+            cx: &mut Context<Self>,
+        ) {
+            self.cycle_sort_order(cx);
+        }
+
+        fn on_action_cycle_density(
+            &mut self,
+            _: &CycleRowDensity,
+            _: &mut Window,
+            cx: &mut Context<Self>,
+        ) {
+            self.cycle_row_density(cx);
+        }
+
+        fn on_action_toggle_folder_tree(
+            &mut self,
+            _: &ToggleFolderTree,
+            _: &mut Window,
+            cx: &mut Context<Self>,
+        ) {
+            self.folder_tree_visible = !self.folder_tree_visible;
+            cx.notify();
+        }
+
+        fn on_action_show_palette(
+            &mut self,
+            _: &ShowCommandPalette,
+            _: &mut Window,
+            cx: &mut Context<Self>,
+        ) {
+            self.command_palette.open();
+            self.active_modal = ActiveModal::CommandPalette;
+            cx.notify();
+        }
+
+        fn on_action_show_settings(
+            &mut self,
+            _: &ShowSettings,
+            _: &mut Window,
+            cx: &mut Context<Self>,
+        ) {
+            self.active_tab = ActiveViewTab::Settings;
+            self.active_modal = ActiveModal::None;
+            cx.notify();
+        }
+
+        //// Escape closes the topmost overlay, and only that.
+        ///
+        /// With no overlay open, Escape backs out of the narrowest thing in scope: a
+        /// running search first, then an active filter. It never reaches further than
+        /// that, so a stray Escape cannot clear a filter the user set minutes ago
+        /// without their noticing.
+        fn on_action_dismiss(
+            &mut self,
+            _: &DismissOverlay,
+            window: &mut Window,
+            cx: &mut Context<Self>,
+        ) {
+            match self.active_modal {
+                ActiveModal::None => {
+                    if !self.search_query.is_empty() {
+                        if let Some(input) = self.search_input.clone() {
+                            input.update(cx, |state, cx| state.set_value("", window, cx));
+                        }
+                        self.clear_search(cx);
+                    } else if self.list_filter != ListFilter::All {
+                        self.list_filter = ListFilter::All;
+                        self.reload_messages_for_current_folder(cx);
+                    }
+                }
+                ActiveModal::Compose => {
+                    // Closing the composer keeps what was typed, because a draft is the
+                    // user's work; Discard is the explicit way to throw it away.
+                    self.save_draft(cx);
+                    self.active_modal = ActiveModal::None;
+                    self.compose_inputs = None;
+                }
+                _ => {
+                    self.active_modal = ActiveModal::None;
+                    self.compose_inputs = None;
+                    self.command_palette.close();
+                }
+            }
+            cx.notify();
+        }
+
+        /// Jump to a folder by its special role, or say the account has none.
+        fn go_to_role_folder(&mut self, role: vespetrel_core::FolderRole, cx: &mut Context<Self>) {
+            self.active_tab = ActiveViewTab::Mail;
+            match self
+                .folders
+                .iter()
+                .find(|f| f.role == role)
+                .map(|f| f.id.clone())
+            {
+                Some(id) => self.select_folder(id, cx),
+                None => {
+                    self.show_toast(format!("No {role:?} folder on this account"), true, cx);
+                }
+            }
+        }
+
+        /// Read the file at `compose_attach_path` and add it to the outgoing message.
+        ///
+        /// Reports the specific failure rather than silently attaching nothing: a path that
+        /// does not exist, one that is not a file, a directory, a file too large to send, and
+        /// a read that failed are five different problems with five different fixes.
+        fn attach_from_path_input(&mut self, cx: &mut Context<Self>) {
+            let raw = self.compose_attach_path.trim().to_string();
+            if raw.is_empty() {
+                self.show_toast("Enter the full path of the file to attach", true, cx);
+                return;
+            }
+            let expanded = match expand_home(&raw) {
+                Some(p) => p,
+                None => {
+                    self.show_toast(
+                        "Path starts with ~ but no home directory could be resolved",
+                        true,
+                        cx,
+                    );
+                    return;
+                }
+            };
+            let meta = match std::fs::metadata(&expanded) {
+                Ok(m) => m,
+                Err(e) => {
+                    self.show_toast(format!("Cannot read {expanded}: {e}"), true, cx);
+                    return;
+                }
+            };
+            if meta.is_dir() {
+                self.show_toast(format!("{expanded} is a folder, not a file"), true, cx);
+                return;
+            }
+            // 25 MB is the common SMTP server ceiling; catching it here beats a
+            // bounce after the message has already been composed.
+            const MAX_ATTACHMENT_BYTES: u64 = 25 * 1024 * 1024;
+            if meta.len() > MAX_ATTACHMENT_BYTES {
+                self.show_toast(
+                    format!(
+                        "{} is {:.1} MB; the limit is 25 MB",
+                        file_name_of(&expanded),
+                        meta.len() as f64 / (1024.0 * 1024.0)
+                    ),
+                    true,
+                    cx,
+                );
+                return;
+            }
+            let data = match std::fs::read(&expanded) {
+                Ok(d) => d,
+                Err(e) => {
+                    self.show_toast(format!("Cannot read {expanded}: {e}"), true, cx);
+                    return;
+                }
+            };
+            let filename = file_name_of(&expanded);
+            let content_type = guess_content_type(&filename).to_string();
+            self.compose_attachments
+                .push(vespetrel_core::message::ComposedAttachment {
+                    filename: filename.clone(),
+                    content_type,
+                    data,
+                });
+            self.compose_attach_path.clear();
+            self.show_toast(format!("Attached {filename}"), false, cx);
+            cx.notify();
+        }
+
+        /// Open an empty compose window.
+        fn open_compose(&mut self, cx: &mut Context<Self>) {
+            self.active_tab = ActiveViewTab::Mail;
+            self.compose_reply_to_id = None;
+            self.compose_draft_id = None;
+            self.compose_state.is_markdown_mode = false;
+            self.compose_to.clear();
+            self.compose_subject.clear();
+            self.compose_body.clear();
+            self.compose_attachments.clear();
+            self.active_modal = ActiveModal::Compose;
+            cx.notify();
+        }
+
+        /// Open a reply, quoting the message the reader is showing.
+        ///
+        /// A plain reply needs nothing but the sender, so it opens immediately. A reply
+        /// all has to read the stored recipients, which is a database round-trip: the
+        /// window is populated now and the recipient field is filled when the read
+        /// lands. A failure is reported in a toast rather than degrading the reply to a
+        /// reply-to-sender, which is what a user would not notice until it was sent.
+        fn open_reply(&mut self, all_recipients: bool, cx: &mut Context<Self>) {
+            let Some(msg) = self.selected_message().cloned() else {
+                return;
+            };
+            self.active_tab = ActiveViewTab::Mail;
+            self.compose_reply_to_id = Some(msg.id.clone());
+            self.compose_draft_id = None;
+            self.compose_to = msg.from_address.clone();
+            self.compose_subject = prefixed_subject(msg.subject.as_deref(), "Re:");
+            let quote = self.message_viewer.generate_reply_text();
+            self.compose_body = quote.trim_start_matches('\n').to_string();
+            self.compose_state.is_markdown_mode = false;
+            self.compose_attachments.clear();
+            self.active_modal = ActiveModal::Compose;
+            cx.notify();
+
+            if !all_recipients {
+                return;
+            }
+
+            let recipients = self.fetch_recipients_of(msg.id.clone());
+            cx.spawn(async move |this, cx| match recipients.await {
+                Ok(list) => {
+                    let joined = list.join(", ");
+                    let _ = this.update(cx, |view, cx| {
+                        view.compose_to = joined;
+                        cx.notify();
+                    });
+                }
+                Err(reason) => {
+                    let _ = this.update(cx, |view, cx| {
+                        view.show_toast(
+                            format!(
+                                "Recipients unavailable ({reason}); replying to the sender only"
+                            ),
+                            true,
+                            cx,
+                        );
+                    });
+                }
+            })
+            .detach();
+        }
+
+        /// Read a stored message's To and Cc addresses, off the UI thread.
+        ///
+        /// `MessageSummary` carries no recipient list, so Reply All has to come back to
+        /// storage. `Ok(None)` means the body is gone or unreadable, which the caller
+        /// reports rather than quietly sending a reply-all that is a reply.
+        fn fetch_recipients_of(
+            &mut self,
+            message_id: String,
+        ) -> impl std::future::Future<Output = Result<Vec<String>, String>> + use<> {
+            let pool = self.storage_pool.clone();
+            async move {
+                let Some(pool) = pool else {
+                    return Err("No local store for this account".into());
+                };
+                let conn = pool
+                    .get()
+                    .await
+                    .map_err(|e| format!("Local store unavailable: {e}"))?;
+                let stored = conn
+                    .interact(move |c| vespetrel_storage::repo::get_message(c, &message_id).ok())
+                    .await
+                    .map_err(|e| e.to_string())?
+                    .flatten()
+                    .ok_or_else(|| "Message body is no longer stored locally".to_string())?;
+                let mut all = stored.to_addresses;
+                all.extend(stored.cc_addresses);
+                all.retain(|a| !a.email.is_empty());
+                if all.is_empty() {
+                    return Err("This message has no stored recipients".into());
+                }
+                Ok(all.into_iter().map(|a| a.email).collect())
+            }
+        }
+
+        /// Open a forward. The original's attachments are carried over, ready to send.
+        fn open_forward(&mut self, cx: &mut Context<Self>) {
+            let Some(msg) = self.selected_message().cloned() else {
+                return;
+            };
+            self.active_tab = ActiveViewTab::Mail;
+            self.compose_reply_to_id = None;
+            self.compose_draft_id = None;
+            self.compose_to.clear();
+            self.compose_subject = prefixed_subject(msg.subject.as_deref(), "Fwd:");
+            self.compose_body = format!(
+                "---------- Forwarded message ----------\nFrom: {}\nSubject: {}\n\n{}",
+                msg.from_address,
+                msg.subject.as_deref().unwrap_or("(No Subject)"),
+                msg.snippet.as_deref().unwrap_or("")
+            );
+            self.compose_state.is_markdown_mode = false;
+            self.compose_attachments.clear();
+            self.active_modal = ActiveModal::Compose;
+            cx.notify();
+        }
+
+        /// Transient status messages.
+        ///
+        /// A notification is an overlay, so it uses the popover surface rather than a
+        /// saturated success/danger fill: a full-strength status colour behind every
+        /// confirmation made the toast compete with the message the user was reading, and
+        /// the dark green/red pair was unreadable in light mode. The status is carried by
+        /// the icon and the text; the surface stays neutral.
         fn render_toasts(&self, cx: &Context<Self>) -> impl IntoElement {
             div()
                 .absolute()
+                // Clear of the status bar, and inset from the window edge by the scale.
                 .bottom(px(36.0))
                 .right(px(24.0))
                 .flex()
                 .flex_col()
                 .gap(px(8.0))
                 .children(self.toasts.iter().map(|t| {
+                    let accent = if t.is_error {
+                        cx.theme().danger
+                    } else {
+                        cx.theme().success
+                    };
                     let mut toast_div = div()
                         .id(ElementId::Name(format!("toast-{}", t.id).into()))
                         .flex()
@@ -1844,32 +3175,23 @@ pub mod gpui_app {
                         .px(px(14.0))
                         .py(px(8.0))
                         .rounded_md()
-                        .bg(if t.is_error {
-                            rgb(0x450a0a)
-                        } else {
-                            rgb(0x064e3b)
-                        })
+                        .bg(cx.theme().popover)
+                        .text_color(cx.theme().popover_foreground)
                         .border_1()
-                        .border_color(if t.is_error {
-                            rgb(0xef4444)
-                        } else {
-                            rgb(0x10b981)
-                        })
+                        .border_color(cx.theme().border)
+                        .border_l_2()
                         .text_xs()
-                        .text_color(if t.is_error {
-                            rgb(0xfca5a5)
-                        } else {
-                            rgb(0xa7f3d0)
-                        })
+                        .shadow_lg()
                         .child(
                             Icon::new(if t.is_error {
                                 IconName::TriangleAlert
                             } else {
                                 IconName::Check
                             })
-                            .small(),
+                            .small()
+                            .text_color(accent),
                         )
-                        .child(div().child(t.message.clone()));
+                        .child(div().flex_1().min_w(px(0.0)).child(elide(&t.message, 200)));
 
                     if let Some(ref outbox_id) = t.undo_outbox_id {
                         let out_id = outbox_id.clone();
@@ -1878,6 +3200,7 @@ pub mod gpui_app {
                                 .small()
                                 .icon(IconName::Undo)
                                 .label("Undo")
+                                .tooltip("Undo send")
                                 .on_click(cx.listener(move |this, _, _, cx| {
                                     this.undo_send(&out_id, cx);
                                 })),
@@ -1889,6 +3212,8 @@ pub mod gpui_app {
                         Button::new(ElementId::Name(format!("dismiss-{}", t.id).into()))
                             .ghost()
                             .icon(IconName::Close)
+                            .tooltip("Dismiss")
+                            .accessibility_label("Dismiss notification")
                             .on_click(cx.listener(move |this, _, _, cx| {
                                 this.dismiss_toast(&toast_id, cx);
                             })),
@@ -1896,11 +3221,7 @@ pub mod gpui_app {
                 }))
         }
         fn render_header(&self, cx: &Context<Self>) -> impl IntoElement {
-            let search_display = if self.search_query.is_empty() {
-                "Search messages, senders, attachments (FTS5)…".to_string()
-            } else {
-                self.search_query.clone()
-            };
+            let _ = &self.search_query;
 
             let nav_tabs = [
                 (ActiveViewTab::Mail, IconName::Inbox, "Mail"),
@@ -1919,9 +3240,9 @@ pub mod gpui_app {
                     .w_full()
                     .h(px(48.0))
                     .px(px(16.0))
-                    .bg(rgb(0x131722))
+                    .bg(cx.theme().title_bar)
                     .border_b_1()
-                    .border_color(rgb(0x1f293d))
+                    .border_color(cx.theme().title_bar_border)
                     .child(
                         div()
                             .flex()
@@ -1936,8 +3257,8 @@ pub mod gpui_app {
                                     .w(px(28.0))
                                     .h(px(28.0))
                                     .rounded_md()
-                                    .bg(rgb(0x3b82f6))
-                                    .text_color(rgb(0xffffff))
+                                    .bg(cx.theme().primary)
+                                    .text_color(cx.theme().primary_foreground)
                                     .font_weight(FontWeight::BOLD)
                                     .text_sm()
                                     .child("V"),
@@ -1946,7 +3267,7 @@ pub mod gpui_app {
                                 div()
                                     .font_weight(FontWeight::BOLD)
                                     .text_sm()
-                                    .text_color(rgb(0xf8fafc))
+                                    .text_color(cx.theme().foreground)
                                     .child("Vespetrel"),
                             )
                             .child(TabBar::new("header-nav-tabbar").children(
@@ -1970,59 +3291,57 @@ pub mod gpui_app {
                                 }),
                             )),
                     )
+                    // A real text field, not a display surface. The old control was a
+                    // `div` that showed `search_query` and, on click, opened the command
+                    // palette instead: there was no way to type a query, and
+                    // `execute_fts_search` had no caller at all.
                     .child(
                         div()
                             .id("header-search-bar")
                             .flex()
                             .flex_row()
                             .items_center()
-                            .justify_between()
                             .w(px(420.0))
                             .h(px(32.0))
                             .px(px(12.0))
                             .rounded_md()
-                            .bg(rgb(0x1a202e))
+                            .bg(cx.theme().input)
                             .border_1()
                             .border_color(if self.search_query.is_empty() {
-                                rgb(0x2d3748)
+                                cx.theme().border
                             } else {
-                                rgb(0x3b82f6)
+                                cx.theme().primary
                             })
                             .gap(px(8.0))
                             .child(
-                                div()
-                                    .id("search-bar-trigger")
-                                    .flex()
-                                    .flex_row()
-                                    .flex_1()
-                                    .items_center()
-                                    .gap(px(8.0))
-                                    .on_click(cx.listener(|this, _, _, cx| {
-                                        this.command_palette.open();
-                                        this.active_modal = ActiveModal::CommandPalette;
-                                        cx.notify();
-                                    }))
-                                    .child(
-                                        Icon::new(IconName::Search)
-                                            .small()
-                                            .text_color(rgb(0x94a3b8)),
-                                    )
-                                    .child(
-                                        div()
-                                            .text_xs()
-                                            .text_color(if self.search_query.is_empty() {
-                                                rgb(0x64748b)
-                                            } else {
-                                                rgb(0x60a5fa)
-                                            })
-                                            .child(search_display),
-                                    ),
+                                Icon::new(IconName::Search)
+                                    .small()
+                                    .text_color(cx.theme().muted_foreground),
+                            )
+                            .child(
+                                self.search_input
+                                    .as_ref()
+                                    .map(|input| {
+                                        component::input::Input::new(input)
+                                            .appearance(false)
+                                            .cleanable(true)
+                                            .aria_label("Search messages")
+                                            .into_any_element()
+                                    })
+                                    .unwrap_or_else(|| div().into_any_element()),
                             )
                             .children((!self.search_query.is_empty()).then(|| {
                                 Button::new("btn-clear-search")
                                     .ghost()
                                     .icon(IconName::Close)
-                                    .on_click(cx.listener(|this, _, _, cx| {
+                                    .tooltip("Clear search")
+                                    .accessibility_label("Clear search")
+                                    .on_click(cx.listener(|this, _, window, cx| {
+                                        if let Some(input) = this.search_input.clone() {
+                                            input.update(cx, |state, cx| {
+                                                state.set_value("", window, cx)
+                                            });
+                                        }
                                         this.clear_search(cx);
                                     }))
                             })),
@@ -2034,6 +3353,7 @@ pub mod gpui_app {
                             .items_center()
                             .gap(px(8.0))
                             .child(
+                                // The one emphasised commitment in the window.
                                 Button::new("btn-header-compose")
                                     .primary()
                                     .icon(IconName::Plus)
@@ -2045,42 +3365,80 @@ pub mod gpui_app {
                             )
                             .child(
                                 Button::new("btn-header-sync")
-                                    .secondary()
+                                    .ghost()
                                     .icon(IconName::RotateCw)
                                     .label("Sync")
+                                    .tooltip("Check mail for new messages")
                                     .on_click(cx.listener(|this, _, _, cx| {
                                         this.trigger_sync(cx);
                                     })),
                             )
+                            // The shortcut is presented as a key, not as the button's name.
+                            // A button labelled "⌘K" announced itself as a glyph, told the
+                            // user nothing about the command, and showed the macOS notation
+                            // on every platform.
                             .child(
                                 Button::new("btn-header-palette")
-                                    .secondary()
-                                    .label("⌘K")
+                                    .ghost()
+                                    .label("Commands")
+                                    .tooltip("Search commands")
+                                    .accessibility_label("Open the command palette")
                                     .on_click(cx.listener(|this, _, _, cx| {
                                         this.active_modal = ActiveModal::CommandPalette;
                                         cx.notify();
-                                    })),
+                                    }))
+                                    .child(div().child(Kbd::new(command_palette_keystroke()))),
                             )
                             .child(
                                 Popover::new("header-info-popover")
                                     .trigger(
-                                        Button::new("btn-header-info").ghost().icon(IconName::Info),
+                                        Button::new("btn-header-info")
+                                            .ghost()
+                                            .icon(IconName::Info)
+                                            .tooltip("About Vespetrel")
+                                            .accessibility_label("About Vespetrel"),
                                     )
                                     .content(|_, _, cx| {
                                         div()
-                                            .p(px(10.0))
-                                            .bg(cx.theme().background)
+                                            .flex()
+                                            .flex_col()
+                                            .gap(px(4.0))
+                                            .p(px(12.0))
+                                            .max_w(px(260.0))
+                                            .bg(cx.theme().popover)
+                                            .text_color(cx.theme().popover_foreground)
                                             .border_1()
-                                            .border_color(rgb(0x2d3748))
+                                            .border_color(cx.theme().border)
                                             .rounded_md()
                                             .text_xs()
-                                            .child("Vespetrel v0.1.0 • Pure Rust Desktop Client")
+                                            .child(
+                                                div()
+                                                    .font_weight(FontWeight::SEMIBOLD)
+                                                    .child("Vespetrel 0.1.0"),
+                                            )
+                                            .child(
+                                                div()
+                                                    .text_color(cx.theme().muted_foreground)
+                                                    .child(
+                                                        "Mail, calendar and contacts on a local SQLite store.",
+                                                    ),
+                                            )
                                     }),
                             ),
                     ),
             )
         }
 
+        /// App-level destination rail: Mail, Calendar, Contacts, Tasks, Settings.
+        ///
+        /// Icon-only on purpose. At 56 px the old label under each icon was clipped
+        /// ("Calendar" does not fit the lane), and an unreadable label is worse than none.
+        /// Discovery and naming are carried by the labelled `TabBar` in the header, and
+        /// every item here gets a tooltip and an accessible name.
+        ///
+        /// The active item is a quiet `ghost` button with `toggled` set, not `primary`:
+        /// selection is not a commitment, and spending the one primary emphasis on
+        /// navigation would compete with Compose, which is the actual primary task.
         fn render_sidebar_tabs(&self, cx: &Context<Self>) -> impl IntoElement {
             let tabs = [
                 (ActiveViewTab::Mail, IconName::Inbox, "Mail"),
@@ -2093,36 +3451,32 @@ pub mod gpui_app {
             div()
                 .flex()
                 .flex_col()
-                .w(px(56.0))
+                .w(px(48.0))
                 .h_full()
-                .bg(rgb(0x11141c))
+                .bg(cx.theme().sidebar)
                 .border_r_1()
-                .border_color(rgb(0x1f293d))
+                .border_color(cx.theme().sidebar_border)
+                .flex_shrink_0()
                 .items_center()
-                .py(px(12.0))
-                .gap(px(8.0))
+                .py(px(8.0))
+                .gap(px(4.0))
                 .children(tabs.into_iter().map(|(tab, icon, label)| {
                     let is_active = self.active_tab == tab;
-                    let mut btn =
-                        Button::new(ElementId::Name(format!("tab-item-{}", label).into()))
-                            .child(
-                                div()
-                                    .flex()
-                                    .flex_col()
-                                    .items_center()
-                                    .justify_center()
-                                    .gap(px(2.0))
-                                    .child(Icon::new(icon).small())
-                                    .child(div().text_xs().child(label)),
-                            )
-                            .on_click(cx.listener(move |this, _, _, cx| {
-                                this.active_tab = tab;
-                                cx.notify();
-                            }));
-                    if is_active {
-                        btn = btn.primary();
-                    }
-                    btn
+                    let color = if is_active {
+                        cx.theme().sidebar_accent_foreground
+                    } else {
+                        cx.theme().sidebar_foreground
+                    };
+                    Button::new(ElementId::Name(format!("nav-rail-{}", label).into()))
+                        .ghost()
+                        .icon(Icon::new(icon).small().text_color(color))
+                        .toggled(is_active)
+                        .tooltip(label)
+                        .accessibility_label(label)
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.active_tab = tab;
+                            cx.notify();
+                        }))
                 }))
         }
 
@@ -2135,16 +3489,19 @@ pub mod gpui_app {
                 .overflow_hidden()
                 .child(match self.active_tab {
                     ActiveViewTab::Mail => self.render_mail_workspace(cx).into_any_element(),
-                    ActiveViewTab::Calendar => self.render_calendar_view().into_any_element(),
-                    ActiveViewTab::Contacts => self.render_contacts_view().into_any_element(),
-                    ActiveViewTab::Tasks => self.render_tasks_view().into_any_element(),
+                    ActiveViewTab::Calendar => self.render_calendar_view(cx).into_any_element(),
+                    ActiveViewTab::Contacts => self.render_contacts_view(cx).into_any_element(),
+                    ActiveViewTab::Tasks => self.render_tasks_view(cx).into_any_element(),
                     ActiveViewTab::Settings => self.render_settings_view(cx).into_any_element(),
                 })
         }
 
         fn render_mail_workspace(&self, cx: &Context<Self>) -> impl IntoElement {
             h_resizable("mail-workspace-panels")
-                .child(self.render_folder_tree(cx).into_any_element())
+                .children(
+                    self.folder_tree_visible
+                        .then(|| self.render_folder_tree(cx).into_any_element()),
+                )
                 .child(self.render_message_list_pane(cx).into_any_element())
                 .child(self.render_message_reader_pane(cx).into_any_element())
         }
@@ -2155,11 +3512,12 @@ pub mod gpui_app {
                 .flex_col()
                 .w(px(220.0))
                 .h_full()
-                .bg(rgb(0x131722))
+                .flex_shrink_0()
+                .bg(cx.theme().sidebar)
                 .border_r_1()
-                .border_color(rgb(0x1f293d))
+                .border_color(cx.theme().sidebar_border)
                 .p(px(12.0))
-                .gap(px(14.0))
+                .gap(px(12.0))
                 .child(
                     div()
                         .flex()
@@ -2169,9 +3527,9 @@ pub mod gpui_app {
                         .child(
                             div()
                                 .text_xs()
-                                .font_weight(FontWeight::BOLD)
-                                .text_color(rgb(0x94a3b8))
-                                .child("ACCOUNTS & FOLDERS"),
+                                .font_weight(FontWeight::SEMIBOLD)
+                                .text_color(cx.theme().muted_foreground)
+                                .child("Accounts"),
                         )
                         .child(
                             Button::new("btn-add-account")
@@ -2179,6 +3537,7 @@ pub mod gpui_app {
                                 .label("Add")
                                 .ghost()
                                 .small()
+                                .tooltip("Add account")
                                 .on_click(cx.listener(|this, _, _, cx| {
                                     this.login_wizard = LoginWizardState::new();
                                     this.wizard_inputs = None;
@@ -2195,8 +3554,8 @@ pub mod gpui_app {
                             .flex_col()
                             .p(px(8.0))
                             .rounded_md()
-                            .bg(rgb(0x181f2f))
-                            .hover(|s| s.bg(rgb(0x1e293b)))
+                            .bg(cx.theme().muted)
+                            .hover(|s| s.bg(cx.theme().accent))
                             .on_click(cx.listener(|this, _, _, cx| {
                                 this.login_wizard = LoginWizardState::new();
                                 this.wizard_inputs = None;
@@ -2207,14 +3566,14 @@ pub mod gpui_app {
                                 div()
                                     .text_xs()
                                     .font_weight(FontWeight::SEMIBOLD)
-                                    .text_color(rgb(0x94a3b8))
+                                    .text_color(cx.theme().muted_foreground)
                                     .child("No accounts configured"),
                             )
                             .child(
                                 div()
                                     .text_xs()
-                                    .text_color(rgb(0x60a5fa))
-                                    .child("Click '+ Add' to connect email"),
+                                    .text_color(cx.theme().muted_foreground)
+                                    .child("Use Add to connect an email account"),
                             ),
                     ]
                 } else {
@@ -2231,7 +3590,7 @@ pub mod gpui_app {
                                 .justify_between()
                                 .p(px(8.0))
                                 .rounded_md()
-                                .bg(rgb(0x181f2f))
+                                .bg(cx.theme().muted)
                                 .child(
                                     div()
                                         .flex()
@@ -2240,14 +3599,14 @@ pub mod gpui_app {
                                             div()
                                                 .text_xs()
                                                 .font_weight(FontWeight::SEMIBOLD)
-                                                .text_color(rgb(0xf8fafc))
+                                                .text_color(cx.theme().foreground)
                                                 .child(acc.email.clone()),
                                         )
                                         .child(
                                             div()
                                                 .text_xs()
-                                                .text_color(rgb(0x38bdf8))
-                                                .child(format!("{:?} • Active", acc.provider_type)),
+                                                .text_color(cx.theme().muted_foreground)
+                                                .child(format!("{:?}", acc.provider_type)),
                                         ),
                                 )
                                 .child(
@@ -2257,6 +3616,8 @@ pub mod gpui_app {
                                     .ghost()
                                     .danger()
                                     .icon(IconName::Delete)
+                                    .tooltip(format!("Remove {}", acc.email))
+                                    .accessibility_label(format!("Remove {}", acc.email))
                                     .on_click(cx.listener(
                                         move |this, _, _, cx| {
                                             this.delete_account(&acc_id_clone, cx);
@@ -2266,10 +3627,12 @@ pub mod gpui_app {
                         })
                         .collect()
                 })
-                .child(div().flex().flex_col().gap(px(4.0)).children({
-                    let mut folder_elements = Vec::new();
+                .child({
+                    // One row shape for every destination, so the two branches return the same
+                    // element type and the tree cannot drift.
+                    let mut folder_elements: Vec<AnyElement> = Vec::new();
 
-                    // Unified Inbox Button
+                    // Unified Inbox
                     let unified_unread: i64 = self
                         .folders
                         .iter()
@@ -2278,53 +3641,20 @@ pub mod gpui_app {
                         .sum();
 
                     folder_elements.push(
-                        div()
-                            .id("folder-unified-inbox")
-                            .flex()
-                            .flex_row()
-                            .items_center()
-                            .justify_between()
-                            .px(px(10.0))
-                            .py(px(6.0))
-                            .rounded_md()
-                            .bg(if self.is_unified_inbox {
-                                rgb(0x1e293b)
-                            } else {
-                                rgb(0x00000000)
-                            })
-                            .text_color(if self.is_unified_inbox {
-                                rgb(0x60a5fa)
-                            } else {
-                                rgb(0xcbd5e1)
-                            })
-                            .on_click(cx.listener(|this, _, _, cx| {
+                        self.render_folder_row(
+                            FolderRow {
+                                id: ElementId::Name("folder-unified-inbox".into()),
+                                icon: IconName::Inbox,
+                                label: "Unified Inbox",
+                                unread: unified_unread,
+                                is_selected: self.is_unified_inbox,
+                            },
+                            cx,
+                            cx.listener(|this, _, _, cx| {
                                 this.select_unified_inbox(cx);
-                            }))
-                            .child(
-                                div()
-                                    .flex()
-                                    .flex_row()
-                                    .items_center()
-                                    .gap(px(8.0))
-                                    .child(Icon::new(IconName::Inbox).small())
-                                    .child(
-                                        div()
-                                            .text_xs()
-                                            .font_weight(if self.is_unified_inbox {
-                                                FontWeight::BOLD
-                                            } else {
-                                                FontWeight::NORMAL
-                                            })
-                                            .child("Unified Inbox"),
-                                    ),
-                            )
-                            .child(if unified_unread > 0 {
-                                Badge::new()
-                                    .count(unified_unread as usize)
-                                    .into_any_element()
-                            } else {
-                                div().into_any_element()
                             }),
+                        )
+                        .into_any_element(),
                     );
 
                     // Individual Folders
@@ -2337,177 +3667,300 @@ pub mod gpui_app {
                                 && (self.selected_folder_id.as_deref() == Some(&f.id)
                                     || self.selected_folder_id.as_deref() == Some(&f.remote_id));
                             let folder_id_clone = f.id.clone();
-                            let icon = NavigationTree::folder_icon(&f.role);
-                            let count = f.unread_count;
-
-                            div()
-                                .id(ElementId::Name(format!("folder-{}", f.id).into()))
-                                .flex()
-                                .flex_row()
-                                .items_center()
-                                .justify_between()
-                                .px(px(10.0))
-                                .py(px(6.0))
-                                .rounded_md()
-                                .bg(if is_selected {
-                                    rgb(0x1e293b)
-                                } else {
-                                    rgb(0x00000000)
-                                })
-                                .text_color(if is_selected {
-                                    rgb(0x60a5fa)
-                                } else {
-                                    rgb(0xcbd5e1)
-                                })
-                                .on_click(cx.listener(move |this, _, _, cx| {
+                            self.render_folder_row(
+                                FolderRow {
+                                    id: ElementId::Name(format!("folder-{}", f.id).into()),
+                                    icon: NavigationTree::folder_icon(&f.role),
+                                    label: &f.name,
+                                    unread: f.unread_count,
+                                    is_selected,
+                                },
+                                cx,
+                                cx.listener(move |this, _, _, cx| {
                                     this.select_folder(folder_id_clone.clone(), cx);
-                                }))
-                                .child(
-                                    div()
-                                        .flex()
-                                        .flex_row()
-                                        .items_center()
-                                        .gap(px(8.0))
-                                        .child(Icon::new(icon).small())
-                                        .child(
-                                            div()
-                                                .text_xs()
-                                                .font_weight(if is_selected {
-                                                    FontWeight::BOLD
-                                                } else {
-                                                    FontWeight::NORMAL
-                                                })
-                                                .child(f.name.clone()),
-                                        ),
-                                )
-                                .child(if count > 0 {
-                                    Badge::new().count(count as usize).into_any_element()
-                                } else {
-                                    div().into_any_element()
-                                })
+                                }),
+                            )
+                            .into_any_element()
                         })
                         .collect::<Vec<_>>();
 
                     folder_elements.extend(individual_folders);
-                    folder_elements
-                }))
+                    div()
+                        .flex()
+                        .flex_col()
+                        .gap(px(4.0))
+                        .children(folder_elements)
+                })
         }
 
-        fn render_message_row(
+        /// One row in the folder tree.
+        ///
+        /// Defined once so "Unified Inbox" and every real folder cannot drift apart in
+        /// selection, hover, icon slot or padding. The icon occupies a fixed-width slot and
+        /// the unread badge a fixed trailing lane, so a row with no mail keeps exactly the
+        /// same label position as one with — otherwise the whole tree shifts as counts
+        /// change.
+        fn render_folder_row(
             &self,
-            row: &ThreadedMessage<'_>,
+            row: FolderRow<'_>,
             cx: &Context<Self>,
+            on_select: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
         ) -> impl IntoElement {
-            let msg = row.summary;
+            let FolderRow {
+                id,
+                icon,
+                label,
+                unread,
+                is_selected,
+            } = row;
+            let space = cx.theme().spacing_tokens();
+            let fg = if is_selected {
+                cx.theme().sidebar_accent_foreground
+            } else {
+                cx.theme().sidebar_foreground
+            };
+            div()
+                .id(id)
+                .flex()
+                .flex_row()
+                .items_center()
+                .justify_between()
+                .gap(space.sm)
+                .px(space.sm)
+                .py(space.xs)
+                .rounded_md()
+                .bg(if is_selected {
+                    cx.theme().sidebar_accent
+                } else {
+                    gpui_kit::gpui::transparent_black()
+                })
+                .hover(|s| s.bg(cx.theme().accent))
+                .text_color(fg)
+                .on_click(on_select)
+                // Fixed leading slot: the label starts at the same offset on every row.
+                .child(
+                    div()
+                        .w(px(16.0))
+                        .flex_shrink_0()
+                        .child(Icon::new(icon).small()),
+                )
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w(px(0.0))
+                        .text_xs()
+                        .overflow_hidden()
+                        .text_ellipsis()
+                        .font_weight(if is_selected {
+                            FontWeight::SEMIBOLD
+                        } else {
+                            FontWeight::NORMAL
+                        })
+                        // Server-supplied folder names are unbounded (a server can nest
+                        // "INBOX.Rechnungen.2026.Q1"), so truncate on a character boundary
+                        // rather than letting one long name widen the whole tree.
+                        .child(elide(label, 28)),
+                )
+                // Fixed trailing lane: a zero count keeps its space.
+                .child(
+                    div()
+                        .w(px(28.0))
+                        .flex_shrink_0()
+                        .flex()
+                        .justify_end()
+                        .child(if unread > 0 {
+                            Badge::new().count(unread as usize).into_any_element()
+                        } else {
+                            div().into_any_element()
+                        }),
+                )
+        }
+
+        fn render_message_row(&self, row: &CachedRow, cx: &Context<Self>) -> impl IntoElement {
+            let msg = &row.summary;
             let is_selected = self.selected_message_id.as_deref() == Some(&msg.id);
             let sender = msg.from_name.as_deref().unwrap_or(&msg.from_address);
-            let subject = msg.subject.as_deref().unwrap_or("(No Subject)");
+            let subject = msg.subject.as_deref().unwrap_or("(No subject)");
             let snippet = msg.snippet.as_deref().unwrap_or("");
             let date_str = msg.sent_at.format("%b %d, %H:%M").to_string();
             let msg_id = msg.id.clone();
             let is_child = row.is_child;
             let thread_count = row.thread_count;
+            // Read once here: `msg_id` is moved into the star button's click handler
+            // below, so the row cannot be borrowed for the flag afterwards.
+            let star_on = msg.is_flagged;
+            let star_id = ElementId::Name(format!("btn-star-{}", msg_id).into());
+            // The row's click handler takes `msg_id` by move, so the star button
+            // needs its own copy.
+            let star_target = msg_id.clone();
+            let space = cx.theme().spacing_tokens();
 
-            let pad_left = if is_child { px(24.0) } else { px(10.0) };
+            // Thread children are indented by one level and the nesting is real, so the
+            // indent communicates hierarchy rather than decoration.
+            let pad_left = if is_child { space.xl } else { space.md };
+
+            let is_in_range = self.selection.is_selected(&msg.id);
 
             let mut item_div = div()
                 .id(ElementId::Name(format!("msg-item-{}", msg_id).into()))
                 .flex()
                 .flex_col()
                 .pl(pad_left)
-                .pr(px(10.0))
+                .pr(space.md)
                 .py(match self.row_density {
-                    MessageRowDensity::Compact => px(4.0),
-                    MessageRowDensity::Comfortable => px(8.0),
-                    MessageRowDensity::Roomy => px(12.0),
+                    MessageRowDensity::Compact => space.xs,
+                    MessageRowDensity::Comfortable => space.sm,
+                    MessageRowDensity::Roomy => space.md,
                 })
                 .border_b_1()
-                .border_color(rgb(0x182030))
+                .border_color(cx.theme().border)
+                // Two distinct states, two distinct surfaces. The current row is
+                // filled; a row in the bulk range carries a left rule, so a range of
+                // eight messages is legible without eight filled bars fighting the
+                // current row for attention.
                 .bg(if is_selected {
-                    rgb(0x1e2a42)
-                } else if !msg.is_read {
-                    rgb(0x141a29)
+                    cx.theme().selection
                 } else {
-                    rgb(0x10141d)
+                    cx.theme().background
+                })
+                .border_l_2()
+                .border_color(if is_in_range {
+                    cx.theme().primary
+                } else {
+                    gpui_kit::gpui::transparent_black()
                 })
                 .hover(|s| {
                     s.bg(if is_selected {
-                        rgb(0x23314d)
+                        cx.theme().accent
                     } else {
-                        rgb(0x182030)
+                        cx.theme().muted
                     })
                 })
-                .on_click(cx.listener(move |this, _, _, cx| {
+                // A plain click replaces the range; Shift- or Ctrl-click extends it, which is the
+                // desktop convention for building a multi-row target.
+                .on_click(cx.listener(move |this, event: &ClickEvent, _, cx| {
+                    let modifiers = event.modifiers();
+                    let extend = modifiers.shift || modifiers.control;
+                    if extend {
+                        // The row being clicked is not current yet, so the range is
+                        // extended from the row that was.
+                        this.toggle_selection_of(&msg_id);
+                    } else {
+                        this.selection.clear();
+                    }
                     this.select_message(msg_id.clone(), cx);
                 }));
 
+            // Unread is carried by weight and the leading dot, not by a row tint. A tinted
+            // unread row made the whole list a field of colour and, in light mode, inverted
+            // the reading order.
             let header_row = div()
                 .flex()
                 .flex_row()
                 .items_center()
                 .justify_between()
+                .gap(space.sm)
+                // Fixed leading lane. The old code rendered a `"↳"` glyph for children and a
+                // 6px dot otherwise, so the sender label sat at a different offset on every
+                // row of a thread and the column could not be scanned vertically.
                 .child(
                     div()
-                        .flex()
-                        .flex_row()
-                        .items_center()
-                        .gap(px(6.0))
+                        .w(px(10.0))
+                        .flex_shrink_0()
+                        .justify_center()
                         .child(if is_child {
-                            div().text_xs().text_color(rgb(0x64748b)).child("↳")
-                        } else if !msg.is_read {
-                            div().w(px(6.0)).h(px(6.0)).rounded_full().bg(rgb(0x3b82f6))
-                        } else {
-                            div().w(px(6.0)).h(px(6.0))
-                        })
-                        .child(
                             div()
                                 .text_xs()
-                                .font_weight(if !msg.is_read {
-                                    FontWeight::BOLD
-                                } else {
-                                    FontWeight::MEDIUM
-                                })
-                                .text_color(rgb(0xf1f5f9))
-                                .child(sender.to_string()),
-                        ),
+                                .text_color(cx.theme().muted_foreground)
+                                .child("↳")
+                        } else if !msg.is_read {
+                            div()
+                                .w(px(6.0))
+                                .h(px(6.0))
+                                .rounded_full()
+                                .bg(cx.theme().primary)
+                        } else {
+                            div().w(px(6.0)).h(px(6.0))
+                        }),
                 )
                 .child(
                     div()
+                        .flex_1()
+                        .min_w(px(0.0))
+                        .overflow_hidden()
+                        .text_ellipsis()
+                        .text_xs()
+                        .font_weight(if !msg.is_read {
+                            FontWeight::BOLD
+                        } else {
+                            FontWeight::NORMAL
+                        })
+                        .text_color(cx.theme().foreground)
+                        // A display name is user-supplied and unbounded; truncate on a
+                        // character boundary so a 400-character name cannot push the whole
+                        // row's content out of its lanes.
+                        .child(elide(sender, 60)),
+                )
+                // Fixed trailing lanes in a fixed order, so the date lands on the same
+                // vertical line whether or not a thread count or a flag is present.
+                .child(
+                    div()
+                        .flex_shrink_0()
                         .flex()
                         .flex_row()
                         .items_center()
-                        .gap(px(6.0))
-                        .child(if thread_count > 1 && !is_child {
-                            Badge::new()
-                                .child(
-                                    div()
-                                        .flex()
-                                        .flex_row()
-                                        .items_center()
-                                        .gap(px(3.0))
-                                        .child(Icon::new(IconName::GalleryVerticalEnd).xsmall())
-                                        .child(thread_count.to_string()),
-                                )
-                                .into_any_element()
-                        } else {
-                            div().into_any_element()
-                        })
+                        .gap(space.sm)
+                        .child(div().w(px(16.0)).justify_center().child(
+                            if thread_count > 1 && !is_child {
+                                Badge::new()
+                                    .child(
+                                        div()
+                                            .flex()
+                                            .flex_row()
+                                            .items_center()
+                                            .gap(px(3.0))
+                                            .child(Icon::new(IconName::GalleryVerticalEnd).xsmall())
+                                            .child(thread_count.to_string()),
+                                    )
+                                    .into_any_element()
+                            } else {
+                                div().into_any_element()
+                            },
+                        ))
+                        // A real button. This was a bare `Icon`, so a message could not be starred from
+                        // the list at all: `toggle_flag` existed and had no call site.
                         .child(
-                            div().child(
-                                Icon::new(if msg.is_flagged {
+                            Button::new(star_id)
+                                .ghost()
+                                .xsmall()
+                                .icon(if star_on {
                                     IconName::StarFill
                                 } else {
                                     IconName::Star
                                 })
-                                .xsmall()
-                                .text_color(if msg.is_flagged {
-                                    rgb(0xfbbf24)
+                                .tooltip(if star_on { "Remove star" } else { "Add star" })
+                                .accessibility_label(if star_on {
+                                    "Remove star"
                                 } else {
-                                    rgb(0x475569)
+                                    "Add star"
+                                })
+                                .on_click({
+                                    let star_id = star_target.clone();
+                                    cx.listener(move |this, _, _, cx| {
+                                        this.selection.set_current(star_id.clone());
+                                        this.set_flag(std::slice::from_ref(&star_id), None, cx);
+                                    })
                                 }),
-                            ),
                         )
-                        .child(div().text_xs().text_color(rgb(0x64748b)).child(date_str)),
+                        .child(
+                            div()
+                                .w(px(72.0))
+                                .flex_shrink_0()
+                                .text_xs()
+                                .text_right()
+                                .text_color(cx.theme().muted_foreground)
+                                .child(date_str),
+                        ),
                 );
 
             item_div = item_div.child(header_row);
@@ -2516,51 +3969,59 @@ pub mod gpui_app {
                 item_div = item_div.child(
                     div()
                         .pt(px(2.0))
+                        .pl(px(10.0))
                         .text_xs()
+                        .overflow_hidden()
+                        .text_ellipsis()
                         .font_weight(if !msg.is_read {
                             FontWeight::SEMIBOLD
                         } else {
                             FontWeight::NORMAL
                         })
-                        .text_color(rgb(0xe2e8f0))
-                        .child(subject.to_string()),
+                        .text_color(cx.theme().foreground)
+                        .child(elide(subject, 120)),
                 );
             }
 
-            if self.row_density == MessageRowDensity::Roomy && !snippet.is_empty() {
-                item_div =
-                    item_div.child(div().pt(px(2.0)).text_xs().text_color(rgb(0x94a3b8)).child(
-                        if snippet.len() > 100 {
-                            format!("{}…", &snippet[..100])
-                        } else {
-                            snippet.to_string()
-                        },
-                    ));
-            } else if self.row_density == MessageRowDensity::Comfortable && !snippet.is_empty() {
-                item_div =
-                    item_div.child(div().pt(px(2.0)).text_xs().text_color(rgb(0x94a3b8)).child(
-                        if snippet.len() > 60 {
-                            format!("{}…", &snippet[..60])
-                        } else {
-                            snippet.to_string()
-                        },
-                    ));
+            // One snippet line, truncated on a character boundary.
+            //
+            // The old code did `&snippet[..100]`, which panics whenever the 100th byte falls
+            // inside a multi-byte character. Snippets are attacker- and locale-controlled
+            // ("Rechnung für März — überfällig"), so this crashed the list on ordinary mail.
+            if self.row_density != MessageRowDensity::Compact && !snippet.is_empty() {
+                let max_chars = match self.row_density {
+                    MessageRowDensity::Roomy => 120,
+                    _ => 80,
+                };
+                item_div = item_div.child(
+                    div()
+                        .pt(px(2.0))
+                        .pl(px(10.0))
+                        .text_xs()
+                        .overflow_hidden()
+                        .text_ellipsis()
+                        .text_color(cx.theme().muted_foreground)
+                        .child(elide(snippet, max_chars)),
+                );
             }
 
             item_div
         }
 
         fn render_message_list_pane(&self, cx: &Context<Self>) -> impl IntoElement {
-            let total_count = self.threaded_messages().len();
+            let rows = self.cached_rows();
+            let total_count = rows.len();
             let row_height = self.row_density.row_height_px();
             let sizes: Vec<gpui_kit::gpui::Size<gpui_kit::gpui::Pixels>> = (0..total_count)
                 .map(|_| gpui_kit::gpui::size(px(350.0), px(row_height)))
                 .collect();
             let item_sizes = std::rc::Rc::new(sizes);
+            let selected_count = self.selection.selected_count();
+            let total_shown = total_count;
 
             let sort_label = match self.sort_order {
-                MessageSortOrder::DateDescending => "↓ Date",
-                MessageSortOrder::DateAscending => "↑ Date",
+                MessageSortOrder::DateDescending => "Newest first",
+                MessageSortOrder::DateAscending => "Oldest first",
             };
             let density_label = match self.row_density {
                 MessageRowDensity::Compact => "Compact",
@@ -2571,23 +4032,26 @@ pub mod gpui_app {
             div()
                 .flex()
                 .flex_col()
-                .w(px(350.0))
+                .w(px(360.0))
                 .h_full()
-                .bg(rgb(0x10141d))
+                .flex_shrink_0()
+                .bg(cx.theme().background)
                 .border_r_1()
-                .border_color(rgb(0x1f293d))
+                .border_color(cx.theme().border)
                 .child(
                     div()
                         .flex()
                         .flex_col()
+                        .gap(px(6.0))
+                        .px(px(8.0))
+                        .py(px(8.0))
                         .border_b_1()
-                        .border_color(rgb(0x1f293d))
+                        .border_color(cx.theme().border)
                         .child(
                             div()
                                 .flex()
                                 .flex_row()
                                 .items_center()
-                                .p(px(8.0))
                                 .gap(px(4.0))
                                 .child(self.render_filter_chip("All", None, ListFilter::All, cx))
                                 .child(self.render_filter_chip(
@@ -2615,43 +4079,78 @@ pub mod gpui_app {
                                 .flex_row()
                                 .items_center()
                                 .justify_between()
-                                .px(px(8.0))
-                                .pb(px(6.0))
+                                .gap(px(8.0))
                                 .text_xs()
+                                // Threading is a *view mode*, not a commitment, so it reads as
+                                // a quiet toggle with a persistent pressed state rather than
+                                // a primary button competing with Compose.
                                 .child(
                                     Button::new("btn-toggle-thread")
-                                        .with_variant(if self.is_threaded {
-                                            gpui_kit::component::button::ButtonVariant::Primary
-                                        } else {
-                                            gpui_kit::component::button::ButtonVariant::Secondary
-                                        })
+                                        .ghost()
+                                        .small()
                                         .icon(IconName::GalleryVerticalEnd)
                                         .label("Threaded")
+                                        .toggled(self.is_threaded)
+                                        .tooltip("Group messages into threads")
                                         .on_click(cx.listener(|this, _, _, cx| {
                                             this.toggle_threading(cx);
                                         })),
                                 )
+                                // The bulk range, stated in words as well as by the left
+                                // rule on each row, so it survives a colourless reading.
+                                .when(selected_count > 0, |el| {
+                                    el.child(
+                                        div()
+                                            .flex()
+                                            .flex_row()
+                                            .items_center()
+                                            .gap(px(6.0))
+                                            .child(
+                                                div()
+                                                    .text_xs()
+                                                    .text_color(cx.theme().muted_foreground)
+                                                    .child(format!(
+                                                        "{selected_count} of {total_shown} selected"
+                                                    )),
+                                            )
+                                            .child(
+                                                Button::new("btn-clear-selection")
+                                                    .ghost()
+                                                    .small()
+                                                    .label("Clear")
+                                                    .tooltip("Clear the selected range")
+                                                    .on_click(cx.listener(|this, _, _, cx| {
+                                                        this.selection.clear();
+                                                        cx.notify();
+                                                    })),
+                                            ),
+                                    )
+                                })
+                                // Sort and density are reversible view settings for this
+                                // pane. They stay visible and state-bearing — the label
+                                // states the current value, so the control can be read
+                                // without activating it and the state can be seen.
                                 .child(
-                                    div()
-                                        .flex()
-                                        .flex_row()
-                                        .gap(px(4.0))
-                                        .child(
-                                            Button::new("btn-toggle-sort")
-                                                .secondary()
-                                                .label(sort_label)
-                                                .on_click(cx.listener(|this, _, _, cx| {
-                                                    this.cycle_sort_order(cx);
-                                                })),
-                                        )
-                                        .child(
-                                            Button::new("btn-toggle-density")
-                                                .secondary()
-                                                .label(density_label)
-                                                .on_click(cx.listener(|this, _, _, cx| {
-                                                    this.cycle_row_density(cx);
-                                                })),
-                                        ),
+                                    Button::new("btn-toggle-sort")
+                                        .ghost()
+                                        .small()
+                                        .icon(IconName::SortDescending)
+                                        .label(sort_label.to_string())
+                                        .tooltip("Reverse date order")
+                                        .on_click(cx.listener(|this, _, _, cx| {
+                                            this.cycle_sort_order(cx);
+                                        })),
+                                )
+                                .child(
+                                    Button::new("btn-toggle-density")
+                                        .ghost()
+                                        .small()
+                                        .icon(IconName::GalleryVerticalEnd)
+                                        .label(density_label.to_string())
+                                        .tooltip("Cycle row density")
+                                        .on_click(cx.listener(|this, _, _, cx| {
+                                            this.cycle_row_density(cx);
+                                        })),
                                 ),
                         ),
                 )
@@ -2659,11 +4158,14 @@ pub mod gpui_app {
                     cx.entity(),
                     "v-messages-list",
                     item_sizes,
-                    |this, range, _window, cx| {
-                        let all = this.threaded_messages();
+                    move |this, range, _window, cx| {
+                        // Rows come from the cache captured by `render_message_list_pane`, not
+                        // from a per-window rebuild. Previously this closure re-derived the
+                        // whole filtered-and-threaded vector on every scroll frame.
+                        let rows = rows.clone();
                         range
                             .filter_map(|idx| {
-                                all.get(idx)
+                                rows.get(idx)
                                     .map(|row| this.render_message_row(row, cx).into_any_element())
                             })
                             .collect()
@@ -2683,21 +4185,22 @@ pub mod gpui_app {
                 .small()
                 .on_click(cx.listener(move |this, _, _, cx| {
                     this.list_filter = filter;
+                    this.invalidate_message_cache();
                     cx.notify();
                 }));
             if let Some(ic) = icon {
                 btn = btn.icon(ic);
             }
             btn = btn.label(label);
-            if is_active {
-                btn.primary()
-            } else {
-                btn.ghost()
-            }
+            // A filter chip is a *selected state*, not a commitment. Primary is reserved for
+            // the one default action in a decision area, so an active chip uses the same
+            // quiet treatment as the inactive ones plus a persistent `toggled` state.
+            btn.ghost().toggled(is_active)
         }
 
         fn render_message_reader_pane(&self, cx: &Context<Self>) -> impl IntoElement {
             let msg_opt = self.selected_message();
+            let (body_kind, body_source) = self.message_viewer.body();
 
             div()
                 .flex()
@@ -2710,7 +4213,6 @@ pub mod gpui_app {
                     let from_addr = &msg.from_address;
                     let subject = msg.subject.as_deref().unwrap_or("(No Subject)");
                     let date_full = msg.sent_at.to_rfc2822();
-                    let rendered_body = self.message_viewer.rendered();
                     let attachments = &self.message_viewer.attachments;
 
                     let header_panel = div()
@@ -2726,8 +4228,8 @@ pub mod gpui_app {
                                 .justify_between()
                                 .p(px(12.0))
                                 .border_b_1()
-                                .border_color(rgb(0x1f293d))
-                                .bg(rgb(0x131722))
+                                .border_color(cx.theme().border)
+                                .bg(cx.theme().muted)
                                 .child(
                                     div()
                                         .flex()
@@ -2735,8 +4237,12 @@ pub mod gpui_app {
                                         .items_center()
                                         .gap(px(8.0))
                                         .child(
+                                            // Reply is the reader's most likely action, but
+                                            // it opens a composition window rather than
+                                            // committing anything, so it is a default
+                                            // button. Primary stays with Compose, the one
+                                            // emphasised commitment in the app.
                                             Button::new("btn-reply-message")
-                                                .primary()
                                                 .icon(IconName::ArrowLeft)
                                                 .label("Reply")
                                                 .on_click(cx.listener({
@@ -2771,9 +4277,9 @@ pub mod gpui_app {
                                         )
                                         .child(
                                             Button::new("btn-reply-all-message")
-                                                .secondary()
+                                                .ghost()
                                                 .icon(IconName::Undo2)
-                                                .label("Reply All")
+                                                .label("Reply all")
                                                 .on_click(cx.listener({
                                                     let reply_to = msg.from_address.clone();
                                                     let reply_subj = if msg
@@ -2806,7 +4312,7 @@ pub mod gpui_app {
                                         )
                                         .child(
                                             Button::new("btn-forward-message")
-                                                .secondary()
+                                                .ghost()
                                                 .icon(IconName::ArrowRight)
                                                 .label("Forward")
                                                 .on_click(cx.listener({
@@ -2866,49 +4372,60 @@ pub mod gpui_app {
                                                 })),
                                         ),
                                 )
-                                // Security & Auth Badges
+                                // Security facts. Each badge states the verdict in words and
+                                // pairs it with an icon, so the state survives a colourless
+                                // reading, a light theme and colour-vision differences.
                                 .child(
                                     div()
                                         .flex()
                                         .flex_row()
                                         .items_center()
                                         .gap(px(6.0))
-                                        .child(
-                                            Badge::new().child(
-                                                div()
-                                                    .flex()
-                                                    .items_center()
-                                                    .gap(px(4.0))
-                                                    .child(Icon::new(IconName::Check).xsmall())
-                                                    .child("DKIM Pass"),
-                                            ),
+                                        // No badge for a message with no cryptography: an empty row already says
+                                // that, and a permanent neutral badge would make the
+                                // one badge that matters easy to ignore.
+                                .when(
+                                    !self.message_viewer.auth_facts().is_empty(),
+                                    |el| {
+                                        el.child(
+                                            div()
+                                                .text_xs()
+                                                .font_weight(FontWeight::BOLD)
+                                                .text_color(cx.theme().muted_foreground)
+                                                .child("Security"),
                                         )
-                                        .child(
-                                            Badge::new().child(
-                                                div()
-                                                    .flex()
-                                                    .items_center()
-                                                    .gap(px(4.0))
-                                                    .child(Icon::new(IconName::Check).xsmall())
-                                                    .child("SPF Pass"),
-                                            ),
-                                        )
-                                        .child(
-                                            Badge::new().child({
-                                                let (sec_icon, sec_label) = match self.message_viewer.security_status {
-                                                    SecurityStatus::PgpSignedValid => (IconName::Check, "PGP Signed"),
-                                                    SecurityStatus::PgpEncryptedAndSigned => (IconName::FolderClosed, "PGP Encrypted & Signed"),
-                                                    SecurityStatus::SmimeValid => (IconName::Check, "S/MIME Valid (X.509)"),
-                                                    _ => (IconName::FolderClosed, "TLS Encrypted"),
+                                    },
+                                )
+                                .children(self.message_viewer.auth_facts().into_iter().map(
+                                            |fact| {
+                                                let (icon, color) = match fact.state {
+                                                    AuthState::Pass => {
+                                                        (IconName::Check, cx.theme().success)
+                                                    }
+                                                    AuthState::Fail => {
+                                                        (IconName::TriangleAlert, cx.theme().danger)
+                                                    }
+                                                    AuthState::Unknown => (
+                                                        IconName::Info,
+                                                        cx.theme().muted_foreground,
+                                                    ),
                                                 };
-                                                div()
-                                                    .flex()
-                                                    .items_center()
-                                                    .gap(px(4.0))
-                                                    .child(Icon::new(sec_icon).xsmall())
-                                                    .child(sec_label)
-                                            }),
-                                        ),
+                                                Badge::new()
+                                                    .child(
+                                                        div()
+                                                            .flex()
+                                                            .items_center()
+                                                            .gap(px(4.0))
+                                                            .child(
+                                                                Icon::new(icon)
+                                                                    .xsmall()
+                                                                    .text_color(color),
+                                                            )
+                                                            .child(fact.label),
+                                                    )
+                                                    .into_any_element()
+                                            },
+                                        )),
                                 ),
                         )
                         // Subject & Sender info
@@ -2918,13 +4435,13 @@ pub mod gpui_app {
                                 .flex_col()
                                 .p(px(16.0))
                                 .border_b_1()
-                                .border_color(rgb(0x1f293d))
+                                .border_color(cx.theme().border)
                                 .gap(px(10.0))
                                 .child(
                                     div()
                                         .text_lg()
                                         .font_weight(FontWeight::BOLD)
-                                        .text_color(rgb(0xf8fafc))
+                                        .text_color(cx.theme().foreground)
                                         .child(subject.to_string()),
                                 )
                                 .child(
@@ -2947,8 +4464,8 @@ pub mod gpui_app {
                                                         .w(px(36.0))
                                                         .h(px(36.0))
                                                         .rounded_full()
-                                                        .bg(rgb(0x3b82f6))
-                                                        .text_color(rgb(0xffffff))
+                                                        .bg(cx.theme().primary)
+                                                        .text_color(cx.theme().primary_foreground)
                                                         .font_weight(FontWeight::BOLD)
                                                         .text_sm()
                                                         .child(from_name.chars().next().unwrap_or('U').to_string()),
@@ -2961,7 +4478,7 @@ pub mod gpui_app {
                                                             div()
                                                                 .text_xs()
                                                                 .font_weight(FontWeight::BOLD)
-                                                                .text_color(rgb(0xf1f5f9))
+                                                                .text_color(cx.theme().foreground)
                                                                 .child(if from_name.is_empty() {
                                                                     from_addr.clone()
                                                                 } else {
@@ -2971,7 +4488,7 @@ pub mod gpui_app {
                                                         .child(
                                                             div()
                                                                 .text_xs()
-                                                                .text_color(rgb(0x94a3b8))
+                                                                .text_color(cx.theme().muted_foreground)
                                                                 .child(format!(
                                                                     "To: {}",
                                                                     self.accounts.first().map(|a| a.email.as_str()).unwrap_or("me")
@@ -2979,43 +4496,23 @@ pub mod gpui_app {
                                                         ),
                                                 ),
                                         )
-                                        .child(div().text_xs().text_color(rgb(0x64748b)).child(date_full)),
+                                        .child(div().text_xs().text_color(cx.theme().muted_foreground).child(date_full)),
                                 ),
                         )
-                        // Anti-Phishing Security Warning Banner
-                        .children(self.message_viewer.phishing_warning.as_ref().map(|warn_msg| {
-                            div()
-                                .id("banner-phishing-warning")
-                                .flex()
-                                .flex_row()
-                                .items_center()
-                                .gap(px(10.0))
-                                .px(px(16.0))
-                                .py(px(10.0))
-                                .bg(rgb(0x450a0a))
-                                .border_b_1()
-                                .border_color(rgb(0xdc2626))
-                                .child(Icon::new(IconName::TriangleAlert).small().text_color(rgb(0xf87171)))
-                                .child(
-                                    div()
-                                        .flex()
-                                        .flex_col()
-                                        .gap(px(2.0))
-                                        .child(
-                                            div()
-                                                .text_xs()
-                                                .font_weight(FontWeight::BOLD)
-                                                .text_color(rgb(0xfecaca))
-                                                .child("PHISHING & SPOOFING ALERT: Suspect Links Detected"),
-                                        )
-                                        .child(
-                                            div()
-                                                .text_xs()
-                                                .text_color(rgb(0xfca5a5))
-                                                .child(warn_msg.clone()),
-                                        ),
-                                )
-                        }))
+                        // Anti-phishing warning.
+                        //
+                        // This is one of the few things that genuinely warrants an Alert:
+                        // exceptional information that needs attention in the current task.
+                        // It gets the component so its colour, icon, padding and dismissal
+                        // match every other alert, instead of a hand-rolled red band.
+                        .when_some(
+                            self.message_viewer.phishing_warning.as_ref().map(|msg| {
+                                Alert::error("banner-phishing-warning", msg.clone())
+                                    .title("Possible phishing or spoofing")
+                                    .banner()
+                            }),
+                            |this, alert| this.child(alert),
+                        )
                         // Tracker & remote image security bar
                         .child(
                             div()
@@ -3025,9 +4522,9 @@ pub mod gpui_app {
                                 .justify_between()
                                 .px(px(16.0))
                                 .py(px(8.0))
-                                .bg(rgb(0x181e2b))
+                                .bg(cx.theme().muted)
                                 .border_b_1()
-                                .border_color(rgb(0x1f293d))
+                                .border_color(cx.theme().border)
                                 .child(
                                     div()
                                         .flex()
@@ -3042,15 +4539,15 @@ pub mod gpui_app {
                                             })
                                             .small()
                                             .text_color(if self.block_remote_images {
-                                                rgb(0x10b981)
+                                                cx.theme().success
                                             } else {
-                                                rgb(0xf59e0b)
+                                                cx.theme().warning
                                             }),
                                         )
                                         .child(
                                             div()
                                                 .text_xs()
-                                                .text_color(rgb(0x94a3b8))
+                                                .text_color(cx.theme().muted_foreground)
                                                 .child(if self.block_remote_images {
                                                     "Remote images blocked to protect your privacy & stop tracking pixels."
                                                 } else {
@@ -3059,14 +4556,19 @@ pub mod gpui_app {
                                         ),
                                 )
                                 .child(
+                                    // The label names the result, so the user can predict what
+                                    // activation does without reading the status text first.
                                     Button::new("btn-toggle-images")
                                         .ghost()
                                         .small()
                                         .label(if self.block_remote_images {
-                                            "Load Remote Images"
+                                            "Load remote images"
                                         } else {
-                                            "Block Remote Images"
+                                            "Block remote images"
                                         })
+                                        .tooltip(
+                                            "Remote images can confirm that a message was opened",
+                                        )
                                         .on_click(cx.listener(|this, _, _, cx| {
                                             this.toggle_remote_images(cx);
                                         })),
@@ -3087,8 +4589,8 @@ pub mod gpui_app {
                                 .px(px(16.0))
                                 .py(px(8.0))
                                 .border_b_1()
-                                .border_color(rgb(0x1f293d))
-                                .bg(rgb(0x121722))
+                                .border_color(cx.theme().border)
+                                .bg(cx.theme().muted)
                                 .gap(px(6.0))
                                 .child(
                                     div()
@@ -3101,7 +4603,7 @@ pub mod gpui_app {
                                             div()
                                                 .text_xs()
                                                 .font_weight(FontWeight::BOLD)
-                                                .text_color(rgb(0x94a3b8))
+                                                .text_color(cx.theme().muted_foreground)
                                                 .child(format!("Attachments ({})", attachments.len())),
                                         ),
                                 )
@@ -3129,14 +4631,14 @@ pub mod gpui_app {
                                                 .px(px(8.0))
                                                 .py(px(4.0))
                                                 .rounded_md()
-                                                .bg(rgb(0x1e293b))
+                                                .bg(cx.theme().accent)
                                                 .border_1()
-                                                .border_color(rgb(0x334155))
+                                                .border_color(cx.theme().border)
                                                 .text_xs()
-                                                .text_color(rgb(0xcbd5e1))
+                                                .text_color(cx.theme().foreground)
                                                 .child(Icon::new(IconName::File).small())
                                                 .child(div().child(fname.clone()))
-                                                .child(div().text_color(rgb(0x64748b)).child(format!("({sz_str})")))
+                                                .child(div().text_color(cx.theme().muted_foreground).child(format!("({sz_str})")))
                                                 .child(
                                                     Button::new(ElementId::Name(format!("save-att-{}", fname).into()))
                                                         .ghost()
@@ -3163,29 +4665,58 @@ pub mod gpui_app {
                         // Clean Body Content
                         .child(
                             div()
+                                // The scroll container needs an id: GPUI exposes
+                                // `overflow_y_scroll` on `Stateful<Div>`, so an id-less
+                                // container cannot become the scrolling region.
+                                .id("reader-body-scroll")
                                 .flex()
                                 .flex_col()
                                 .flex_1()
+                                .min_h(px(0.0))
                                 .p(px(20.0))
                                 .gap(px(12.0))
+                                .overflow_y_scroll()
+                                // A real renderer, not a `String` in a text node.
+                                //
+                                // `MessageViewer::rendered()` returned the sanitized HTML as
+                                // a `String`, and `.child(rendered_body)` made a GPUI *text
+                                // element* of it, so every HTML message was displayed as its
+                                // own markup source: `<table border="0">…`. `TextView`
+                                // renders HTML natively and no script can run, because
+                                // there is no webview in this build.
+                                .child(match body_kind {
+                                    BodyKind::Html => TextView::html(
+                                        ElementId::Name("reader-body".into()),
+                                        body_source.clone(),
+                                    )
+                                    .into_any_element(),
+                                    // Plain text is escaped before display, so it is
+                                    // presented as HTML with explicit line breaks rather
+                                    // than read as Markdown.
+                                    BodyKind::Text => TextView::html(
+                                        ElementId::Name("reader-body".into()),
+                                        body_source.clone(),
+                                    )
+                                    .into_any_element(),
+                                    BodyKind::Empty => div().into_any_element(),
+                                })
+                                // A real hairline owned by the footer, instead of 50
+                                // box-drawing characters used as a separator. The old rule
+                                // broke at any font whose glyph was not exactly one
+                                // character wide, and it carried no semantic boundary.
                                 .child(
                                     div()
-                                        .text_sm()
-                                        .text_color(rgb(0xe2e8f0))
-                                        .child(rendered_body),
+                                        .mt(px(16.0))
+                                        .border_t_1()
+                                        .border_color(cx.theme().border),
                                 )
                                 .child(
                                     div()
-                                        .pt(px(16.0))
                                         .text_xs()
-                                        .text_color(rgb(0x64748b))
-                                        .child("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"),
-                                )
-                                .child(
-                                    div()
-                                        .text_xs()
-                                        .text_color(rgb(0x94a3b8))
-                                        .child("Rendered natively with Pure Rust GPUI Engine. Full-text search and offline storage powered by SQLite WAL + FTS5."),
+                                        .text_color(cx.theme().muted_foreground)
+                                        .child(
+                                            "Message bodies are sanitized before display. Search and offline storage run on SQLite with FTS5.",
+                                        ),
                                 ));
 
                     v_resizable("reader-v-panels")
@@ -3193,22 +4724,34 @@ pub mod gpui_app {
                         .child(body_panel.into_any_element())
                         .into_any_element()
                 } else {
+                    // Empty state for the detail pane: it names the object the user must
+                    // choose, and stays quiet. `xxl` gives the breathing room the spacing
+                    // scale reserves for empty states.
                     div()
                         .flex()
+                        .flex_col()
                         .items_center()
                         .justify_center()
+                        .gap(px(8.0))
                         .size_full()
+                        .p(px(32.0))
                         .child(
                             div()
                                 .text_sm()
-                                .text_color(rgb(0x64748b))
-                                .child("Select a message to view its contents"),
+                                .text_color(cx.theme().muted_foreground)
+                                .child("No message selected"),
+                        )
+                        .child(
+                            div()
+                                .text_xs()
+                                .text_color(cx.theme().muted_foreground)
+                                .child("Choose a message in the list to read it here"),
                         )
                         .into_any_element()
                 })
         }
 
-        fn render_calendar_view(&self) -> Div {
+        fn render_calendar_view(&self, cx: &Context<Self>) -> Div {
             let mut cal_view = CalendarView::new();
             cal_view.events = self.calendar_events.clone();
 
@@ -3217,7 +4760,7 @@ pub mod gpui_app {
                 .flex_col()
                 .flex_1()
                 .p(px(20.0))
-                .bg(rgb(0x0f1117))
+                .bg(cx.theme().background)
                 .gap(px(16.0))
                 .child(
                     div()
@@ -3231,19 +4774,19 @@ pub mod gpui_app {
                                 .flex_row()
                                 .items_center()
                                 .gap(px(8.0))
-                                .child(Icon::new(IconName::Calendar).text_color(rgb(0x60a5fa)))
+                                .child(Icon::new(IconName::Calendar).text_color(cx.theme().primary))
                                 .child(
                                     div()
                                         .text_lg()
                                         .font_weight(FontWeight::BOLD)
-                                        .text_color(rgb(0xf8fafc))
+                                        .text_color(cx.theme().foreground)
                                         .child("Calendar (CalDAV RFC 4791 & iCalendar RFC 5545)"),
                                 ),
                         )
                         .child(
                             Button::new("btn-new-event")
                                 .icon(IconName::Plus)
-                                .label("New Event")
+                                .label("New event")
                                 .primary(),
                         ),
                 )
@@ -3258,32 +4801,37 @@ pub mod gpui_app {
                                 .flex_col()
                                 .p(px(12.0))
                                 .rounded_lg()
-                                .bg(rgb(0x171c2a))
+                                .bg(cx.theme().muted)
                                 .border_1()
-                                .border_color(rgb(0x232c40))
+                                .border_color(cx.theme().border)
                                 .child(
                                     div()
                                         .text_sm()
                                         .font_weight(FontWeight::BOLD)
-                                        .text_color(rgb(0x60a5fa))
+                                        .text_color(cx.theme().primary)
                                         .child(ev.title.clone()),
                                 )
-                                .child(div().text_xs().text_color(rgb(0x94a3b8)).child(format!(
-                                    "Time: {} - {}",
-                                    ev.start.format("%Y-%m-%d %H:%M"),
-                                    ev.end.format("%H:%M")
-                                )))
                                 .child(
                                     div()
                                         .text_xs()
-                                        .text_color(rgb(0xcbd5e1))
+                                        .text_color(cx.theme().muted_foreground)
+                                        .child(format!(
+                                            "Time: {} - {}",
+                                            ev.start.format("%Y-%m-%d %H:%M"),
+                                            ev.end.format("%H:%M")
+                                        )),
+                                )
+                                .child(
+                                    div()
+                                        .text_xs()
+                                        .text_color(cx.theme().foreground)
                                         .child(ev.description.clone().unwrap_or_default()),
                                 )
                         })),
                 )
         }
 
-        fn render_contacts_view(&self) -> Div {
+        fn render_contacts_view(&self, cx: &Context<Self>) -> Div {
             let mut contacts_view = ContactsView::new(self.contacts.clone());
             if !self.search_query.is_empty() {
                 contacts_view.set_search(&self.search_query);
@@ -3295,7 +4843,7 @@ pub mod gpui_app {
                 .flex_col()
                 .flex_1()
                 .p(px(20.0))
-                .bg(rgb(0x0f1117))
+                .bg(cx.theme().background)
                 .gap(px(16.0))
                 .child(
                     div()
@@ -3303,26 +4851,28 @@ pub mod gpui_app {
                         .flex_row()
                         .items_center()
                         .justify_between()
+                        // Section title. The "(CardDAV & vCard 4.0)" suffix named the
+                        // implementation rather than the object, which the interface language
+                        // guide calls a wrapper word: the surface is an address book.
                         .child(
                             div()
                                 .flex()
                                 .flex_row()
                                 .items_center()
                                 .gap(px(8.0))
-                                .child(Icon::new(IconName::User).text_color(rgb(0x60a5fa)))
+                                .child(Icon::new(IconName::User).text_color(cx.theme().primary))
                                 .child(
                                     div()
                                         .text_lg()
-                                        .font_weight(FontWeight::BOLD)
-                                        .text_color(rgb(0xf8fafc))
-                                        .child("Address Book (CardDAV & vCard 4.0)"),
+                                        .font_weight(FontWeight::SEMIBOLD)
+                                        .text_color(cx.theme().foreground)
+                                        .child("Contacts"),
                                 ),
                         )
                         .child(
                             Button::new("btn-new-contact")
                                 .icon(IconName::Plus)
-                                .label("Add Contact")
-                                .primary(),
+                                .label("Add contact"),
                         ),
                 )
                 .child(
@@ -3339,15 +4889,18 @@ pub mod gpui_app {
                                 .justify_between()
                                 .p(px(12.0))
                                 .rounded_lg()
-                                .bg(rgb(0x171c2a))
+                                .bg(cx.theme().muted)
                                 .border_1()
-                                .border_color(rgb(0x232c40))
+                                .border_color(cx.theme().border)
                                 .child(
                                     div()
                                         .flex()
                                         .flex_row()
                                         .items_center()
                                         .gap(px(12.0))
+                                        // Fixed-size avatar lane, so the name column starts
+                                        // at the same offset on every row. The initial is
+                                        // taken by `char` so a multi-byte name is not split.
                                         .child(
                                             div()
                                                 .flex()
@@ -3355,10 +4908,11 @@ pub mod gpui_app {
                                                 .justify_center()
                                                 .w(px(32.0))
                                                 .h(px(32.0))
+                                                .flex_shrink_0()
                                                 .rounded_full()
-                                                .bg(rgb(0x3b82f6))
-                                                .text_color(rgb(0xffffff))
-                                                .font_weight(FontWeight::BOLD)
+                                                .bg(cx.theme().primary)
+                                                .text_color(cx.theme().primary_foreground)
+                                                .font_weight(FontWeight::SEMIBOLD)
                                                 .text_xs()
                                                 .child(
                                                     name.chars().next().unwrap_or('C').to_string(),
@@ -3366,20 +4920,26 @@ pub mod gpui_app {
                                         )
                                         .child(
                                             div()
+                                                .flex_1()
+                                                .min_w(px(0.0))
                                                 .flex()
                                                 .flex_col()
                                                 .child(
                                                     div()
                                                         .text_xs()
-                                                        .font_weight(FontWeight::BOLD)
-                                                        .text_color(rgb(0xf8fafc))
-                                                        .child(name.to_string()),
+                                                        .font_weight(FontWeight::SEMIBOLD)
+                                                        .text_color(cx.theme().foreground)
+                                                        .overflow_hidden()
+                                                        .text_ellipsis()
+                                                        .child(elide(name, 40)),
                                                 )
                                                 .child(
                                                     div()
                                                         .text_xs()
-                                                        .text_color(rgb(0x94a3b8))
-                                                        .child(c.email.clone()),
+                                                        .text_color(cx.theme().muted_foreground)
+                                                        .overflow_hidden()
+                                                        .text_ellipsis()
+                                                        .child(elide(&c.email, 40)),
                                                 ),
                                         ),
                                 )
@@ -3388,14 +4948,25 @@ pub mod gpui_app {
                                         format!("btn-contact-email-{}", c.id).into(),
                                     ))
                                     .icon(IconName::Inbox)
-                                    .label("Write Email")
-                                    .xsmall(),
+                                    .label("Write email")
+                                    .ghost()
+                                    .xsmall()
+                                    .tooltip(format!("Write to {}", c.email))
+                                    .on_click(cx.listener({
+                                        let email = c.email.clone();
+                                        move |this, _, _, cx| {
+                                            this.compose_to = email.clone();
+                                            this.compose_inputs = None;
+                                            this.active_modal = ActiveModal::Compose;
+                                            cx.notify();
+                                        }
+                                    })),
                                 )
                         })),
                 )
         }
 
-        fn render_tasks_view(&self) -> Div {
+        fn render_tasks_view(&self, cx: &Context<Self>) -> Div {
             let task_list_view = TaskListView::new(self.tasks.clone());
 
             div()
@@ -3403,7 +4974,7 @@ pub mod gpui_app {
                 .flex_col()
                 .flex_1()
                 .p(px(20.0))
-                .bg(rgb(0x0f1117))
+                .bg(cx.theme().background)
                 .gap(px(16.0))
                 .child(
                     div()
@@ -3417,44 +4988,51 @@ pub mod gpui_app {
                                 .flex_row()
                                 .items_center()
                                 .gap(px(8.0))
-                                .child(Icon::new(IconName::Check).text_color(rgb(0x60a5fa)))
+                                .child(Icon::new(IconName::Check).text_color(cx.theme().primary))
                                 .child(
                                     div()
                                         .text_lg()
-                                        .font_weight(FontWeight::BOLD)
-                                        .text_color(rgb(0xf8fafc))
-                                        .child("Tasks (RFC 5545 VTODO & CalDAV Tasks)"),
+                                        .font_weight(FontWeight::SEMIBOLD)
+                                        .text_color(cx.theme().foreground)
+                                        .child("Tasks"),
                                 ),
                         )
                         .child(
                             Button::new("btn-new-task")
                                 .icon(IconName::Plus)
-                                .label("Add Task")
-                                .primary(),
+                                .label("Add task"),
                         ),
                 )
-                .child(div().flex().flex_col().gap(px(8.0)).children(
-                    task_list_view.filtered_tasks().into_iter().map(|t| {
-                        let is_done = t.is_completed;
-                        div()
-                            .flex()
-                            .flex_row()
-                            .items_center()
-                            .justify_between()
-                            .p(px(12.0))
-                            .rounded_lg()
-                            .bg(rgb(0x171c2a))
-                            .border_1()
-                            .border_color(rgb(0x232c40))
-                            .child(
-                                div()
-                                    .flex()
-                                    .flex_row()
-                                    .items_center()
-                                    .gap(px(10.0))
-                                    .child(if is_done {
+                // The list is the screen's whole purpose, so it scrolls. A fixed 300px page
+                // clipped instead of scrolling.
+                .child(
+                    div()
+                        .id("tasks-list-scroll")
+                        .flex_1()
+                        .min_h(px(0.0))
+                        .overflow_y_scroll()
+                        .flex()
+                        .flex_col()
+                        .gap(px(8.0))
+                        .children(task_list_view.filtered_tasks().into_iter().map(|t| {
+                            let is_done = t.is_completed;
+                            div()
+                                .id(ElementId::Name(format!("task-{}", t.id).into()))
+                                .flex()
+                                .flex_row()
+                                .items_center()
+                                .gap(px(10.0))
+                                .p(px(12.0))
+                                .rounded_lg()
+                                .bg(cx.theme().muted)
+                                .border_1()
+                                .border_color(cx.theme().border)
+                                // Completion is carried by the check glyph as well as the muted
+                                // text, so it does not rely on colour alone.
+                                .child(div().w(px(16.0)).h(px(16.0)).flex_shrink_0().child(
+                                    if is_done {
                                         Icon::new(IconName::CircleCheck)
-                                            .text_color(rgb(0x10b981))
+                                            .text_color(cx.theme().success)
                                             .small()
                                             .into_any_element()
                                     } else {
@@ -3463,25 +5041,208 @@ pub mod gpui_app {
                                             .h(px(14.0))
                                             .rounded_sm()
                                             .border_1()
-                                            .border_color(rgb(0x64748b))
+                                            .border_color(cx.theme().muted_foreground)
                                             .into_any_element()
-                                    })
-                                    .child(
-                                        div()
-                                            .text_xs()
-                                            .text_color(if is_done {
-                                                rgb(0x64748b)
-                                            } else {
-                                                rgb(0xf1f5f9)
-                                            })
-                                            .child(t.title.clone()),
-                                    ),
-                            )
+                                    },
+                                ))
+                                .child(
+                                    div()
+                                        .flex_1()
+                                        .min_w(px(0.0))
+                                        .text_xs()
+                                        .overflow_hidden()
+                                        .text_ellipsis()
+                                        .text_color(if is_done {
+                                            cx.theme().muted_foreground
+                                        } else {
+                                            cx.theme().foreground
+                                        })
+                                        .child(elide(&t.title, 100)),
+                                )
+                        })),
+                )
+        }
+
+        fn render_settings_view(&self, cx: &Context<Self>) -> Div {
+            // The shell renders one tab's contents. The previous implementation drew
+            // every section as a stacked card, so a long settings page had to be
+            // scrolled past and no section could be addressed.
+            let tabs = [
+                (SettingsTab::Appearance, "Appearance"),
+                (SettingsTab::Layout, "Layout"),
+                (SettingsTab::ReadingAndList, "Reading"),
+                (SettingsTab::Composer, "Composer"),
+                (SettingsTab::Shortcuts, "Shortcuts"),
+                (SettingsTab::PrivacyAndSecurity, "Privacy"),
+                (SettingsTab::Notifications, "Notifications"),
+            ];
+
+            div()
+                .flex()
+                .flex_col()
+                .flex_1()
+                .size_full()
+                .bg(cx.theme().background)
+                .child(
+                    div()
+                        .id("settings-titlebar")
+                        .flex()
+                        .flex_row()
+                        .items_center()
+                        .gap(px(8.0))
+                        .px(px(20.0))
+                        .py(px(12.0))
+                        .border_b_1()
+                        .border_color(cx.theme().border)
+                        .child(Icon::new(IconName::Settings).text_color(cx.theme().primary))
+                        .child(
+                            div()
+                                .text_lg()
+                                .font_weight(FontWeight::SEMIBOLD)
+                                .text_color(cx.theme().foreground)
+                                .child("Settings"),
+                        ),
+                )
+                .child(
+                    TabBar::new("settings-tab-bar").children(tabs.into_iter().map(
+                        |(tab, label)| {
+                            Tab::new()
+                                .label(label)
+                                .selected(self.settings_view.active_tab == tab)
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    this.settings_view.set_tab(tab);
+                                    cx.notify();
+                                }))
+                        },
+                    )),
+                )
+                .child(
+                    div()
+                        // GPUI only exposes `overflow_y_scroll` on a `Stateful<Div>`,
+                        // so this container needs an id to become the scroll region.
+                        .id("settings-body-scroll")
+                        .flex_1()
+                        .overflow_y_scroll()
+                        .p(px(20.0))
+                        // Each tab renders its own element type, so they are erased at the boundary
+                        // rather than sharing a return type.
+                        .child(match self.settings_view.active_tab {
+                            SettingsTab::Appearance => {
+                                self.render_settings_appearance(cx).into_any_element()
+                            }
+                            SettingsTab::Layout => {
+                                self.render_settings_layout(cx).into_any_element()
+                            }
+                            SettingsTab::ReadingAndList => {
+                                self.render_settings_reading(cx).into_any_element()
+                            }
+                            SettingsTab::Composer => {
+                                self.render_settings_composer(cx).into_any_element()
+                            }
+                            SettingsTab::Shortcuts => {
+                                self.render_settings_shortcuts(cx).into_any_element()
+                            }
+                            SettingsTab::PrivacyAndSecurity => {
+                                self.render_settings_privacy(cx).into_any_element()
+                            }
+                            SettingsTab::Notifications => {
+                                self.render_settings_notifications(cx).into_any_element()
+                            }
+                        })
+                        .into_any_element(),
+                )
+        }
+
+        /// One titled group inside a settings tab.
+        fn settings_section(
+            &self,
+            title: &'static str,
+            icon: IconName,
+            cx: &Context<Self>,
+            children: Vec<gpui_kit::gpui::AnyElement>,
+        ) -> impl IntoElement {
+            div()
+                .flex()
+                .flex_col()
+                .p(px(16.0))
+                .rounded_lg()
+                .bg(cx.theme().muted)
+                .border_1()
+                .border_color(cx.theme().border)
+                .gap(px(10.0))
+                .mb(px(12.0))
+                .child(
+                    div()
+                        .flex()
+                        .flex_row()
+                        .items_center()
+                        .gap(px(8.0))
+                        .child(Icon::new(icon).small().text_color(cx.theme().primary))
+                        .child(
+                            div()
+                                .text_sm()
+                                .font_weight(FontWeight::BOLD)
+                                .text_color(cx.theme().foreground)
+                                .child(title),
+                        ),
+                )
+                .children(children)
+        }
+
+        /// A row that states a setting and offers the values it can take.
+        #[allow(clippy::too_many_arguments)]
+        fn settings_choice_row<T: Copy + PartialEq + 'static>(
+            &self,
+            cx: &Context<Self>,
+            label: &'static str,
+            description: &'static str,
+            choices: &[(T, &'static str)],
+            current: T,
+            id_prefix: &'static str,
+            on_pick: impl Fn(&mut Self, T, &mut Context<Self>) + 'static,
+        ) -> impl IntoElement {
+            let choices = choices.to_vec();
+            let on_pick = std::rc::Rc::new(on_pick);
+            div()
+                .flex()
+                .flex_row()
+                .items_center()
+                .justify_between()
+                .gap(px(12.0))
+                .child(
+                    div()
+                        .flex()
+                        .flex_col()
+                        .gap(px(2.0))
+                        .child(
+                            div()
+                                .text_xs()
+                                .font_weight(FontWeight::BOLD)
+                                .text_color(cx.theme().foreground)
+                                .child(label),
+                        )
+                        .child(
+                            div()
+                                .text_xs()
+                                .text_color(cx.theme().muted_foreground)
+                                .child(description),
+                        ),
+                )
+                .child(TabBar::new(ElementId::Name(id_prefix.into())).children(
+                    choices.into_iter().map(|(value, text)| {
+                        let is_active = current == value;
+                        let on_pick = on_pick.clone();
+                        Tab::new()
+                            .label(text)
+                            .selected(is_active)
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                on_pick(this, value, cx);
+                            }))
                     }),
                 ))
         }
 
-        fn render_settings_view(&self, cx: &Context<Self>) -> Div {
+        fn render_settings_appearance(&self, cx: &Context<Self>) -> impl IntoElement {
             let themes = [
                 (vespetrel_core::ColorTheme::DarkSlate, "Dark Slate"),
                 (vespetrel_core::ColorTheme::OledBlack, "OLED Black"),
@@ -3502,323 +5263,364 @@ pub mod gpui_app {
                 (vespetrel_core::RowDensity::Roomy, "Roomy (56px)"),
             ];
 
+            div()
+                .flex()
+                .flex_col()
+                .child(
+                    self.settings_section(
+                        "Theme",
+                        IconName::Palette,
+                        cx,
+                        vec![self
+                            .settings_choice_row(
+                                    cx,
+                                    "Appearance",
+                                "Follow the system, or pick a palette",
+                                &themes,
+                                self.settings.theme,
+                                "settings-theme-choice",
+                                move |this, value, cx| {
+                                    this.set_settings_theme(value, cx);
+                                },
+                            )
+                            .into_any_element()],
+                    ),
+                )
+                .child(
+                    self.settings_section(
+                        "Row density",
+                        IconName::LayoutDashboard,
+                        cx,
+                        vec![self
+                            .settings_choice_row(
+                                    cx,
+                                    "Message rows",
+                                "How much of each message the list shows",
+                                &densities,
+                                self.settings.row_density,
+                                "settings-density-choice",
+                                move |this, value, cx| {
+                                    this.set_settings_density(value, cx);
+                                },
+                            )
+                            .into_any_element()],
+                    ),
+                )
+                .child(
+                    self.settings_section(
+                        "Storage",
+                        IconName::HardDrive,
+                        cx,
+                        // Facts about this build's storage layer, stated once. They are
+                        // true of the code and useful when reporting a problem; they are
+                        // not settings and carry no control.
+                        vec![div()
+                            .text_xs()
+                            .text_color(cx.theme().muted_foreground)
+                            .child("SQLite in WAL mode · FTS5 full-text index · compressed raw MIME blobs")
+                            .into_any_element()],
+                    ),
+                )
+        }
+
+        fn render_settings_layout(&self, cx: &Context<Self>) -> impl IntoElement {
+            let layouts = [
+                (vespetrel_core::PaneLayout::ThreePaneVertical, "Three pane"),
+                (vespetrel_core::PaneLayout::ClassicHorizontal, "Two pane"),
+            ];
+            div()
+                .flex()
+                .flex_col()
+                .child(self.settings_section(
+                    "Layout",
+                    IconName::Frame,
+                    cx,
+                    vec![self
+                            .settings_choice_row(
+                                    cx,
+                                    "Window layout",
+                                "Folder tree, message list and reader",
+                                &layouts,
+                                self.settings.layout,
+                                "settings-layout-choice",
+                                move |_this, _value, _cx| {},
+                            )
+                            .into_any_element()],
+                ))
+                .child(self.settings_section(
+                    "Sender identity",
+                    IconName::User,
+                    cx,
+                    vec![self
+                            .settings_choice_row(
+                                    cx,
+                                    "Avatar",
+                                "Show a sender avatar in each row",
+                                &[(true, "Show"), (false, "Hide")],
+                                self.settings.show_sender_avatars,
+                                "settings-avatar-choice",
+                                move |this, value, cx| {
+                                    this.set_sender_avatars(value, cx);
+                                },
+                            )
+                            .into_any_element()],
+                ))
+        }
+
+        fn render_settings_reading(&self, cx: &Context<Self>) -> impl IntoElement {
+            div().flex().flex_col().child(self.settings_section(
+                "Message list",
+                IconName::LayoutDashboard,
+                cx,
+                vec![self
+                            .settings_choice_row(
+                                    cx,
+                                    "Preview",
+                                "Show the start of each message under its subject",
+                                &[(true, "Show"), (false, "Hide")],
+                                self.settings.show_preview_snippets,
+                                "settings-snippet-choice",
+                                move |this, value, cx| {
+                                    this.set_preview_snippets(value, cx);
+                                },
+                            )
+                            .into_any_element()],
+            ))
+        }
+
+        fn render_settings_composer(&self, cx: &Context<Self>) -> impl IntoElement {
             let undo_delays = [
                 (5, "5 seconds"),
                 (10, "10 seconds"),
                 (20, "20 seconds"),
                 (30, "30 seconds"),
             ];
+            let quotes = [
+                (vespetrel_core::QuoteStyle::TopPost, "Above quote"),
+                (vespetrel_core::QuoteStyle::BottomPost, "Below quote"),
+            ];
+            div().flex().flex_col().child(self.settings_section(
+                "Sending",
+                IconName::ArrowRight,
+                cx,
+                vec![
+                            self.settings_choice_row(
+                                    cx,
+                                    "Undo send",
+                                "How long a sent message can be recalled",
+                                &undo_delays,
+                                self.settings.undo_send_seconds,
+                                "settings-undo-choice",
+                                move |this, value, cx| {
+                                    this.set_settings_undo_seconds(value, cx);
+                                },
+                            )
+                            .into_any_element(),
+                            self.settings_choice_row(
+                                    cx,
+                                    "Reply style",
+                                "Where the quoted original sits in a reply",
+                                &quotes,
+                                self.settings.reply_quote_style,
+                                "settings-quote-choice",
+                                move |_this, _value, _cx| {},
+                            )
+                            .into_any_element(),
+                        ],
+            ))
+        }
+
+        /// The shortcut table, built from the same keymap the window binds.
+        ///
+        /// This is where `KeybindingMap` becomes visible to a user. Before, the whole
+        /// engine existed with three presets and no surface: the palette row
+        /// "Configure Keyboard Shortcuts" landed on a settings page with no shortcut
+        /// control on it, and every label in the palette was a static string.
+        fn render_settings_shortcuts(&self, cx: &Context<Self>) -> impl IntoElement {
+            let presets = [
+                (crate::keybindings::KeyPreset::Gmail, "Gmail"),
+                (crate::keybindings::KeyPreset::Thunderbird, "Thunderbird"),
+                (crate::keybindings::KeyPreset::Vim, "Vim"),
+                (crate::keybindings::KeyPreset::Custom, "Custom"),
+            ];
+
+            let entries = self.keybindings.sorted_entries();
+            let preset_note = if self.keybindings.preset == crate::keybindings::KeyPreset::Custom {
+                "Custom preset: bindings were edited, so this table is your own."
+            } else {
+                "Changes take effect the next time Vespetrel starts."
+            };
 
             div()
                 .flex()
                 .flex_col()
-                .flex_1()
-                .p(px(20.0))
-                .bg(rgb(0x0f1117))
-                .gap(px(16.0))
-                .child(
-                    div()
-                        .flex()
-                        .flex_row()
-                        .items_center()
-                        .gap(px(8.0))
-                        .child(Icon::new(IconName::Settings).text_color(rgb(0x60a5fa)))
-                        .child(
-                            div()
-                                .text_lg()
-                                .font_weight(FontWeight::BOLD)
-                                .text_color(rgb(0xf8fafc))
-                                .child("Configuration & Preferences"),
-                        ),
-                )
-                // Section 1: Appearance & Theme
-                .child(
-                    div()
-                        .flex()
-                        .flex_col()
-                        .p(px(16.0))
-                        .rounded_lg()
-                        .bg(rgb(0x171c2a))
-                        .border_1()
-                        .border_color(rgb(0x232c40))
-                        .gap(px(10.0))
-                        .child(
-                            div()
-                                .flex()
-                                .flex_row()
-                                .items_center()
-                                .gap(px(8.0))
-                                .child(Icon::new(IconName::Palette).small().text_color(rgb(0x60a5fa)))
-                                .child(
-                                    div()
-                                        .text_sm()
-                                        .font_weight(FontWeight::BOLD)
-                                        .text_color(rgb(0x60a5fa))
-                                        .child("Appearance & Color Theme"),
-                                ),
-                        )
-                        .child(
-                            TabBar::new("settings-theme-tabbar").children(
-                                themes.into_iter().map(|(th, label)| {
-                                    let is_active = self.settings.theme == th;
-                                    Tab::new()
-                                        .label(label)
-                                        .selected(is_active)
-                                        .on_click(cx.listener(move |this, _, _, cx| {
-                                            this.set_settings_theme(th, cx);
-                                        }))
-                                }),
-                            ),
-                        ),
-                )
-                // Section 2: Reading & Display Density
-                .child(
-                    div()
-                        .flex()
-                        .flex_col()
-                        .p(px(16.0))
-                        .rounded_lg()
-                        .bg(rgb(0x171c2a))
-                        .border_1()
-                        .border_color(rgb(0x232c40))
-                        .gap(px(10.0))
-                        .child(
-                            div()
-                                .flex()
-                                .flex_row()
-                                .items_center()
-                                .gap(px(8.0))
-                                .child(
-                                    Icon::new(IconName::LayoutDashboard)
-                                        .small()
-                                        .text_color(rgb(0x60a5fa)),
-                                )
-                                .child(
-                                    div()
-                                        .text_sm()
-                                        .font_weight(FontWeight::BOLD)
-                                        .text_color(rgb(0x60a5fa))
-                                        .child("Message List Density"),
-                                ),
-                        )
-                        .child(
-                            TabBar::new("settings-density-tabbar").children(
-                                densities.into_iter().map(|(dens, label)| {
-                                    let is_active = self.settings.row_density == dens;
-                                    Tab::new()
-                                        .label(label)
-                                        .selected(is_active)
-                                        .on_click(cx.listener(move |this, _, _, cx| {
-                                            this.set_settings_density(dens, cx);
-                                        }))
-                                }),
-                            ),
-                        ),
-                )
-                // Section 3: Privacy & Security
-                .child(
-                    div()
-                        .flex()
-                        .flex_col()
-                        .p(px(16.0))
-                        .rounded_lg()
-                        .bg(rgb(0x171c2a))
-                        .border_1()
-                        .border_color(rgb(0x232c40))
-                        .gap(px(12.0))
-                        .child(
-                            div()
-                                .flex()
-                                .flex_row()
-                                .items_center()
-                                .gap(px(8.0))
-                                .child(
-                                    Icon::new(IconName::CircleCheck)
-                                        .small()
-                                        .text_color(rgb(0x60a5fa)),
-                                )
-                                .child(
-                                    div()
-                                        .text_sm()
-                                        .font_weight(FontWeight::BOLD)
-                                        .text_color(rgb(0x60a5fa))
-                                        .child("Privacy & Threat Defense"),
-                                ),
-                        )
-                        .child(
-                            div()
-                                .flex()
-                                .flex_row()
-                                .items_center()
-                                .justify_between()
-                                .child(
-                                    div()
-                                        .flex()
-                                        .flex_col()
-                                        .gap(px(2.0))
-                                        .child(div().text_xs().font_weight(FontWeight::BOLD).text_color(rgb(0xf1f5f9)).child("Auto-strip Tracking Pixels"))
-                                        .child(div().text_xs().text_color(rgb(0x94a3b8)).child("Automatically strip 1x1 tracking GIFs and known telemetry web beacons")),
-                                )
-                                .child(
-                                    Button::new("btn-toggle-strip-trackers")
-                                        .icon(if self.settings.auto_strip_trackers {
-                                            IconName::Check
-                                        } else {
-                                            IconName::Close
-                                        })
-                                        .label(if self.settings.auto_strip_trackers {
-                                            "Enabled"
-                                        } else {
-                                            "Disabled"
-                                        })
-                                        .when(self.settings.auto_strip_trackers, |btn| btn.primary())
-                                        .on_click(cx.listener(|this, _, _, cx| {
-                                            this.toggle_settings_strip_trackers(cx);
-                                        })),
-                                ),
-                        )
-                        .child(
-                            div()
-                                .flex()
-                                .flex_row()
-                                .items_center()
-                                .justify_between()
-                                .child(
-                                    div()
-                                        .flex()
-                                        .flex_col()
-                                        .gap(px(2.0))
-                                        .child(div().text_xs().font_weight(FontWeight::BOLD).text_color(rgb(0xf1f5f9)).child("Anti-Phishing & Link Spoofing Warnings"))
-                                        .child(div().text_xs().text_color(rgb(0x94a3b8)).child("Detect deceptive display domains, punycode homographs, and IP URLs")),
-                                )
-                                .child(
-                                    Button::new("btn-toggle-phishing-warnings")
-                                        .icon(if self.settings.warn_on_phishing {
-                                            IconName::Check
-                                        } else {
-                                            IconName::Close
-                                        })
-                                        .label(if self.settings.warn_on_phishing {
-                                            "Enabled"
-                                        } else {
-                                            "Disabled"
-                                        })
-                                        .when(self.settings.warn_on_phishing, |btn| btn.primary())
-                                        .on_click(cx.listener(|this, _, _, cx| {
-                                            this.toggle_settings_warn_phishing(cx);
-                                        })),
-                                ),
-                        ),
-                )
-                // Section 4: Compose & Outbox
-                .child(
-                    div()
-                        .flex()
-                        .flex_col()
-                        .p(px(16.0))
-                        .rounded_lg()
-                        .bg(rgb(0x171c2a))
-                        .border_1()
-                        .border_color(rgb(0x232c40))
-                        .gap(px(10.0))
-                        .child(
-                            div()
-                                .flex()
-                                .flex_row()
-                                .items_center()
-                                .gap(px(8.0))
-                                .child(Icon::new(IconName::Inbox).small().text_color(rgb(0x60a5fa)))
-                                .child(
-                                    div()
-                                        .text_sm()
-                                        .font_weight(FontWeight::BOLD)
-                                        .text_color(rgb(0x60a5fa))
-                                        .child("Compose & Undo Send Delay"),
-                                ),
-                        )
-                        .child(
-                            div()
-                                .flex()
-                                .flex_row()
-                                .gap(px(8.0))
-                                .children(undo_delays.into_iter().map(|(secs, label)| {
-                                    let is_active = self.settings.undo_send_seconds == secs;
-                                    Button::new(ElementId::Name(format!("btn-undo-{}", secs).into()))
-                                        .label(label)
-                                        .when(is_active, |btn| btn.primary())
-                                        .on_click(cx.listener(move |this, _, _, cx| {
-                                            this.set_settings_undo_seconds(secs, cx);
-                                        }))
-                                })),
-                        ),
-                )
-                // Section 5: Engine & Storage Architecture Details
-                .child(
-                    div()
-                        .flex()
-                        .flex_col()
-                        .p(px(16.0))
-                        .rounded_lg()
-                        .bg(rgb(0x171c2a))
-                        .border_1()
-                        .border_color(rgb(0x232c40))
-                        .gap(px(8.0))
-                        .child(
-                            div()
-                                .flex()
-                                .flex_row()
-                                .items_center()
-                                .gap(px(8.0))
-                                .child(Icon::new(IconName::HardDrive).small().text_color(rgb(0x60a5fa)))
-                                .child(
-                                    div()
-                                        .text_sm()
-                                        .font_weight(FontWeight::BOLD)
-                                        .text_color(rgb(0x60a5fa))
-                                        .child("Storage & Security Architecture"),
-                                ),
-                        )
-                        .child(div().text_xs().text_color(rgb(0xcbd5e1)).child(
-                            "• Database: SQLite 3 with WAL Mode and Memory-Mapped I/O (256MB)",
-                        ))
-                        .child(div().text_xs().text_color(rgb(0xcbd5e1)).child(
-                            "• Full-Text Search: SQLite FTS5 (unicode61 tokenizer, BM25 ranking)",
-                        ))
-                        .child(
+                .child(self.settings_section(
+                    "Preset",
+                    IconName::Settings2,
+                    cx,
+                    vec![self
+                            .settings_choice_row(
+                                    cx,
+                                    "Shortcuts",
+                                "Gmail, Thunderbird and Vim key maps",
+                                &presets,
+                                self.keybindings.preset,
+                                "settings-keymap-choice",
+                                move |this, value, cx| {
+                                    this.set_keymap_preset(value, cx);
+                                },
+                            )
+                            .into_any_element()],
+                ))
+                .child(self.settings_section(
+                    "Shortcuts",
+                    IconName::LayoutDashboard,
+                    cx,
+                    vec![div()
+                            .flex()
+                            .flex_col()
+                            .gap(px(6.0))
+                            .children(entries.into_iter().map(|(key, action)| {
+                                div()
+                                    .flex()
+                                    .flex_row()
+                                    .items_center()
+                                    .justify_between()
+                                    .gap(px(12.0))
+                                    .py(px(2.0))
+                                    .child(
+                                        div()
+                                            .text_xs()
+                                            .text_color(cx.theme().foreground)
+                                            .child(action.label()),
+                                    )
+                                    .child(
+                                        div()
+                                            .px(px(6.0))
+                                            .py(px(2.0))
+                                            .rounded_md()
+                                            .bg(cx.theme().popover)
+                                            .text_xs()
+                                            .text_color(cx.theme().muted_foreground)
+                                            .child(format_shortcut(&key)),
+                                    )
+                            }))
+                            .into_any_element(),
                             div()
                                 .text_xs()
-                                .text_color(rgb(0xcbd5e1))
-                                .child("• Blob Compression: lz4_flex + zstd"),
-                        )
-                        .child(
-                            div().text_xs().text_color(rgb(0xcbd5e1)).child(
-                                "• Keyring Credentials: Native OS Keyring / Credential Manager",
-                            ),
-                        )
-                        .child(div().text_xs().text_color(rgb(0xcbd5e1)).child(
-                            "• Crypto & Security: rPGP OpenPGP RFC 9580 + RustCrypto CMS S/MIME",
-                        )),
-                )
+                                .text_color(cx.theme().muted_foreground)
+                                .child(preset_note)
+                                .into_any_element()],
+                ))
         }
 
-        fn render_status_bar(&self, _cx: &Context<Self>) -> impl IntoElement {
-            let is_error_or_offline = self.status_message.to_lowercase().contains("offline")
-                || self.status_message.to_lowercase().contains("error")
-                || self.status_message.to_lowercase().contains("failed");
-            let indicator_color = if is_error_or_offline {
-                rgb(0xef4444)
-            } else if self.status_message.contains("...")
-                || self.status_message.contains("…")
-                || self.status_message.to_lowercase().contains("syncing")
-            {
-                rgb(0x3b82f6)
-            } else {
-                rgb(0x10b981)
-            };
-            let status_indicator_text = if is_error_or_offline {
-                "Offline / Sync Error"
-            } else {
-                "Connected • Direct3D/Vulkan 120 FPS"
+        fn render_settings_privacy(&self, cx: &Context<Self>) -> impl IntoElement {
+            div().flex().flex_col().child(self.settings_section(
+                "Privacy and threat protection",
+                IconName::CircleCheck,
+                cx,
+                vec![
+                            self.settings_choice_row(
+                                    cx,
+                                    "Remote images",
+                                "Block images that would confirm a message was opened",
+                                &[(true, "Block"), (false, "Allow")],
+                                self.block_remote_images,
+                                "settings-remote-image-choice",
+                                move |this, value, cx| {
+                                    this.set_remote_image_policy(value, cx);
+                                },
+                            )
+                            .into_any_element(),
+                            self.settings_choice_row(
+                                    cx,
+                                    "Tracking pixels",
+                                "Strip known telemetry parameters from links",
+                                &[
+                                    (true, "Enabled"),
+                                    (false, "Disabled"),
+                                ],
+                                self.settings.auto_strip_trackers,
+                                "settings-tracker-choice",
+                                move |this, value, cx| {
+                                    this.set_strip_trackers(value, cx);
+                                },
+                            )
+                            .into_any_element(),
+                            self.settings_choice_row(
+                                    cx,
+                                    "Phishing warnings",
+                                "Check links for deceptive domains and homographs",
+                                &[(true, "Enabled"), (false, "Disabled")],
+                                self.settings.warn_on_phishing,
+                                "settings-phishing-choice",
+                                move |this, value, cx| {
+                                    this.set_warn_phishing(value, cx);
+                                },
+                            )
+                            .into_any_element(),
+                        ],
+            ))
+        }
+
+        fn render_settings_notifications(&self, cx: &Context<Self>) -> impl IntoElement {
+            let modes = [
+                (vespetrel_core::NotificationMode::All, "All mail"),
+                (
+                    vespetrel_core::NotificationMode::PrimaryCategoryOnly,
+                    "Primary only",
+                ),
+                (
+                    vespetrel_core::NotificationMode::VipAndStarredOnly,
+                    "Starred only",
+                ),
+                (vespetrel_core::NotificationMode::Muted, "Muted"),
+            ];
+            div().flex().flex_col().child(self.settings_section(
+                "Notifications",
+                IconName::Bell,
+                cx,
+                vec![self
+                            .settings_choice_row(
+                                    cx,
+                                    "New mail",
+                                "Which messages raise a notification",
+                                &modes,
+                                self.settings.notification_mode,
+                                "settings-notification-choice",
+                                move |_this, _value, _cx| {},
+                            )
+                            .into_any_element()],
+            ))
+        }
+
+        /// Classify the current status line into a state the bar can present honestly.
+        ///
+        /// The bar previously inferred its state by searching the message text for the
+        /// words "offline", "error" or "failed". A perfectly normal message that happened
+        /// to contain one of those words turned the indicator red, and a genuine failure
+        /// whose wording differed stayed green.
+        fn status_state(&self) -> StatusState {
+            classify_status(self.accounts.len(), &self.status_message)
+        }
+
+        fn render_status_bar(&self, cx: &Context<Self>) -> impl IntoElement {
+            let state = self.status_state();
+            let (indicator, label) = match state {
+                StatusState::NoAccount => (
+                    cx.theme().muted_foreground,
+                    "No account connected".to_string(),
+                ),
+                StatusState::Failed => (cx.theme().danger, "Sync failed".to_string()),
+                StatusState::Busy => (cx.theme().primary, "Syncing".to_string()),
+                StatusState::Ready => (
+                    cx.theme().success,
+                    format!(
+                        "{} account{} connected",
+                        self.accounts.len(),
+                        if self.accounts.len() == 1 { "" } else { "s" }
+                    ),
+                ),
             };
 
             StatusBar::new().child(
@@ -3830,11 +5632,13 @@ pub mod gpui_app {
                     .w_full()
                     .h(px(24.0))
                     .px(px(16.0))
-                    .bg(rgb(0x0c0e14))
+                    .bg(cx.theme().status_bar)
                     .border_t_1()
-                    .border_color(rgb(0x1a202c))
+                    .border_color(cx.theme().status_bar_border)
                     .text_xs()
-                    .text_color(rgb(0x64748b))
+                    .text_color(cx.theme().muted_foreground)
+                    // State is carried by an icon and a word, not by a coloured dot alone,
+                    // so it survives a colourless reading and colour-vision differences.
                     .child(
                         div()
                             .flex()
@@ -3845,20 +5649,21 @@ pub mod gpui_app {
                                 div()
                                     .w(px(6.0))
                                     .h(px(6.0))
+                                    .flex_shrink_0()
                                     .rounded_full()
-                                    .bg(indicator_color),
+                                    .bg(indicator),
                             )
                             .child(
                                 div()
-                                    .text_color(if is_error_or_offline {
-                                        rgb(0xfca5a5)
-                                    } else {
-                                        rgb(0x94a3b8)
-                                    })
+                                    .overflow_hidden()
+                                    .text_ellipsis()
                                     .child(self.status_message.clone()),
                             ),
                     )
-                    .child(div().child(status_indicator_text)),
+                    // Real, checkable facts about this window's state. The old right-hand
+                    // text was a hardcoded "Connected • Direct3D/Vulkan 120 FPS" that
+                    // described a renderer, not the app, and was false whenever sync failed.
+                    .child(div().flex_shrink_0().child(label)),
             )
         }
 
@@ -3900,6 +5705,20 @@ pub mod gpui_app {
                 self.compose_body.clone()
             };
 
+            let from_label = self
+                .accounts
+                .first()
+                .map(|a| a.email.clone())
+                .unwrap_or_else(|| "no account configured".to_string());
+            let composer_status = format!(
+                "From {from_label} · {} · no encryption",
+                if self.compose_state.is_markdown_mode {
+                    "Markdown"
+                } else {
+                    "Plain text"
+                }
+            );
+
             let to_query = if let Some(inputs) = &self.compose_inputs {
                 inputs.to.read(cx).value().trim().to_lowercase()
             } else {
@@ -3931,7 +5750,7 @@ pub mod gpui_app {
                     .items_center()
                     .justify_center()
                     .size_full()
-                    .bg(rgb(0x000000bb))
+                    .bg(gpui_kit::gpui::transparent_black())
                     .child(
                         div()
                             .id("modal-compose-box")
@@ -3940,9 +5759,9 @@ pub mod gpui_app {
                             .w(px(640.0))
                             .h(px(520.0))
                             .rounded_xl()
-                            .bg(rgb(0x161b26))
+                            .bg(cx.theme().input)
                             .border_1()
-                            .border_color(rgb(0x2d3748))
+                            .border_color(cx.theme().border)
                             .p(px(20.0))
                             .gap(px(10.0))
                             .child(
@@ -3957,13 +5776,13 @@ pub mod gpui_app {
                                             .flex_row()
                                             .items_center()
                                             .gap(px(8.0))
-                                            .child(Icon::new(IconName::Plus).text_color(rgb(0x60a5fa)))
+                                            .child(Icon::new(IconName::Plus).text_color(cx.theme().primary))
                                             .child(
                                                 div()
                                                     .text_base()
                                                     .font_weight(FontWeight::BOLD)
-                                                    .text_color(rgb(0xf8fafc))
-                                                    .child("New Message Composer"),
+                                                    .text_color(cx.theme().foreground)
+                                                    .child("Compose"),
                                             ),
                                     )
                                     .child(
@@ -3992,11 +5811,12 @@ pub mod gpui_app {
                                                     .child(if let Some(inputs) = &self.compose_inputs {
                                                         component::input::Input::new(&inputs.to)
                                                             .cleanable(true)
+                                                            .aria_label("Recipient")
                                                             .into_any_element()
                                                     } else {
                                                         div()
                                                             .text_xs()
-                                                            .text_color(rgb(0xf1f5f9))
+                                                            .text_color(cx.theme().foreground)
                                                             .child(to_text)
                                                             .into_any_element()
                                                     }),
@@ -4026,11 +5846,11 @@ pub mod gpui_app {
                                                     .px(px(8.0))
                                                     .py(px(2.0))
                                                     .rounded_md()
-                                                    .bg(rgb(0x1e3a8a))
+                                                    .bg(cx.theme().primary)
                                                     .border_1()
-                                                    .border_color(rgb(0x3b82f6))
+                                                    .border_color(cx.theme().primary)
                                                     .text_xs()
-                                                    .text_color(rgb(0x93c5fd))
+                                                    .text_color(cx.theme().primary_hover)
                                                     .on_click(cx.listener(move |this, _, window, cx| {
                                                         if let Some(inputs) = &this.compose_inputs {
                                                             inputs.to.update(cx, |inp, cx| {
@@ -4050,7 +5870,7 @@ pub mod gpui_app {
                                         div()
                                     }),
                             )
-                        // Subject Input
+                        // Cc, where it was previously absent entirely.
                         .child(
                             div()
                                 .flex()
@@ -4059,22 +5879,49 @@ pub mod gpui_app {
                                 .gap(px(8.0))
                                 .p(px(8.0))
                                 .rounded_md()
-                                .bg(rgb(0x1c2333))
+                                .bg(cx.theme().muted)
                                 .child(
                                     div()
                                         .text_xs()
                                         .font_weight(FontWeight::SEMIBOLD)
-                                        .text_color(rgb(0x94a3b8))
+                                        .text_color(cx.theme().muted_foreground)
+                                        .child("Cc:"),
+                                )
+                                .child(if let Some(inputs) = &self.compose_inputs {
+                                    component::input::Input::new(&inputs.cc)
+                                        .cleanable(true)
+                                        .aria_label("Cc")
+                                        .into_any_element()
+                                } else {
+                                    div().into_any_element()
+                                }),
+                        )
+                        // Subject
+                        .child(
+                            div()
+                                .flex()
+                                .flex_row()
+                                .items_center()
+                                .gap(px(8.0))
+                                .p(px(8.0))
+                                .rounded_md()
+                                .bg(cx.theme().muted)
+                                .child(
+                                    div()
+                                        .text_xs()
+                                        .font_weight(FontWeight::SEMIBOLD)
+                                        .text_color(cx.theme().muted_foreground)
                                         .child("Subject:"),
                                 )
                                 .child(if let Some(inputs) = &self.compose_inputs {
                                     component::input::Input::new(&inputs.subject)
                                         .cleanable(true)
+                                        .aria_label("Subject")
                                         .into_any_element()
                                 } else {
                                     div()
                                         .text_xs()
-                                        .text_color(rgb(0xf1f5f9))
+                                        .text_color(cx.theme().foreground)
                                         .child(subj_text)
                                         .into_any_element()
                                 }),
@@ -4096,44 +5943,77 @@ pub mod gpui_app {
                                         .child(
                                             Button::new("btn-toggle-markdown")
                                                 .icon(IconName::FileText)
-                                                .label(if self.compose_is_markdown {
-                                                    "Markdown: ON"
+                                                .label(if self.compose_state.is_markdown_mode {
+                                                    "Markdown"
                                                 } else {
-                                                    "Markdown: OFF"
+                                                    "Plain text"
                                                 })
-                                                .when(self.compose_is_markdown, |btn| btn.primary())
+                                                .tooltip(
+                                                    "Switch how the body is rendered when it is sent",
+                                                )
+                                                .when(self.compose_state.is_markdown_mode, |btn| {
+                                                    btn.primary()
+                                                })
                                                 .on_click(cx.listener(|this, _, _, cx| {
-                                                    this.compose_is_markdown =
-                                                        !this.compose_is_markdown;
+                                                    this.compose_state.is_markdown_mode =
+                                                        !this.compose_state.is_markdown_mode;
                                                     cx.notify();
                                                 })),
                                         )
-                                        .child(
-                                            Button::new("btn-add-attachment")
-                                                .icon(IconName::File)
-                                                .label("Add Attachment")
-                                                .on_click(cx.listener(|this, _, _, cx| {
-                                                    let idx = this.compose_attachments.len() + 1;
-                                                    this.compose_attachments.push(
-                                                        vespetrel_core::message::ComposedAttachment {
-                                                            filename: format!("document_{idx}.pdf"),
-                                                            content_type: "application/pdf".into(),
-                                                            data: vec![0u8; 1024 * 64],
-                                                        },
-                                                    );
-                                                    this.show_toast(
-                                                        format!("Attached document_{idx}.pdf"),
-                                                        false,
-                                                        cx,
-                                                    );
-                                                    cx.notify();
-                                                })),
-                                        ),
+                                        // Attach by path.
+                                            //
+                                            // This used to invent a
+                                            // `document_N.pdf` filled with 64 KB of zeroes and
+                                            // reported it as attached: sending produced a
+                                            // message carrying a corrupt, meaningless
+                                            // attachment the user never chose. There is no
+                                            // native file picker in this build, so the
+                                            // control asks for a path and reads the real
+                                            // bytes, or says why it could not.
+                                            .child(
+                                                div()
+                                                .flex()
+                                                .flex_row()
+                                                .items_center()
+                                                .gap(px(8.0))
+                                                .child(
+                                                    if let Some(inputs) = &self.compose_inputs {
+                                                        component::input::Input::new(
+                                                            &inputs.attach_path,
+                                                        )
+                                                        .cleanable(true)
+                                                        .aria_label("File to attach")
+                                                        .into_any_element()
+                                                    } else {
+                                                        div().into_any_element()
+                                                    },
+                                                )
+                                                .child(
+                                                    Button::new("btn-add-attachment")
+                                                        .icon(IconName::Plus)
+                                                        .label("Attach")
+                                                        .tooltip("Attach the file at the path above")
+                                                        .on_click(cx.listener(|this, _, _, cx| {
+                                                            let typed = this
+                                                                .compose_inputs
+                                                                .as_ref()
+                                                                .map(|i| {
+                                                                    i.attach_path
+                                                                        .read(cx)
+                                                                        .value()
+                                                                        .to_string()
+                                                                })
+                                                                .unwrap_or_default();
+                                                            this.compose_attach_path = typed;
+                                                            this.attach_from_path_input(cx);
+                                                        })),
+                                                ),
+                                            ),
                                 )
                                 .child(
                                     Button::new("btn-save-draft")
                                         .icon(IconName::HardDrive)
-                                        .label("Save Draft")
+                                        .label("Save draft")
                                         .on_click(cx.listener(|this, _, _, cx| {
                                             this.save_draft(cx);
                                         })),
@@ -4147,15 +6027,17 @@ pub mod gpui_app {
                                 .flex_1()
                                 .p(px(8.0))
                                 .rounded_md()
-                                .bg(rgb(0x111622))
+                                .bg(cx.theme().popover)
                                 .border_1()
-                                .border_color(rgb(0x232c40))
+                                .border_color(cx.theme().border)
                                 .child(if let Some(inputs) = &self.compose_inputs {
-                                    component::input::Input::new(&inputs.body).into_any_element()
+                                    component::input::Textarea::new(&inputs.body)
+                                        .aria_label("Message body")
+                                        .into_any_element()
                                 } else {
                                     div()
                                         .text_xs()
-                                        .text_color(rgb(0xe2e8f0))
+                                        .text_color(cx.theme().foreground)
                                         .child(body_text)
                                         .into_any_element()
                                 }),
@@ -4169,7 +6051,7 @@ pub mod gpui_app {
                                 .gap(px(6.0))
                                 .p(px(6.0))
                                 .rounded_md()
-                                .bg(rgb(0x1a2234))
+                                .bg(cx.theme().muted)
                                 .children(
                                     self.compose_attachments
                                         .iter()
@@ -4189,16 +6071,16 @@ pub mod gpui_app {
                                                 .px(px(8.0))
                                                 .py(px(3.0))
                                                 .rounded_md()
-                                                .bg(rgb(0x0f172a))
+                                                .bg(cx.theme().muted)
                                                 .border_1()
-                                                .border_color(rgb(0x334155))
+                                                .border_color(cx.theme().border)
                                                 .text_xs()
-                                                .text_color(rgb(0xcbd5e1))
+                                                .text_color(cx.theme().foreground)
                                                 .child(Icon::new(IconName::File).xsmall())
                                                 .child(div().child(fname.clone()))
                                                 .child(
                                                     div()
-                                                        .text_color(rgb(0x64748b))
+                                                        .text_color(cx.theme().muted_foreground)
                                                         .child(format!("({sz_str})")),
                                                 )
                                                 .child(
@@ -4234,18 +6116,29 @@ pub mod gpui_app {
                                 .flex_row()
                                 .items_center()
                                 .justify_between()
+                                // The state the composer is actually in.
+                                //
+                                // This row used to read "Autocrypt OpenPGP Signature
+                                // Attached" on every message, unconditionally, with no
+                                // cryptographic call behind it. It now reports only what is
+                                // true by construction: the sending account, and whether
+                                // the body goes out as Markdown or as plain text.
                                 .child(
                                     div()
                                         .flex()
                                         .flex_row()
                                         .items_center()
                                         .gap(px(6.0))
-                                        .child(Icon::new(IconName::FolderClosed).xsmall().text_color(rgb(0x34d399)))
+                                        .child(
+                                            Icon::new(IconName::User)
+                                                .xsmall()
+                                                .text_color(cx.theme().muted_foreground),
+                                        )
                                         .child(
                                             div()
                                                 .text_xs()
-                                                .text_color(rgb(0x34d399))
-                                                .child("Autocrypt OpenPGP Signature Attached"),
+                                                .text_color(cx.theme().muted_foreground)
+                                                .child(composer_status),
                                         ),
                                 )
                                 .child(
@@ -4291,7 +6184,7 @@ pub mod gpui_app {
 
             let cmd_el = if let Some(ref cmd_state) = self.command_state {
                 let mut cmd = Command::new(cmd_state);
-                for (_idx, (_act_id, title, _shortcut)) in actions.iter().enumerate() {
+                for (_act_id, title, _shortcut) in actions.iter() {
                     cmd = cmd.item(CommandItem::new().label(title.clone()));
                 }
                 Some(cmd)
@@ -4306,7 +6199,7 @@ pub mod gpui_app {
                     .items_center()
                     .justify_center()
                     .size_full()
-                    .bg(rgb(0x000000bb))
+                    .bg(gpui_kit::gpui::transparent_black())
                     .child(
                         div()
                             .id("modal-palette-box")
@@ -4314,9 +6207,9 @@ pub mod gpui_app {
                             .flex_col()
                             .w(px(520.0))
                             .rounded_xl()
-                            .bg(rgb(0x161b26))
+                            .bg(cx.theme().input)
                             .border_1()
-                            .border_color(rgb(0x2d3748))
+                            .border_color(cx.theme().border)
                             .p(px(16.0))
                             .gap(px(10.0))
                             .children(cmd_el)
@@ -4327,22 +6220,22 @@ pub mod gpui_app {
                                     .items_center()
                                     .p(px(10.0))
                                     .rounded_md()
-                                    .bg(rgb(0x111622))
+                                    .bg(cx.theme().popover)
                                     .border_1()
-                                    .border_color(rgb(0x232c40))
+                                    .border_color(cx.theme().border)
                                     .gap(px(8.0))
                                     .child(
                                         Icon::new(IconName::Search)
                                             .small()
-                                            .text_color(rgb(0x94a3b8)),
+                                            .text_color(cx.theme().muted_foreground),
                                     )
                                     .child(
                                         div()
                                             .text_xs()
                                             .text_color(if self.command_palette.query.is_empty() {
-                                                rgb(0x94a3b8)
+                                                cx.theme().muted_foreground
                                             } else {
-                                                rgb(0xf1f5f9)
+                                                cx.theme().foreground
                                             })
                                             .child(if self.command_palette.query.is_empty() {
                                                 "Type a command or search action…".to_string()
@@ -4367,11 +6260,11 @@ pub mod gpui_app {
                                             .py(px(8.0))
                                             .rounded_md()
                                             .bg(if idx == 0 {
-                                                rgb(0x1e293b)
+                                                cx.theme().accent
                                             } else {
-                                                rgb(0x00000000)
+                                                gpui_kit::gpui::transparent_black()
                                             })
-                                            .hover(|s| s.bg(rgb(0x1e293b)))
+                                            .hover(|s| s.bg(cx.theme().accent))
                                             .on_click(cx.listener(move |this, _, _, cx| {
                                                 match act_id_clone.as_str() {
                                                     "mail.compose" => {
@@ -4424,7 +6317,7 @@ pub mod gpui_app {
                                             .child(
                                                 div()
                                                     .text_xs()
-                                                    .text_color(rgb(0xf1f5f9))
+                                                    .text_color(cx.theme().foreground)
                                                     .child(title),
                                             )
                                             .child(
@@ -4432,9 +6325,9 @@ pub mod gpui_app {
                                                     .px(px(6.0))
                                                     .py(px(2.0))
                                                     .rounded_md()
-                                                    .bg(rgb(0x111622))
+                                                    .bg(cx.theme().popover)
                                                     .text_xs()
-                                                    .text_color(rgb(0x94a3b8))
+                                                    .text_color(cx.theme().muted_foreground)
                                                     .child(shortcut.unwrap_or_default()),
                                             )
                                     },
@@ -4457,25 +6350,25 @@ pub mod gpui_app {
                 (
                     ProviderType::Gmail,
                     "Google (Gmail)",
-                    "OAuth2 PKCE • IMAP/SMTP",
+                    "OAuth2, IMAP and SMTP",
                     IconName::Globe,
                 ),
                 (
                     ProviderType::Graph,
                     "Microsoft 365",
-                    "Graph API • Outlook/Exchange",
+                    "Outlook and Exchange",
                     IconName::Building2,
                 ),
                 (
                     ProviderType::Jmap,
                     "Fastmail (JMAP)",
-                    "RFC 8620 • Ultra-fast Push",
+                    "Push mail",
                     IconName::Cpu,
                 ),
                 (
                     ProviderType::Imap,
                     "Custom IMAP",
-                    "TLS 993 • SMTP 587 Submission",
+                    "IMAP 993, submission 587",
                     IconName::FolderClosed,
                 ),
             ];
@@ -4506,7 +6399,7 @@ pub mod gpui_app {
                 .items_center()
                 .justify_center()
                 .size_full()
-                .bg(rgb(0x000000bb))
+                .bg(gpui_kit::gpui::transparent_black())
                 .child(
                     div()
                         .id("modal-add-account-box")
@@ -4516,9 +6409,9 @@ pub mod gpui_app {
                         .max_h(px(720.0))
                         .overflow_y_scroll()
                         .rounded_xl()
-                        .bg(rgb(0x131722))
+                        .bg(cx.theme().popover)
                         .border_1()
-                        .border_color(rgb(0x283347))
+                        .border_color(cx.theme().border)
                         .p(px(24.0))
                         .gap(px(14.0))
                         // Wizard Header
@@ -4541,20 +6434,20 @@ pub mod gpui_app {
                                                 .gap(px(8.0))
                                                 .child(
                                                     Icon::new(IconName::Inbox)
-                                                        .text_color(rgb(0x60a5fa)),
+                                                        .text_color(cx.theme().primary),
                                                 )
                                                 .child(
                                                     div()
                                                         .text_base()
                                                         .font_weight(FontWeight::BOLD)
-                                                        .text_color(rgb(0xf8fafc))
-                                                        .child("New Mail Setup Wizard"),
+                                                        .text_color(cx.theme().foreground)
+                                                        .child("Add account"),
                                                 ),
                                         )
                                         .child(
                                             div()
                                                 .text_xs()
-                                                .text_color(rgb(0x94a3b8))
+                                                .text_color(cx.theme().muted_foreground)
                                                 .child("Connect your email inbox to Vespetrel with local SQLite WAL & FTS5"),
                                         ),
                                 )
@@ -4580,7 +6473,7 @@ pub mod gpui_app {
                                     div()
                                         .text_xs()
                                         .font_weight(FontWeight::SEMIBOLD)
-                                        .text_color(rgb(0xcbd5e1))
+                                        .text_color(cx.theme().foreground)
                                         .child("1. Choose Provider"),
                                 )
                                 .child(
@@ -4599,10 +6492,10 @@ pub mod gpui_app {
                                                 .w(px(258.0))
                                                 .p(px(10.0))
                                                 .rounded_lg()
-                                                .bg(if is_sel { rgb(0x1e293b) } else { rgb(0x181f2f) })
+                                                .bg(if is_sel { cx.theme().accent } else { cx.theme().muted })
                                                 .border_1()
-                                                .border_color(if is_sel { rgb(0x3b82f6) } else { rgb(0x232d42) })
-                                                .hover(|s| s.bg(rgb(0x232d42)))
+                                                .border_color(if is_sel { cx.theme().primary } else { cx.theme().ring })
+                                                .hover(|s| s.bg(cx.theme().ring))
                                                 .on_click(cx.listener(move |this, _, window, cx| {
                                                     this.login_wizard.select_provider(p_choice.clone());
                                                     if let Some(inputs) = &this.wizard_inputs {
@@ -4619,19 +6512,19 @@ pub mod gpui_app {
                                                         .flex_row()
                                                         .items_center()
                                                         .gap(px(6.0))
-                                                        .child(Icon::new(icon).small().text_color(if is_sel { rgb(0x60a5fa) } else { rgb(0x94a3b8) }))
+                                                        .child(Icon::new(icon).small().text_color(if is_sel { cx.theme().primary } else { cx.theme().muted_foreground }))
                                                         .child(
                                                             div()
                                                                 .text_xs()
                                                                 .font_weight(FontWeight::BOLD)
-                                                                .text_color(if is_sel { rgb(0x60a5fa) } else { rgb(0xf1f5f9) })
+                                                                .text_color(if is_sel { cx.theme().primary } else { cx.theme().foreground })
                                                                 .child(title),
                                                         ),
                                                 )
                                                 .child(
                                                     div()
                                                         .text_xs()
-                                                        .text_color(rgb(0x64748b))
+                                                        .text_color(cx.theme().muted_foreground)
                                                         .child(desc),
                                                 )
                                         })),
@@ -4653,7 +6546,7 @@ pub mod gpui_app {
                                             div()
                                                 .text_xs()
                                                 .font_weight(FontWeight::SEMIBOLD)
-                                                .text_color(rgb(0xcbd5e1))
+                                                .text_color(cx.theme().foreground)
                                                 .child("2. Account Configuration"),
                                         )
                                         .child(
@@ -4663,7 +6556,7 @@ pub mod gpui_app {
                                                     .flex()
                                                     .flex_row()
                                                     .gap(px(4.0))
-                                                    .bg(rgb(0x181f2f))
+                                                    .bg(cx.theme().muted)
                                                     .p(px(2.0))
                                                     .rounded_md()
                                                     .child({
@@ -4708,16 +6601,16 @@ pub mod gpui_app {
                                             .gap(px(10.0))
                                             .p(px(12.0))
                                             .rounded_lg()
-                                            .bg(rgb(0x161c28))
+                                            .bg(cx.theme().muted)
                                             .border_1()
-                                            .border_color(rgb(0x232c3f))
+                                            .border_color(cx.theme().muted)
                                             .child(
                                                 div()
                                                     .flex()
                                                     .flex_row()
                                                     .items_center()
                                                     .gap(px(10.0))
-                                                    .child(Icon::new(if selected_p == ProviderType::Gmail { IconName::Globe } else { IconName::Building2 }).text_color(rgb(0x60a5fa)))
+                                                    .child(Icon::new(if selected_p == ProviderType::Gmail { IconName::Globe } else { IconName::Building2 }).text_color(cx.theme().primary))
                                                     .child(
                                                         div()
                                                             .flex()
@@ -4727,13 +6620,13 @@ pub mod gpui_app {
                                                                 div()
                                                                     .text_xs()
                                                                     .font_weight(FontWeight::BOLD)
-                                                                    .text_color(rgb(0xf1f5f9))
+                                                                    .text_color(cx.theme().foreground)
                                                                     .child(if selected_p == ProviderType::Gmail { "Google Browser OAuth2 (PKCE)" } else { "Microsoft 365 OAuth2" }),
                                                             )
                                                             .child(
                                                                 div()
                                                                     .text_xs()
-                                                                    .text_color(rgb(0x94a3b8))
+                                                                    .text_color(cx.theme().muted_foreground)
                                                                     .child("Vespetrel will launch your web browser to securely authenticate. No passwords are stored; tokens are kept in the OS keyring."),
                                                             ),
                                                     ),
@@ -4747,7 +6640,7 @@ pub mod gpui_app {
                                                             .child(if let Some(inputs) = inputs_opt {
                                                                 component::input::Input::new(&inputs.client_id).cleanable(true).into_any_element()
                                                             } else {
-                                                                div().text_xs().text_color(rgb(0x64748b)).child("OAuth Client ID").into_any_element()
+                                                                div().text_xs().text_color(cx.theme().muted_foreground).child("OAuth Client ID").into_any_element()
                                                             }),
                                                     )
                                                     .child(
@@ -4756,7 +6649,7 @@ pub mod gpui_app {
                                                             .child(if let Some(inputs) = inputs_opt {
                                                                 component::input::Input::new(&inputs.email).cleanable(true).into_any_element()
                                                             } else {
-                                                                div().text_xs().text_color(rgb(0x64748b)).child("user@gmail.com").into_any_element()
+                                                                div().text_xs().text_color(cx.theme().muted_foreground).child("user@gmail.com").into_any_element()
                                                             }),
                                                     ),
                                             )
@@ -4769,11 +6662,11 @@ pub mod gpui_app {
                                                         .gap(px(6.0))
                                                         .p(px(8.0))
                                                         .rounded_md()
-                                                        .bg(rgb(0x1e3a8a))
+                                                        .bg(cx.theme().primary)
                                                         .border_1()
-                                                        .border_color(rgb(0x3b82f6))
+                                                        .border_color(cx.theme().primary)
                                                         .text_xs()
-                                                        .text_color(rgb(0x93c5fd))
+                                                        .text_color(cx.theme().primary_hover)
                                                         .child(Icon::new(IconName::LoaderCircle).small())
                                                         .child(status_str.clone())
                                                 } else {
@@ -4788,9 +6681,9 @@ pub mod gpui_app {
                                             .gap(px(8.0))
                                             .p(px(12.0))
                                             .rounded_lg()
-                                            .bg(rgb(0x161c28))
+                                            .bg(cx.theme().muted)
                                             .border_1()
-                                            .border_color(rgb(0x232c3f))
+                                            .border_color(cx.theme().muted)
                                             .child(
                                                 div()
                                                     .flex()
@@ -4799,14 +6692,14 @@ pub mod gpui_app {
                                                     .gap(px(8.0))
                                                     .p(px(8.0))
                                                     .rounded_md()
-                                                    .bg(rgb(0x1e293b))
+                                                    .bg(cx.theme().accent)
                                                     .border_1()
-                                                    .border_color(rgb(0x334155))
-                                                    .child(Icon::new(IconName::Info).small().text_color(rgb(0x38bdf8)))
+                                                    .border_color(cx.theme().border)
+                                                    .child(Icon::new(IconName::Info).small().text_color(cx.theme().info))
                                                     .child(
                                                         div()
                                                             .text_xs()
-                                                            .text_color(rgb(0x38bdf8))
+                                                            .text_color(cx.theme().info)
                                                             .child("Google App Password: In your Google Account, go to Security → 2-Step Verification → App passwords. Generate a 16-character password and enter it below."),
                                                     ),
                                             )
@@ -4815,29 +6708,29 @@ pub mod gpui_app {
                                                     .gap(px(8.0))
                                                     .child(
                                                         Field::new()
-                                                            .label("Gmail Address:")
+                                                            .label("Gmail address")
                                                             .child(if let Some(inputs) = inputs_opt {
                                                                 component::input::Input::new(&inputs.email).cleanable(true).into_any_element()
                                                             } else {
-                                                                div().text_xs().text_color(rgb(0xe2e8f0)).child(display_email.to_string()).into_any_element()
+                                                                div().text_xs().text_color(cx.theme().foreground).child(display_email.to_string()).into_any_element()
                                                             }),
                                                     )
                                                     .child(
                                                         Field::new()
-                                                            .label("16-character Google App Password:")
+                                                            .label("App password")
                                                             .child(if let Some(inputs) = inputs_opt {
                                                                 component::input::Input::new(&inputs.password).mask_toggle().cleanable(true).into_any_element()
                                                             } else {
-                                                                div().text_xs().text_color(rgb(0x64748b)).child("••••••••••••••••").into_any_element()
+                                                                div().text_xs().text_color(cx.theme().muted_foreground).child("••••••••••••••••").into_any_element()
                                                             }),
                                                     )
                                                     .child(
                                                         Field::new()
-                                                            .label("Display Name (optional):")
+                                                            .label("Display name (optional)")
                                                             .child(if let Some(inputs) = inputs_opt {
                                                                 component::input::Input::new(&inputs.name).cleanable(true).into_any_element()
                                                             } else {
-                                                                div().text_xs().text_color(rgb(0xe2e8f0)).child(display_name.to_string()).into_any_element()
+                                                                div().text_xs().text_color(cx.theme().foreground).child(display_name.to_string()).into_any_element()
                                                             }),
                                                     ),
                                             )
@@ -4848,7 +6741,7 @@ pub mod gpui_app {
                                                     .items_center()
                                                     .justify_between()
                                                     .text_xs()
-                                                    .text_color(rgb(0x64748b))
+                                                    .text_color(cx.theme().muted_foreground)
                                                     .child("Incoming: imap.gmail.com:993 (SSL/TLS)")
                                                     .child("Outgoing: smtp.gmail.com:587 (STARTTLS)"),
                                             )
@@ -4860,9 +6753,9 @@ pub mod gpui_app {
                                             .gap(px(8.0))
                                             .p(px(12.0))
                                             .rounded_lg()
-                                            .bg(rgb(0x161c28))
+                                            .bg(cx.theme().muted)
                                             .border_1()
-                                            .border_color(rgb(0x232c3f))
+                                            .border_color(cx.theme().muted)
                                             .child(
                                                 Form::vertical()
                                                     .gap(px(8.0))
@@ -4872,7 +6765,7 @@ pub mod gpui_app {
                                                             .child(if let Some(inputs) = inputs_opt {
                                                                 component::input::Input::new(&inputs.email).cleanable(true).into_any_element()
                                                             } else {
-                                                                div().text_xs().text_color(rgb(0xe2e8f0)).child(display_email.to_string()).into_any_element()
+                                                                div().text_xs().text_color(cx.theme().foreground).child(display_email.to_string()).into_any_element()
                                                             }),
                                                     )
                                                     .child(
@@ -4881,16 +6774,16 @@ pub mod gpui_app {
                                                             .child(if let Some(inputs) = inputs_opt {
                                                                 component::input::Input::new(&inputs.password).mask_toggle().cleanable(true).into_any_element()
                                                             } else {
-                                                                div().text_xs().text_color(rgb(0x64748b)).child("••••••••••••••••").into_any_element()
+                                                                div().text_xs().text_color(cx.theme().muted_foreground).child("••••••••••••••••").into_any_element()
                                                             }),
                                                     )
                                                     .child(
                                                         Field::new()
-                                                            .label("Display Name (optional):")
+                                                            .label("Display name (optional)")
                                                             .child(if let Some(inputs) = inputs_opt {
                                                                 component::input::Input::new(&inputs.name).cleanable(true).into_any_element()
                                                             } else {
-                                                                div().text_xs().text_color(rgb(0xe2e8f0)).child(display_name.to_string()).into_any_element()
+                                                                div().text_xs().text_color(cx.theme().foreground).child(display_name.to_string()).into_any_element()
                                                             }),
                                                     ),
                                             )
@@ -4905,11 +6798,11 @@ pub mod gpui_app {
                                                             .flex_col()
                                                             .flex_1()
                                                             .gap(px(4.0))
-                                                            .child(div().text_xs().font_weight(FontWeight::SEMIBOLD).text_color(rgb(0x94a3b8)).child("Incoming IMAP Host:"))
+                                                            .child(div().text_xs().font_weight(FontWeight::SEMIBOLD).text_color(cx.theme().muted_foreground).child("Incoming IMAP host"))
                                                             .child(if let Some(inputs) = inputs_opt {
                                                                 component::input::Input::new(&inputs.incoming_host).cleanable(true).into_any_element()
                                                             } else {
-                                                                div().text_xs().text_color(rgb(0x64748b)).child("imap.example.com").into_any_element()
+                                                                div().text_xs().text_color(cx.theme().muted_foreground).child("imap.example.com").into_any_element()
                                                             }),
                                                     )
                                                     .child(
@@ -4918,11 +6811,11 @@ pub mod gpui_app {
                                                             .flex_col()
                                                             .w(px(80.0))
                                                             .gap(px(4.0))
-                                                            .child(div().text_xs().font_weight(FontWeight::SEMIBOLD).text_color(rgb(0x94a3b8)).child("Port:"))
+                                                            .child(div().text_xs().font_weight(FontWeight::SEMIBOLD).text_color(cx.theme().muted_foreground).child("Port"))
                                                             .child(if let Some(inputs) = inputs_opt {
                                                                 component::input::Input::new(&inputs.incoming_port).into_any_element()
                                                             } else {
-                                                                div().text_xs().text_color(rgb(0x64748b)).child("993").into_any_element()
+                                                                div().text_xs().text_color(cx.theme().muted_foreground).child("993").into_any_element()
                                                             }),
                                                     ),
                                             )
@@ -4937,11 +6830,11 @@ pub mod gpui_app {
                                                             .flex_col()
                                                             .flex_1()
                                                             .gap(px(4.0))
-                                                            .child(div().text_xs().font_weight(FontWeight::SEMIBOLD).text_color(rgb(0x94a3b8)).child("Outgoing SMTP Host:"))
+                                                            .child(div().text_xs().font_weight(FontWeight::SEMIBOLD).text_color(cx.theme().muted_foreground).child("Outgoing SMTP host"))
                                                             .child(if let Some(inputs) = inputs_opt {
                                                                 component::input::Input::new(&inputs.outgoing_host).cleanable(true).into_any_element()
                                                             } else {
-                                                                div().text_xs().text_color(rgb(0x64748b)).child("smtp.example.com").into_any_element()
+                                                                div().text_xs().text_color(cx.theme().muted_foreground).child("smtp.example.com").into_any_element()
                                                             }),
                                                     )
                                                     .child(
@@ -4950,12 +6843,19 @@ pub mod gpui_app {
                                                             .flex_col()
                                                             .w(px(80.0))
                                                             .gap(px(4.0))
-                                                            .child(div().text_xs().font_weight(FontWeight::SEMIBOLD).text_color(rgb(0x94a3b8)).child("Port:"))
-                                                            .child(if let Some(inputs) = inputs_opt {
-                                                                component::input::Input::new(&inputs.outgoing_port).into_any_element()
-                                                            } else {
-                                                                div().text_xs().text_color(rgb(0x64748b)).child("587").into_any_element()
-                                                            }),
+                                                            // Real hairline, not a text run of
+                                                            // box-drawing characters. The old
+                                                            // rule broke apart at any font or
+                                                            // zoom level where the glyph was
+                                                            // not exactly one cell wide, and it
+                                                            // read as content to a screen
+                                                            // reader.
+                                                            .child(
+                                                                div()
+                                                                    .mt(px(4.0))
+                                                                    .border_t_1()
+                                                                    .border_color(cx.theme().border),
+                                                            )
                                                     ),
                                             )
                                     } else {
@@ -4966,9 +6866,9 @@ pub mod gpui_app {
                                             .gap(px(8.0))
                                             .p(px(12.0))
                                             .rounded_lg()
-                                            .bg(rgb(0x161c28))
+                                            .bg(cx.theme().muted)
                                             .border_1()
-                                            .border_color(rgb(0x232c3f))
+                                            .border_color(cx.theme().muted)
                                             .child(
                                                 Form::vertical()
                                                     .gap(px(8.0))
@@ -4978,7 +6878,7 @@ pub mod gpui_app {
                                                             .child(if let Some(inputs) = inputs_opt {
                                                                 component::input::Input::new(&inputs.email).cleanable(true).into_any_element()
                                                             } else {
-                                                                div().text_xs().text_color(rgb(0xe2e8f0)).child(display_email.to_string()).into_any_element()
+                                                                div().text_xs().text_color(cx.theme().foreground).child(display_email.to_string()).into_any_element()
                                                             }),
                                                     )
                                                     .child(
@@ -4987,7 +6887,7 @@ pub mod gpui_app {
                                                             .child(if let Some(inputs) = inputs_opt {
                                                                 component::input::Input::new(&inputs.password).mask_toggle().cleanable(true).into_any_element()
                                                             } else {
-                                                                div().text_xs().text_color(rgb(0x64748b)).child("••••••••••••••••").into_any_element()
+                                                                div().text_xs().text_color(cx.theme().muted_foreground).child("••••••••••••••••").into_any_element()
                                                             }),
                                                     )
                                                     .child(
@@ -4996,7 +6896,7 @@ pub mod gpui_app {
                                                             .child(if let Some(inputs) = inputs_opt {
                                                                 component::input::Input::new(&inputs.incoming_host).cleanable(true).into_any_element()
                                                             } else {
-                                                                div().text_xs().text_color(rgb(0x64748b)).child("api.fastmail.com").into_any_element()
+                                                                div().text_xs().text_color(cx.theme().muted_foreground).child("api.fastmail.com").into_any_element()
                                                             }),
                                                     ),
                                             )
@@ -5009,7 +6909,7 @@ pub mod gpui_app {
                                 .flex()
                                 .flex_col()
                                 .gap(px(4.0))
-                                .child(div().text_xs().text_color(rgb(0x64748b)).child("Quick presets:"))
+                                .child(div().text_xs().text_color(cx.theme().muted_foreground).child("Quick presets:"))
                                 .child(
                                     div()
                                         .flex()
@@ -5116,12 +7016,12 @@ pub mod gpui_app {
                                 .gap(px(6.0))
                                 .p(px(8.0))
                                 .rounded_md()
-                                .bg(rgb(0x450a0a))
+                                .bg(cx.theme().danger)
                                 .border_1()
-                                .border_color(rgb(0xef4444))
+                                .border_color(cx.theme().danger)
                                 .text_xs()
-                                .text_color(rgb(0xfca5a5))
-                                .child(Icon::new(IconName::TriangleAlert).small().text_color(rgb(0xef4444)))
+                                .text_color(cx.theme().danger_foreground)
+                                .child(Icon::new(IconName::TriangleAlert).small().text_color(cx.theme().danger))
                                 .child(err.clone())
                         } else {
                             div()
@@ -5135,7 +7035,7 @@ pub mod gpui_app {
                                 .gap(px(10.0))
                                 .pt(px(8.0))
                                 .border_t_1()
-                                .border_color(rgb(0x1f293d))
+                                .border_color(cx.theme().border)
                                 .child(
                                     Button::new("wizard-btn-cancel")
                                         .label("Cancel")
@@ -5162,7 +7062,7 @@ pub mod gpui_app {
                                             .into_any_element()
                                     } else {
                                         Button::new("wizard-btn-connect")
-                                            .label("Connect Account")
+                                            .label("Connect account")
                                             .primary()
                                             .on_click(cx.listener(|this, _, _, cx| {
                                                 let (email, password, name, mut in_host, mut in_port, mut out_host, mut out_port) = if let Some(inputs) = &this.wizard_inputs {
@@ -5375,8 +7275,23 @@ pub mod gpui_app {
             let pool_opt = self.storage_pool.clone();
             let sync_sender = self.sync_sender.clone();
 
+            // Reconnecting an account that already has one: the provider will omit
+            // `refresh_token` from the token response, and overwriting the stored credential
+            // with nothing would strand the account on a token that expires in an hour.
+            // Read it before the spawn, since the task cannot borrow `self`.
+            let prior_refresh = self
+                .accounts
+                .iter()
+                .find(|a| a.email.eq_ignore_ascii_case(&user_email))
+                .and_then(|a| a.auth_config.refresh_token_keyring_key.clone())
+                .and_then(|key| {
+                    keyring::Entry::new("vespetrel", &key)
+                        .ok()
+                        .and_then(|e| e.get_password().ok())
+                });
+
             cx.spawn(async move |this, cx| {
-                let (listener, port) = match vespetrel_crypto::OAuth2Engine::bind_loopback().await {
+                let listener = match vespetrel_crypto::OAuth2Engine::bind_loopback().await {
                     Ok(res) => res,
                     Err(e) => {
                         let _ = this.update(cx, |view, cx| {
@@ -5393,7 +7308,10 @@ pub mod gpui_app {
                     ProviderType::Graph => vespetrel_crypto::OAuth2Config::microsoft(&client_id),
                     _ => return,
                 };
-                oauth_cfg.redirect_uri = format!("http://127.0.0.1:{port}/callback");
+                let port = listener.port;
+                // Must match the redirect_uri sent in the authorization request byte for byte;
+                // the token endpoint compares them exactly.
+                oauth_cfg.redirect_uri = format!("http://127.0.0.1:{port}/");
                 let engine = vespetrel_crypto::OAuth2Engine::new(oauth_cfg.clone());
                 let (auth_url, csrf_token, verifier) = engine.auth_url();
 
@@ -5423,7 +7341,11 @@ pub mod gpui_app {
                     cx.notify();
                 });
 
-                let code_res = engine.wait_for_callback_on_listener(listener, 180, Some(csrf_token.secret())).await;
+                // 15 minutes: enough for an account picker, a consent screen, and a second-factor prompt.
+                // The previous 180s expired mid-MFA and reported it as a mysterious timeout.
+                let code_res = engine
+                    .wait_for_callback_on_listener(listener, 900, Some(csrf_token.secret()))
+                    .await;
                 let code = match code_res {
                     Ok(c) => c,
                     Err(e) => {
@@ -5442,17 +7364,36 @@ pub mod gpui_app {
                     cx.notify();
                 });
 
-                let token_bundle = match engine.exchange_code(code, verifier.secret().to_string()).await {
-                    Ok(b) => b,
-                    Err(e) => {
-                        let _ = this.update(cx, |view, cx| {
-                            view.show_toast(format!("Token exchange failed: {e}"), true, cx);
-                            view.login_wizard.step = WizardStep::Failed(format!("Token exchange failed: {e}"));
-                            cx.notify();
-                        });
-                        return;
-                    }
-                };
+                let token_bundle =
+                    match engine
+                        .exchange_code(code, verifier.secret().to_string(), prior_refresh)
+                        .await
+                    {
+                        Ok(b) => b,
+                        Err(e) => {
+                            let _ = this.update(cx, |view, cx| {
+                                view.show_toast(format!("Token exchange failed: {e}"), true, cx);
+                                view.login_wizard.step =
+                                    WizardStep::Failed(format!("Token exchange failed: {e}"));
+                                cx.notify();
+                            });
+                            return;
+                        }
+                    };
+
+                // An offline grant that returned no refresh token is not a usable account.
+                // Saving it produced a mailbox that synced for an hour and then failed forever
+                // with an opaque server-side auth error, with no hint that re-consent was needed.
+                if token_bundle.refresh_token.is_none() && oauth_cfg.offline_access {
+                    let msg = "Google did not return a refresh token for offline access. \
+Revoke Vespetrel's access at https://myaccount.google.com/permissions and connect again.";
+                    let _ = this.update(cx, |view, cx| {
+                        view.show_toast(msg.to_string(), true, cx);
+                        view.login_wizard.step = WizardStep::Failed(msg.to_string());
+                        cx.notify();
+                    });
+                    return;
+                }
 
                 let (final_email, final_name) = if user_email.is_empty() {
                     match provider_type {
@@ -5502,6 +7443,7 @@ pub mod gpui_app {
                     token_url: oauth_cfg.token_url.clone(),
                     redirect_uri: oauth_cfg.redirect_uri.clone(),
                     scopes: oauth_cfg.scopes.clone(),
+                    offline_access: oauth_cfg.offline_access,
                 });
 
                 let provider = vespetrel_engine::coordinator::make_provider_with_token(&acct, token_bundle.access_token.clone());
@@ -5619,6 +7561,67 @@ pub mod gpui_app {
         Ok((email, name))
     }
 
+    /// Map an application [`KeyAction`] onto its typed GPUI Action.
+    ///
+    /// One Action per command, so the shortcut, a toolbar button and the palette all
+    /// dispatch the same value and the logic stays in one handler. An action the
+    /// window does not implement returns `None` and is left unbound rather than bound
+    /// to a handler that silently does nothing.
+    pub fn binding_for(keystroke: &str, key: KeyAction) -> Option<KeyBinding> {
+        let context = Some(BINDING_CONTEXT);
+        Some(match key {
+            KeyAction::NextMessage => KeyBinding::new(keystroke, SelectNextMessage, context),
+            KeyAction::PrevMessage => KeyBinding::new(keystroke, SelectPreviousMessage, context),
+            KeyAction::Archive => KeyBinding::new(keystroke, Archive, context),
+            KeyAction::Delete => KeyBinding::new(keystroke, Delete, context),
+            KeyAction::MarkRead | KeyAction::MarkUnread => {
+                KeyBinding::new(keystroke, ToggleRead, context)
+            }
+            KeyAction::ToggleStar => KeyBinding::new(keystroke, ToggleStar, context),
+            KeyAction::Reply => KeyBinding::new(keystroke, Reply, context),
+            KeyAction::ReplyAll => KeyBinding::new(keystroke, ReplyAll, context),
+            KeyAction::Forward => KeyBinding::new(keystroke, Forward, context),
+            KeyAction::Compose => KeyBinding::new(keystroke, Compose, context),
+            KeyAction::FocusSearch => KeyBinding::new(keystroke, FocusSearch, context),
+            KeyAction::SyncNow => KeyBinding::new(keystroke, SyncNow, context),
+            KeyAction::ToggleNavigationPane => {
+                KeyBinding::new(keystroke, ToggleFolderTree, context)
+            }
+            KeyAction::GoToInbox => KeyBinding::new(keystroke, GoToInbox, context),
+            KeyAction::GoToSent => KeyBinding::new(keystroke, GoToSent, context),
+            KeyAction::GoToDrafts => KeyBinding::new(keystroke, GoToDrafts, context),
+        })
+    }
+
+    /// The key context every window binding is scoped to.
+    const BINDING_CONTEXT: &str = WINDOW_CONTEXT;
+
+    /// Install a keymap on the application.
+    ///
+    /// A token that does not translate is skipped and reported, never passed to
+    /// `KeyBinding::new`: that constructor panics on input it cannot parse, so a typo
+    /// in a preset would take the whole window down at launch.
+    pub fn bind_keymap(map: &KeybindingMap, cx: &mut App) -> Vec<String> {
+        let mut bindings = Vec::with_capacity(map.sorted_entries().len());
+        let mut rejected = Vec::new();
+
+        for (token, key_action) in map.sorted_entries() {
+            let Some(keystroke) = to_gpui_keystroke(&token) else {
+                rejected.push(token);
+                continue;
+            };
+            match binding_for(&keystroke, key_action) {
+                Some(binding) => bindings.push(binding),
+                None => rejected.push(token),
+            }
+        }
+
+        if !bindings.is_empty() {
+            cx.bind_keys(bindings);
+        }
+        rejected
+    }
+
     /// Launch the GPUI Desktop Application
     pub fn run_gpui_app(
         sync_rx: flume::Receiver<SyncEvent>,
@@ -5629,6 +7632,21 @@ pub mod gpui_app {
             .with_assets(Assets)
             .run(move |cx: &mut App| {
                 gpui_kit::init(cx);
+                // Follow the operating system's light/dark appearance. `init` picks a fixed
+                // mode, so without this a user with a dark desktop got a light window.
+                gpui_kit::component::theme::Theme::change(crate::platform::theme_mode(), None, cx);
+                // Bind the keymap once, at startup, from the stored preset.
+                //
+                // `cx.bind_keys` appends and GPUI resolves competing bindings by
+                // context depth, so a later preset's bindings would outrank the old
+                // ones for the keys they share while every other key stayed bound to
+                // the previous preset. Clearing and rebuilding would also drop the
+                // component defaults that `gpui_kit::init` registered, so the preset
+                // is applied at launch and a change is reported as needing a restart.
+                let map = KeybindingMap::new(crate::keybindings::preset_from_settings(
+                    vespetrel_core::KeymapPreset::default(),
+                ));
+                bind_keymap(&map, cx);
                 let rx = sync_rx.clone();
                 let tx = sync_tx.clone();
                 let pool = storage_pool.clone();
@@ -5639,14 +7657,94 @@ pub mod gpui_app {
                             appears_transparent: false,
                             traffic_light_position: None,
                         }),
-                        window_min_size: Some(size(px(900.0), px(600.0))),
+                        // Documented minimum for this shell: 48 rail + 220 tree + 360 list
+                        // leaves ~490 for the reader. At the old 900px minimum the reader
+                        // was squeezed to roughly 270px, which is below the point where a
+                        // message body is readable.
+                        window_min_size: Some(size(px(1120.0), px(640.0))),
                         ..Default::default()
                     },
                     move |window, cx| {
-                        let view = cx.new(|cx| MainWindow::from_storage(cx, rx, tx, pool));
+                        let view = cx.new(|cx| MainWindow::from_storage(window, cx, rx, tx, pool));
                         cx.new(|cx| gpui_kit::component::Root::new(view, window, cx))
                     },
                 );
             });
+    }
+}
+
+#[cfg(test)]
+mod design_tests {
+    use super::gpui_app::{StatusState, classify_status, command_palette_keystroke, elide};
+    use crate::platform::command_palette_shortcut_label;
+
+    #[test]
+    fn message_page_size_is_a_bound_not_a_display_cap() {
+        // The list previously fetched 100 rows, so a busy mailbox simply stopped existing below
+        // the fold. Assert we stay well clear of that and keep the fetch bounded.
+        let page_size = super::gpui_app::MESSAGE_PAGE_SIZE;
+        assert!(page_size >= 500, "page size regressed toward a display cap");
+        assert!(page_size <= 5_000, "page size must stay bounded");
+    }
+
+    /// `&snippet[..100]` panicked whenever the byte at index 100 fell inside a
+    /// multi-byte character, which ordinary mail triggers constantly
+    /// ("Rechnung für März", an emoji in a newsletter). Assert the truncation walks by
+    /// character and never splits one.
+    #[test]
+    fn elide_never_splits_a_character() {
+        assert_eq!(elide("hello", 10), "hello");
+        assert_eq!(elide("hello", 5), "hello");
+        assert_eq!(elide("hello", 4), "hell\u{2026}");
+
+        // "ä" is two bytes: a 4-byte window over "ääää" must not panic.
+        let accented = elide("ääää", 4);
+        assert_eq!(accented, "ääää");
+        let cut = elide("ääää", 3);
+        assert_eq!(cut, "äää\u{2026}");
+        assert_eq!(cut.chars().count(), 4);
+
+        // A 4-byte emoji.
+        let emoji = "\u{1F600}\u{1F600}\u{1F600}";
+        assert_eq!(elide(emoji, 2), "\u{1F600}\u{1F600}\u{2026}");
+
+        // Empty input must stay empty rather than becoming a lone ellipsis.
+        assert_eq!(elide("", 5), "");
+    }
+
+    /// The status bar used to report "Connected" from the absence of certain words in a
+    /// free-text message, so a genuine failure whose wording differed stayed green and a
+    /// normal message containing "error" turned the indicator red.
+    #[test]
+    fn status_state_reflects_the_real_condition() {
+        assert_eq!(classify_status(0, "All good"), StatusState::NoAccount);
+        assert_eq!(classify_status(1, "Ready"), StatusState::Ready);
+        assert_eq!(classify_status(1, "Syncing 3 folders"), StatusState::Busy);
+        assert_eq!(
+            classify_status(1, "Couldn't reach server"),
+            StatusState::Failed
+        );
+        assert_eq!(
+            classify_status(1, "Authentication failed"),
+            StatusState::Failed
+        );
+        assert_eq!(
+            classify_status(1, "Server unavailable"),
+            StatusState::Failed
+        );
+        // A busy state must win over a bare "error"-free prefix.
+        assert_eq!(classify_status(1, "Syncing\u{2026}"), StatusState::Busy);
+    }
+
+    /// The command-palette hint must name the modifier this platform uses, and the
+    /// `Keystroke` must agree with the label it is rendered from.
+    #[test]
+    fn command_palette_keystroke_matches_its_label() {
+        let stroke = command_palette_keystroke();
+        let is_macos = cfg!(target_os = "macos");
+        assert_eq!(stroke.modifiers.platform, is_macos);
+        assert_eq!(stroke.modifiers.control, !is_macos);
+        assert_eq!(stroke.key, "k");
+        assert!(command_palette_shortcut_label().ends_with(" K"));
     }
 }

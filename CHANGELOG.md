@@ -10,6 +10,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **`vespetrel-core::search`**: Canonical FTS5 query sanitization (`escape_fts5_query`, `escape_fts5_term`, `fts5_predicate`), shared by `storage::fts` and `core::virtual_folder` so the two cannot drift again.
+- **`vespetrel-crypto::LoopbackListener`**: Loopback listener holding one socket per address family on a single port, so `localhost` resolves usably regardless of which stack the browser picks.
 - **Interactive New Mail Setup Wizard**:
   - Real, interactive text input fields powered by `gpui-kit::component::input::Input` and `InputState` for manual account setup.
   - Support for custom **Email Address**, **Display Name**, **Password / App Password**, **Incoming Server & Port**, and **Outgoing Server & Port**.
@@ -106,6 +108,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Comprehensive theme token styling adopting `cx.theme()` tokens (`background`, `foreground`, `border`) with `ActiveTheme` and `Sizable` traits.
 
 ### Fixed
+- **Google OAuth2 Sign-In (reconnect & expired-token failures)**:
+  - Added `access_type=offline`, `prompt=consent` and `include_granted_scopes=true` to the authorization request. Google defaults to `online` access, under which it may return no `refresh_token` at all, and omits one on any repeat sign-in. Vespetrel previously saved the account anyway, leaving it with a one-hour token and no way to renew it — the sign-in appeared to succeed and then failed permanently once the token expired.
+  - `OAuth2Engine::exchange_code` now carries an existing refresh token through when the provider omits one from the response, so reconnecting an account no longer overwrites the stored credential with nothing.
+  - An offline grant that yields no refresh token now fails sign-in with instructions to revoke access at `https://myaccount.google.com/permissions` and reconnect, instead of persisting an account guaranteed to fail.
+  - Loopback listener now binds IPv4 (`127.0.0.1`) and IPv6 (`[::1]`) on a single port via the new `LoopbackListener`. It previously bound IPv4 only, so browsers resolving `localhost` to `::1` reported "connection refused" on a correct port.
+  - Provider-side denials (`?error=access_denied`) are now reported by name via a new `CallbackRejection` type, separating a terminal user decision from transient noise such as speculative connections. Previously every denial surfaced as "failed to extract authorization code", indistinguishable from a real bug.
+  - Callback wait raised from 180s to 900s, which previously expired mid-MFA.
+  - Loopback redirect path changed from `/callback` to `/`, matching Google's desktop-app samples.
+- **FTS5 Sanitizer Divergence**:
+  - Consolidated the two divergent FTS5 query sanitizers into a single implementation in `vespetrel-core::search` (in `core` because `storage` depends on it); `storage::fts::escape_fts5_query` now delegates to it.
+  - The `virtual_folder.rs` copy had no `from:`/`to:`/`subject:`/`body:` prefix support, so a sender search ran as a literal phrase and matched nothing.
+  - Removed the `MATCH '"*"'` fallback for a query with no searchable terms. That is a syntax error in FTS5, not a match-all, so an empty saved search failed outright instead of returning nothing. The predicate is now never-true (`0`) in that case.
+  - Saved-search predicates now bind the sanitized expression as a query parameter rather than interpolating it into the SQL string.
 - **IMAP Connection Error Surfacing & Mock Handling**:
   - Eliminated the opaque release-mode error (`"IMAP connection not connected to live server and mock fallback is disabled in release mode"`).
   - Ensured live server connections (Gmail, Outlook, Yahoo, custom IMAP) propagate genuine network, TLS handshake, and timeout errors instead of silently returning disconnected stream states.
@@ -115,6 +130,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Fixed fallback host handling in domain autodiscovery when unrecognized domains are provided, ensuring valid default host/port configuration.
 
 ### Changed
+- **Message List Render Performance**:
+  - The message list previously rebuilt the entire filtered-and-threaded vector on every render, twice: once to count rows for the virtual list's size table and again inside the row-render closure for each visible window. That is an O(n log n) sort plus a subject-normalising pass per row, per frame, while scrolling.
+  - Rows are now cached in a `RefCell<Rc<Vec<CachedRow>>>` and rebuilt only when `messages`, `list_filter`, `quick_filter_state`, `search_query`, `is_threaded` or `sort_order` changes. All mutation sites invalidate the cache explicitly.
+- **Message List Page Size**:
+  - Raised the per-load fetch from 100 to 500 rows (`MESSAGE_PAGE_SIZE`). The previous value behaved as a display cap: in a busy mailbox, messages simply stopped existing below the fold. Named to make clear it remains a bound rather than a limit on what the list can hold.
+- **Removed Unused Dependencies**:
+  - Dropped `imap-codec`, `imap-types` and `libdav`, which were declared but had zero references, along with the unused `smime-verify` feature. `vespetrel-dav` drops from 322 to 165 dependency lines.
+  - `icalendar` and `vcard4` are retained: they are genuinely used by `vespetrel-core`'s contact serializers.
+- **Documentation Accuracy**:
+  - `crates/vespetrel-imap/README.md` documented `ImapClient::connect` and `authenticate_plain`, neither of which exists. Rewritten against the real `ImapConfig`/`ImapConnection` API with a pointer to `ImapProvider`.
+  - `crates/vespetrel-dav/README.md` claimed `RRULE` recurrence expansion and RFC 6764 DNS SRV discovery. Neither is implemented; both are now stated as such, and the module is described as hand-rolled on `reqwest` rather than built on `libdav`.
+  - `vespetrel-jmap/src/lib.rs` credited `stalwart jmap-client`; the implementation is hand-built JSON-RPC over `reqwest`.
+  - `vespetrel-smtp/Cargo.toml` referenced `mail-send`, which is not a dependency.
+  - Root `README.md` no longer advertises `libdav` or `smime-verify` gating.
 - **Design Guides & Official Icon Migration (`gpui-kit-design-guides`)**:
   - Replaced 100% of emojis across navigation tree, folder lists, toolbars, reader banners, task lists, settings, status bars, and dialogs with official Lucide `IconName` variants (`Inbox`, `Search`, `Plus`, `RotateCw`, `Close`, `TriangleAlert`, `CircleCheck`, `GalleryVerticalEnd`, `StarFill`, `Calendar`, `User`, `Settings`, etc.).
   - Configured native SVG asset provider `Assets` via `gpui_kit::application().with_assets(Assets)` in `run_gpui_app`.

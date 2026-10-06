@@ -4,31 +4,41 @@
 [![Documentation](https://docs.rs/vespetrel-dav/badge.svg)](https://docs.rs/vespetrel-dav)
 [![License: MIT OR Apache-2.0](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg)](../../LICENSE)
 
-CalDAV (RFC 4791) and CardDAV (RFC 6352) synchronization engine for **Vespetrel**, powered by `libdav`, `icalendar`, and `vcard4`.
+CalDAV (RFC 4791) and CardDAV (RFC 6352) synchronization engine for **Vespetrel**.
+
+Requests and responses are built and parsed directly on `reqwest`: the WebDAV method set,
+XML multistatus handling and iCalendar/vCard parsing are implemented in-crate.
 
 ---
 
 ## 📦 Overview
 
 `vespetrel-dav` provides two-way calendar and contact synchronization with services such as Nextcloud, iCloud, Google Calendar, Fastmail, and Radicale:
-- **CalDAV (RFC 4791):** Calendar home discovery, event fetch (`VEVENT`), recurrence rule evaluation (`RRULE`), and calendar scheduling.
-- **CardDAV (RFC 6352):** Address book collection discovery, vCard 3.0 & 4.0 contact sync, and address book query reports.
-- **WebDAV Sync-Collection (RFC 6578):** High-efficiency delta synchronization using sync-tokens to minimize bandwidth and roundtrips.
+- **CalDAV (RFC 4791):** Calendar home discovery (`calendar_home`), `PROPFIND` listing (`list_calendars`), event fetch and write (`sync_calendar`, `create_or_update_event`, `delete_event`), plus `VEVENT` and `VTODO` parsing.
+- **CardDAV (RFC 6352):** Address book collection discovery (`addressbook_home`), `list_contacts`, and contact write/delete.
+- **WebDAV Sync-Collection (RFC 6578):** Delta synchronization using sync-tokens to minimize bandwidth and roundtrips.
 
 ## 🚀 Key Capabilities
 
-- **Automatic Service Discovery:** RFC 6764 DNS SRV and well-known URL bootstrapping (`/.well-known/caldav` and `/.well-known/carddav`).
+- **Well-known URL bootstrapping:** `/.well-known/caldav` and `/.well-known/carddav`. DNS SRV
+  lookup (RFC 6764) is *not* implemented.
 - **Conflict Resolution:** HTTP ETag-based optimistic concurrency control.
+- **Not implemented:** `RRULE` recurrence expansion. Events are read and written verbatim, so a
+  recurring series round-trips unchanged but individual occurrences are not expanded into
+  separate entries.
 
 ## 💻 Example Usage
 
 ```rust
-use vespetrel_dav::DavClient;
+use vespetrel_dav::{DavClient, DavConfig};
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    let client = DavClient::new("https://dav.example.com", "user", "pass");
-    println!("DAV client configured for CalDAV & CardDAV sync");
+    let config = DavConfig::new("https://dav.example.com", "user", "pass");
+    let client = DavClient::new(config);
+
+    let calendars = client.list_calendars().await?;
+    let contacts = client.list_contacts().await?;
 
     Ok(())
 }

@@ -42,8 +42,16 @@ pub fn create_pool_with_key(
     cfg.pool = Some(deadpool_sqlite::PoolConfig::new(pool_size));
     // For file-backed databases, run migrations once on a dedicated connection before starting pool
     if db_path != ":memory:" {
-        if let Some(parent) = std::path::Path::new(db_path).parent() {
-            let _ = std::fs::create_dir_all(parent);
+        if let Some(parent) = std::path::Path::new(db_path).parent()
+            && let Some(parent) = (!parent.as_os_str().is_empty()).then_some(parent)
+        {
+            // Don't discard this error: `Connection::open` would only report the missing file,
+            // hiding "the parent directory does not exist".
+            std::fs::create_dir_all(parent).map_err(|e| {
+                crate::StorageError::Io(std::io::Error::other(format!(
+                    "failed to create database directory {parent:?}: {e}"
+                )))
+            })?;
         }
         let mut conn = Connection::open(db_path)?;
         init_connection_with_key(&mut conn, encryption_key)?;

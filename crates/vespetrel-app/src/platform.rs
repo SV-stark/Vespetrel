@@ -131,6 +131,36 @@ pub fn init_platform() {
     info!(?theme, "Platform initialized with system theme");
 }
 
+/// The GPUI Kit theme mode matching the operating system's appearance.
+///
+/// The window previously started in whatever mode `gpui_kit::init` chose (light) and never
+/// consulted the OS, so a user with a dark desktop got a light window. Everything in the UI
+/// resolves through `cx.theme()`, so selecting the right mode here is what makes the
+/// system appearance actually apply.
+pub fn theme_mode() -> gpui_kit::component::theme::ThemeMode {
+    match detect_system_theme() {
+        OsTheme::Dark => gpui_kit::component::theme::ThemeMode::Dark,
+        OsTheme::Light => gpui_kit::component::theme::ThemeMode::Light,
+    }
+}
+
+/// The name of the command modifier on this platform, for a shortcut hint.
+///
+/// The header used to hardcode `⌘K`, which is wrong on Windows and Linux and is the
+/// platform's Command key rather than its Control key there.
+pub const fn command_modifier_label() -> &'static str {
+    if cfg!(target_os = "macos") {
+        "⌘"
+    } else {
+        "Ctrl"
+    }
+}
+
+/// The command-palette shortcut as it should be displayed on this platform.
+pub fn command_palette_shortcut_label() -> String {
+    format!("{} K", command_modifier_label())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -156,5 +186,28 @@ mod tests {
     fn test_system_theme_detection() {
         let theme = detect_system_theme();
         assert!(theme == OsTheme::Dark || theme == OsTheme::Light);
+    }
+
+    /// `detect_system_theme` already existed but nothing consumed it, so the window kept
+    /// whatever mode `gpui_kit::init` picked and a user with a dark desktop got a light
+    /// window. Assert the mapping the window now uses.
+    #[test]
+    fn theme_mode_follows_the_detected_appearance() {
+        assert_eq!(
+            theme_mode().is_dark(),
+            detect_system_theme() == OsTheme::Dark
+        );
+    }
+
+    /// The shortcut hint must name the modifier this platform actually uses. The header used
+    /// to hardcode `⌘K`, which is the macOS Command key and is Control on Windows and Linux.
+    #[test]
+    fn shortcut_label_uses_the_platform_modifier() {
+        let label = command_palette_shortcut_label();
+        if cfg!(target_os = "macos") {
+            assert_eq!(label, "⌘ K");
+        } else {
+            assert_eq!(label, "Ctrl K");
+        }
     }
 }

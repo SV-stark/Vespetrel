@@ -25,21 +25,28 @@ High-performance, RFC-compliant async IMAP client implementation for **Vespetrel
 ## 💻 Example Usage
 
 ```rust
-use vespetrel_imap::ImapClient;
+use vespetrel_imap::{ImapConfig, ImapConnection};
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    let mut client = ImapClient::connect("imap.example.com", 993).await?;
-    client.authenticate_plain("user@example.com", "password").await?;
-    client.select_mailbox("INBOX").await?;
+    // OAuth2 (Gmail/Outlook) — XOAUTH2 with the access token as the secret:
+    let config = ImapConfig::new("imap.gmail.com", 993, "user@gmail.com", access_token)
+        .with_xoauth2();
+    let mut conn = ImapConnection::new(config);
+    conn.connect().await?;
 
-    // Enter IDLE loop awaiting server push notifications
-    let mut idle_stream = client.idle().await?;
-    println!("Listening for new emails via IMAP IDLE...");
+    // Or a plain password / app password:
+    let config = ImapConfig::new("imap.example.com", 993, "user@example.com", "password");
+    let mut conn = ImapConnection::new(config);
+    conn.connect().await?;
 
     Ok(())
 }
 ```
+
+`ImapProvider` is the type the engine consumes, implementing `MailProvider` on top of
+`ImapConnection`; use it for folder listing and message fetch rather than driving the
+connection directly.
 
 ## 📄 License
 

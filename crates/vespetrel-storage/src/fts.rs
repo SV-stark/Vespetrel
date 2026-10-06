@@ -9,45 +9,15 @@ pub struct SearchResult {
 }
 
 /// Escape user input for SQLite FTS5 MATCH queries, preserving field prefixes (from:, to:, subject:, body:)
+///
+/// Delegates to [`vespetrel_core::search`] so this and `core::virtual_folder` cannot drift: they
+/// previously had separate sanitizers, and the `virtual_folder` copy had no prefix support and
+/// emitted the FTS5 syntax error `MATCH '"*"'` for an empty query.
+///
+/// Returns an empty string when nothing searchable remains; `search_messages` treats that as
+/// "no results" rather than searching for everything.
 pub fn escape_fts5_query(raw: &str) -> String {
-    let mut terms = Vec::new();
-    for word in raw.split_whitespace() {
-        let (col_prefix, term_part) = if let Some((col, val)) = word.split_once(':') {
-            match col.to_ascii_lowercase().as_str() {
-                "from" => (Some("from_address:"), val),
-                "to" => (Some("to_addresses:"), val),
-                "subject" => (Some("subject:"), val),
-                "body" => (Some("body_content:"), val),
-                _ => (None, word),
-            }
-        } else {
-            (None, word)
-        };
-
-        let clean: String = term_part
-            .chars()
-            .filter(|c| {
-                c.is_alphanumeric()
-                    || *c == '@'
-                    || *c == '.'
-                    || *c == '_'
-                    || *c == '-'
-                    || *c == '+'
-                    || *c == '#'
-                    || *c == '"'
-            })
-            .collect();
-        if !clean.is_empty() {
-            // Double embedded quotes to prevent FTS5 injection: " -> ""
-            let escaped = clean.replace('"', "\"\"");
-            if let Some(prefix) = col_prefix {
-                terms.push(format!("{prefix}\"{escaped}\""));
-            } else {
-                terms.push(format!("\"{escaped}\""));
-            }
-        }
-    }
-    terms.join(" ")
+    vespetrel_core::search::escape_fts5_query(raw).unwrap_or_default()
 }
 
 /// Sub-15ms FTS5 search with BM25 ranking - §3.2
@@ -97,6 +67,7 @@ mod tests {
     #[test]
     fn test_escape_fts5_query() {
         assert_eq!(escape_fts5_query("hello world"), "\"hello\" \"world\"");
+        // `=` is not a permitted term character, so the injection attempt collapses to "11".
         assert_eq!(
             escape_fts5_query("user@example.com OR 1=1"),
             "\"user@example.com\" \"OR\" \"11\""
@@ -110,6 +81,9 @@ mod tests {
             "from_address:\"alice@example.com\""
         );
         assert_eq!(escape_fts5_query("   "), "");
+        // A query with no searchable term must not become a match-all wildcard.
+        assert_eq!(escape_fts5_query("resume*"), "\"resume\"");
+        assert_eq!(vespetrel_core::search::escape_fts5_query("   "), None);
     }
 
     #[test]

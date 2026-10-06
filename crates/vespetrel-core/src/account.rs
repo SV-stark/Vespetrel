@@ -76,6 +76,12 @@ pub struct OAuthConfig {
     pub token_url: String,
     pub redirect_uri: String,
     pub scopes: Vec<String>,
+    /// Whether an offline (refreshable) grant was requested.
+    ///
+    /// Not previously recorded, so a proactive refresh could not tell a provider that
+    /// issued refresh tokens from one that never does.
+    #[serde(default)]
+    pub offline_access: bool,
 }
 
 impl Default for AuthConfig {

@@ -48,19 +48,16 @@ deadpool-sqlite = "0.14"
 lz4_flex = "0.14"
 zstd = "0.13"
 
+# PIM (Calendar & Contacts) — used by vespetrel-core's vCard/iCalendar serializers
+icalendar = "0.17"
+vcard4 = "0.7"
+
 # Mail & Protocols
 mail-parser = "0.11"
 lettre = { version = "0.11", default-features = false, features = ["tokio1-rustls", "builder", "smtp-transport", "rustls-tls", "aws-lc-rs"] }
-imap-codec = "2.0.0-alpha.9"
-imap-types = "2.0.0-alpha.7"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 url = "2.5"
 
-
-# PIM (Calendar & Contacts)
-libdav = "0.10"
-icalendar = "0.17"
-vcard4 = "0.7"
 
 # Security & Crypto
 rustls = { version = "0.23", default-features = false, features = ["aws_lc_rs"] }
@@ -84,6 +81,7 @@ lol_html = "3.0"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 chrono = { version = "0.4", features = ["serde"] }
+chrono-tz = "0.10"
 thiserror = "2.0"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }

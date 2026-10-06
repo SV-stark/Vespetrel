@@ -85,34 +85,7 @@ impl VirtualFolder {
                 format!("received_at >= {yesterday}")
             }
             VirtualFolderType::HasAttachments => "has_attachments = 1".to_string(),
-            VirtualFolderType::SavedSearch { query } => {
-                let clean_terms: Vec<String> = query
-                    .split_whitespace()
-                    .map(|w| {
-                        let filtered: String = w
-                            .chars()
-                            .filter(|c| {
-                                c.is_alphanumeric()
-                                    || *c == '@'
-                                    || *c == '.'
-                                    || *c == '_'
-                                    || *c == '-'
-                            })
-                            .collect();
-                        format!("\"{filtered}\"")
-                    })
-                    .filter(|s| s.len() > 2)
-                    .collect();
-                let fts_query = if clean_terms.is_empty() {
-                    "\"*\"".to_string()
-                } else {
-                    clean_terms.join(" ")
-                };
-                let escaped = fts_query.replace('\'', "''");
-                format!(
-                    "id IN (SELECT message_id FROM messages_fts WHERE messages_fts MATCH '{escaped}')"
-                )
-            }
+            VirtualFolderType::SavedSearch { query } => crate::search::fts5_predicate(query),
         }
     }
 }
@@ -132,5 +105,20 @@ mod tests {
 
         let today = VirtualFolder::today();
         assert_eq!(today.to_sql_filter(100000), "received_at >= 13600");
+    }
+
+    #[test]
+    fn saved_search_supports_field_prefixes_and_never_wildcards() {
+        // The old local sanitizer ignored `from:`, so a sender search was run as a literal
+        // phrase and returned nothing.
+        let saved = VirtualFolder::saved_search("From Alice", "from:alice@example.com");
+        assert!(saved.to_sql_filter(0).contains('?'));
+
+        // An empty query must not become `MATCH '"*"'`, which FTS5 rejects as a syntax error.
+        for query in ["", "   ", "*", "^ ()"] {
+            let filter = VirtualFolder::saved_search("Empty", query).to_sql_filter(0);
+            assert_eq!(filter, "0", "query {query:?} produced {filter}");
+            assert!(!filter.contains('*'));
+        }
     }
 }

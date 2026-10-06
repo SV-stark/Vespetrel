@@ -44,7 +44,7 @@ Modern desktop email clients are almost universally trapped in web runtimes (Ele
 │  │ • Microsoft Graph REST Engine (Corporate Exchange Online Parity)                     │  │
 │  │ • Persistent SQLite Outbox (retry backoff + scheduled send + graceful shutdown)      │  │
 │  │ • OAuth2 PKCE Browser Flow (127.0.0.1:0 loopback, CSRF + Host validation)           │  │
-│  │ • PIM Engine (libdav + icalendar + vcard4 CalDAV/CardDAV)                           │  │
+│  │ • PIM Engine (in-crate WebDAV + icalendar + vcard4 CalDAV/CardDAV)                   │  │
 │  │ • Security: rPGP (OpenPGP RFC 9580 v6) + RustCrypto S/MIME + OS Keyring              │  │
 │  └───────────────────────────────────────────┬──────────────────────────────────────────┘  │
 │                                              │ Transactional Storage (deadpool-sqlite)     │
@@ -141,11 +141,11 @@ Vespetrel natively abstracts differences between modern and legacy email protoco
 ### 🛡️ Security & Privacy First
 * **Tracker Shield**: Real-time streaming HTML rewriter (`lol_html`) strips remote tracking pixels (1x1 transparent GIFs), tracking URL queries, and un-sanitized script/form tags.
 * **Remote Content Blocker**: Remote images, styles, `srcset`, and `poster` attributes are blocked by default until explicitly trusted per sender. Strict CSP + CID rewrite in the sandboxed viewport.
-* **End-to-End Encryption**: Pure Rust **`rPGP`** implementation supporting OpenPGP RFC 9580 (v6 keys & AEAD, PGP/MIME verified, no mock fallback) and Autocrypt 1.1 key exchange, alongside `RustCrypto` S/MIME X.509 DER validation (strict PKCS/CMS OID + ASN.1, `smime-verify` gated decrypt).
+* **End-to-End Encryption**: Pure Rust **`rPGP`** implementation supporting OpenPGP RFC 9580 (v6 keys & AEAD, PGP/MIME verified, no mock fallback) and Autocrypt 1.1 key exchange, alongside `RustCrypto` S/MIME X.509 DER validation (strict PKCS/CMS OID + ASN.1).
 * **Hardening**: Deterministic FNV-1a `stable_uid_from_id` (no restart collisions), symlink-traversal guard + corrupt-account quarantine + transactional signatures, 16MB IMAP response cap with zero-alloc fetch parsing, `webpki-roots` TLS, `cargo-deny` supply-chain audit (`openssl-sys` banned, unknown registries denied).
 
 ### 📅 Integrated PIM (Calendar, Contacts & Tasks)
-* **CalDAV**: Direct two-way sync with Google Calendar, Nextcloud, Fastmail, and Apple iCloud via `libdav` and `icalendar` (RFC 5545).
+* **CalDAV**: Direct two-way sync with Google Calendar, Nextcloud, Fastmail, and Apple iCloud. WebDAV requests, XML multistatus parsing and `icalendar` (RFC 5545) handling are implemented in-crate on `reqwest`. `RRULE` expansion is not implemented; recurring series round-trip verbatim.
 * **CardDAV**: Address book synchronization with auto-complete chips in the compose editor (`vcard4` RFC 6350).
 * **Tasks Engine**: Full RFC 5545 `VTODO` task tracking with due dates, priority, status filters, and CalDAV synchronization.
 
@@ -170,7 +170,7 @@ vespetrel/
 │   ├── vespetrel-jmap/         # JMAP client adapter (RFC 8620/8621)
 │   ├── vespetrel-graph/        # Microsoft Graph REST client for Exchange Online
 │   ├── vespetrel-smtp/         # Lettre submission engine with DKIM & Autocrypt
-│   ├── vespetrel-dav/          # CalDAV / CardDAV sync engine via libdav, icalendar & vcard4
+│   ├── vespetrel-dav/          # CalDAV / CardDAV sync engine (in-crate WebDAV + icalendar)
 │   ├── vespetrel-crypto/       # rPGP OpenPGP (RFC 9580), S/MIME, Autocrypt 1.1 & OS keyring
 │   └── vespetrel-render/       # SIMD UTF-8 HTML sanitization (ammonia, lol_html), auth badges, MDN, cleaner & anti-phishing
 ```
@@ -269,7 +269,7 @@ Interactive console commands once launched: `list`/`inbox`, `read <ID>`, `compos
   - [x] Multi-provider graphical login wizard state machine & compose editor state
 
 - [x] **P3: PIM, Calendar, Contacts, Tasks & Encryption (COMPLETE)**
-  - [x] CalDAV & CardDAV client integration foundation (`libdav`, `icalendar`, `vcard4`)
+  - [x] CalDAV & CardDAV client integration foundation (in-crate WebDAV, `icalendar`, `vcard4`)
   - [x] OpenPGP (RFC 9580 v6) armor detector & Autocrypt 1.1 engine (`vespetrel-crypto`)
   - [x] CalDAV Month, Week, and Day grid views (`CalendarView`)
   - [x] CardDAV address book with alphabetical grouping and recipient autocomplete (`ContactsView`)

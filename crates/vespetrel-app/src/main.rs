@@ -182,9 +182,17 @@ async fn main() -> anyhow::Result<()> {
             Err(_) => Vec::new(),
         };
         for acct in &accounts {
-            let provider = vespetrel_engine::make_provider(acct);
-            coordinator.spawn_worker(&acct.id, provider);
-            tracing::info!(account_id=%acct.id, email=%acct.email, "spawned sync worker for account");
+            // A locked or missing keychain entry must not spawn a worker that would then
+            // fail every connection with "authentication failed"; log and move on.
+            match vespetrel_engine::make_provider(acct) {
+                Ok(provider) => {
+                    coordinator.spawn_worker(&acct.id, provider);
+                    tracing::info!(account_id=%acct.id, email=%acct.email, "spawned sync worker for account");
+                }
+                Err(e) => {
+                    tracing::warn!(account_id=%acct.id, email=%acct.email, error=%e, "skipping sync worker: credentials unavailable");
+                }
+            }
         }
     }
     coordinator = coordinator.with_blob_store(blob_store);

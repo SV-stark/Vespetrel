@@ -5,7 +5,7 @@ edition.workspace = true
 license.workspace = true
 repository.workspace = true
 readme = "README.md"
-description = "CalDAV & CardDAV sync via libdav, icalendar, vcard4"
+description = "CalDAV & CardDAV sync (in-crate WebDAV, icalendar)"
 
 [features]
 default = []
@@ -18,10 +18,8 @@ tracing = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 reqwest = { workspace = true }
-libdav = { workspace = true }
-icalendar = { workspace = true }
-vcard4 = { workspace = true }
 chrono = { workspace = true }
+chrono-tz = { workspace = true }
 thiserror = { workspace = true }
 anyhow = { workspace = true }
 uuid = { workspace = true }

@@ -7,6 +7,39 @@ use tracing::{debug, error, info, warn};
 
 use vespetrel_core::provider::{MailProvider, SyncEvent};
 
+/// Upper bound on the plain-text preview stored in the `body_text_preview` column.
+///
+/// The full first text part was previously stored verbatim, so a multi-megabyte body was
+/// serialised into SQLite on every message and then handed to the spam classifier, which
+/// allocates one `String` per token.
+const MAX_BODY_PREVIEW_CHARS: usize = 4096;
+
+/// Convert a parsed RFC 5322 `Date` header into a UTC timestamp.
+///
+/// Returns `None` for the all-zero value mail-parser produces when the header is missing or
+/// unparsable, so a bogus date cannot overwrite a good default with 1970.
+fn mail_date_to_utc(d: &mail_parser::DateTime) -> Option<chrono::DateTime<chrono::Utc>> {
+    if d.year == 0 && d.month == 0 && d.day == 0 {
+        return None;
+    }
+    let naive =
+        chrono::NaiveDate::from_ymd_opt(i32::from(d.year), u32::from(d.month), u32::from(d.day))?
+            .and_hms_opt(u32::from(d.hour), u32::from(d.minute), u32::from(d.second))?;
+
+    // `tz_before_gmt` is false for "+HHMM"; the sign applies to the offset from UTC.
+    let sign = if d.tz_before_gmt { -1i32 } else { 1i32 };
+    let offset = chrono::FixedOffset::east_opt(
+        sign * (i32::from(d.tz_hour) * 3600 + i32::from(d.tz_minute) * 60),
+    )?;
+    Some(
+        naive
+            .and_local_timezone(offset)
+            .single()
+            .map(|dt| dt.with_timezone(&chrono::Utc))
+            .unwrap_or_else(|| chrono::DateTime::from_naive_utc_and_offset(naive, chrono::Utc)),
+    )
+}
+
 #[derive(Debug)]
 pub enum WorkerCommand {
     SyncNow,
@@ -27,13 +60,30 @@ pub enum WorkerEventSender {
 }
 
 impl WorkerEventSender {
+    /// Emit a sync event to the UI.
+    ///
+    /// This is a *synchronous* function called from `sync_once`, which runs on a Tokio
+    /// worker thread. `flume::Sender::send` blocks when a bounded channel is full (the
+    /// async variant is `send_async`), so a UI that fell behind would block a runtime
+    /// thread indefinitely — and once one worker per runtime thread is blocked, the entire
+    /// runtime is wedged: no timers, no other tasks, no UI event loop. `create_bounded`
+    /// exists precisely to bound memory, which makes the OOM it prevents turn into a
+    /// deadlock.
+    ///
+    /// Use `try_send` and drop the event when the consumer is behind. The dropped events
+    /// (`SyncError`, `MessageFlagsUpdated`) are advisory, and `MessagesInserted` is
+    /// re-derived from the database on the next refresh.
     pub fn send(&self, ev: SyncEvent) {
         match self {
             Self::Mpsc(tx) => {
                 let _ = tx.send(ev);
             }
             Self::Flume(tx) => {
-                let _ = tx.send(ev);
+                if let Err(flume::TrySendError::Full(_ev)) = tx.try_send(ev) {
+                    debug!(
+                        "sync event channel full; dropping SyncEvent rather than blocking the runtime"
+                    );
+                }
             }
         }
     }
@@ -148,27 +198,59 @@ impl AccountWorker {
                         }
                         Some(WorkerCommand::UpdateFlags{ folder_remote_id, uids, add, remove }) => {
                             let mut remote_ids = Vec::new();
-                            if let Some(pool) = &self.storage_pool
-                                && let Ok(conn) = pool.get().await
-                            {
-                                let uids_c = uids.clone();
-                                let fid = folder_remote_id.clone();
-                                let q = conn.interact(move |c| -> anyhow::Result<Vec<String>> {
-                                    let mut ids = Vec::new();
-                                    for chunk in uids_c.chunks(500) {
-                                        let placeholders = chunk.iter().map(|_| "?").collect::<Vec<_>>().join(",");
-                                        let sql = format!("SELECT remote_id FROM messages WHERE folder_id = ? AND remote_uid IN ({placeholders}) AND remote_id IS NOT NULL");
-                                        let mut stmt = c.prepare(&sql)?;
-                                        let mut params: Vec<&dyn rusqlite::ToSql> = Vec::with_capacity(chunk.len() + 1);
-                                        params.push(&fid);
-                                        for u in chunk { params.push(u); }
-                                        let rows = stmt.query_map(rusqlite::params_from_iter(params), |r| r.get::<_, String>(0))?;
-                                        for id_res in rows { ids.push(id_res?); }
+                            if let Some(pool) = &self.storage_pool {
+                                // `messages.folder_id` stores the *local* folder UUID (it
+                                // references folders(id)), not the provider's remote id. The
+                                // old predicate matched the remote id against that column and
+                                // therefore matched zero rows, so `update_flags_by_remote_id`
+                                // was never used and the `u32`-based fallback ran instead —
+                                // which 404s for JMAP and Graph, so read/star state never
+                                // reached Microsoft 365 or Fastmail.
+                                let acct = self.account_id.clone();
+                                let rid = folder_remote_id.clone();
+                                let folder_db_id =
+                                    match pool.get().await.ok().map(|c| async move {
+                                        c.interact(move |conn| {
+                                            vespetrel_storage::repo::get_folder(conn, &acct, &rid)
+                                        })
+                                        .await
+                                    }) {
+                                        Some(fut) => match fut.await {
+                                            Ok(Ok(Some(f))) => Some(f.id),
+                                            _ => None,
+                                        },
+                                        None => None,
+                                    };
+                                match folder_db_id {
+                                    None => {
+                                        warn!(
+                                            account_id=%self.account_id,
+                                            folder=%folder_remote_id,
+                                            "no local folder row for that remote id; skipping flag push"
+                                        );
                                     }
-                                    Ok(ids)
-                                }).await;
-                                if let Ok(Ok(ids)) = q {
-                                    remote_ids = ids;
+                                    Some(fid) => {
+                                        if let Ok(conn) = pool.get().await {
+                                            let uids_c = uids.clone();
+                                        let q = conn.interact(move |c| -> anyhow::Result<Vec<String>> {
+                                            let mut ids = Vec::new();
+                                            for chunk in uids_c.chunks(500) {
+                                                let placeholders = chunk.iter().map(|_| "?").collect::<Vec<_>>().join(",");
+                                                let sql = format!("SELECT remote_id FROM messages WHERE folder_id = ? AND remote_uid IN ({placeholders}) AND remote_id IS NOT NULL");
+                                                let mut stmt = c.prepare(&sql)?;
+                                                let mut params: Vec<&dyn rusqlite::ToSql> = Vec::with_capacity(chunk.len() + 1);
+                                                params.push(&fid);
+                                                for u in chunk { params.push(u); }
+                                                let rows = stmt.query_map(rusqlite::params_from_iter(params), |r| r.get::<_, String>(0))?;
+                                                for id_res in rows { ids.push(id_res?); }
+                                            }
+                                            Ok(ids)
+                                        }).await;
+                                            if let Ok(Ok(ids)) = q {
+                                                remote_ids = ids;
+                                            }
+                                        }
+                                    }
                                 }
                             }
                             let res = if !remote_ids.is_empty() {
@@ -190,18 +272,30 @@ impl AccountWorker {
         }
     }
 
+    /// Refresh the account's OAuth token and rebuild the provider.
+    ///
+    /// The connection is scoped so it returns to the pool *before* the refresh runs. The
+    /// previous code held it across `resolve_and_refresh_token`, which itself checks out
+    /// another connection — so the worker needed two at once, on top of the one `sync_once`
+    /// already holds. With `pool_size == 1` (the `:memory:` / headless configuration) the
+    /// second checkout could never be satisfied, so auth refresh always failed and the
+    /// original 401 was retried forever.
     pub async fn try_refresh_auth(&mut self) -> anyhow::Result<()> {
         let pool = match &self.storage_pool {
             Some(p) => p.clone(),
             None => anyhow::bail!("cannot refresh auth: no storage pool configured"),
         };
-        let aid = self.account_id.clone();
-        let conn = pool.get().await?;
-        let acct = conn
-            .interact(move |c| vespetrel_storage::repo::get_account(c, &aid))
-            .await
-            .map_err(|e| anyhow::anyhow!("interact failed: {e}"))??
-            .ok_or_else(|| anyhow::anyhow!("account {} not found in storage", self.account_id))?;
+        let acct = {
+            let aid = self.account_id.clone();
+            let conn = pool.get().await?;
+            conn.interact(move |c| vespetrel_storage::repo::get_account(c, &aid))
+                .await
+                .map_err(|e| anyhow::anyhow!("interact failed: {e}"))??
+                .ok_or_else(|| {
+                    anyhow::anyhow!("account {} not found in storage", self.account_id)
+                })?
+            // `conn` is dropped here, releasing the pool slot.
+        };
 
         let new_token = crate::coordinator::resolve_and_refresh_token(&acct, Some(&pool))
             .await
@@ -248,27 +342,104 @@ impl AccountWorker {
         let mut folder_records: ahash::AHashMap<String, vespetrel_core::Folder> =
             ahash::AHashMap::with_capacity(folders.len());
 
+        // Load the existing rows first so the upsert preserves state the server does not
+        // re-send. `Folder::new` hardcodes role=Custom, uid_validity=None,
+        // highest_mod_seq=0, total_count=0, unread_count=0 and color=None, and the upsert
+        // overwrites all of those — so before this fix every sync cycle (every 60s) reset
+        // role to 'custom' and counts to 0. Since `list_unified_inbox_messages` filters on
+        // `role = 'inbox'`, the unified inbox was permanently empty, unread badges read 0,
+        // and user-set folder colours were erased.
+        let existing_folders: ahash::AHashMap<String, vespetrel_core::Folder> = if let Some(conn) =
+            &storage_conn
+        {
+            let acct_id = self.account_id.clone();
+            let remote_ids: Vec<String> = folders.iter().map(|f| f.remote_id.clone()).collect();
+            match conn
+                .interact(
+                    move |c| -> rusqlite::Result<ahash::AHashMap<String, vespetrel_core::Folder>> {
+                        let mut map = ahash::AHashMap::with_capacity(remote_ids.len());
+                        for rid in &remote_ids {
+                            if let Ok(Some(prev)) =
+                                vespetrel_storage::repo::get_folder(c, &acct_id, rid)
+                            {
+                                map.insert(rid.clone(), prev);
+                            }
+                        }
+                        Ok(map)
+                    },
+                )
+                .await
+            {
+                Ok(Ok(map)) => map,
+                Ok(Err(e)) => {
+                    warn!(error=%e, "failed to read existing folders; their metadata will be re-derived");
+                    ahash::AHashMap::new()
+                }
+                Err(e) => {
+                    warn!(error=%e, "storage interact error reading existing folders");
+                    ahash::AHashMap::new()
+                }
+            }
+        } else {
+            ahash::AHashMap::new()
+        };
+
         for rf in &folders {
-            let folder_record =
+            let mut folder_record =
                 vespetrel_core::Folder::new(&self.account_id, &rf.remote_id, &rf.name, &rf.path);
-            folder_records.insert(rf.remote_id.clone(), folder_record.clone());
+            // Inferred from the server's SPECIAL-USE / well-known name. `Folder::infer_role`
+            // existed but was never called anywhere, so every folder was stored as 'custom'.
+            folder_record.role =
+                vespetrel_core::Folder::infer_role(&rf.name, rf.role_hint.as_deref());
+            if let Some(prev) = existing_folders.get(&rf.remote_id) {
+                // Server-assigned cursor and local-only state survive the upsert.
+                folder_record.id = prev.id.clone();
+                folder_record.uid_validity = prev.uid_validity;
+                folder_record.highest_mod_seq = prev.highest_mod_seq;
+                folder_record.total_count = prev.total_count;
+                folder_record.unread_count = prev.unread_count;
+                folder_record.color = prev.color.clone();
+            }
+            folder_records.insert(rf.remote_id.clone(), folder_record);
         }
 
-        // Persist folder metadata to storage in a single atomic transaction
+        // Persist folder metadata to storage in a single atomic transaction.
+        // `upsert_folder` returns the id that actually persisted, which is NOT the one
+        // `Folder::new` just generated once the (account_id, remote_id) row already exists.
+        // Messages must reference the persisted id or the FK on messages.folder_id fails.
         if let Some(conn) = &storage_conn {
             let recs: Vec<vespetrel_core::Folder> = folder_records.values().cloned().collect();
             let res = conn
-                .interact(move |c| -> anyhow::Result<()> {
-                    let tx = c.transaction()?;
-                    for rec in &recs {
-                        vespetrel_storage::repo::upsert_folder(&tx, rec)?;
-                    }
-                    tx.commit()?;
-                    Ok(())
-                })
+                .interact(
+                    move |c| -> anyhow::Result<ahash::AHashMap<String, String>> {
+                        let mut persisted: ahash::AHashMap<String, String> =
+                            ahash::AHashMap::with_capacity(recs.len());
+                        {
+                            let tx = c.transaction()?;
+                            for rec in &recs {
+                                let db_id = vespetrel_storage::repo::upsert_folder(&tx, rec)?;
+                                persisted.insert(rec.remote_id.clone(), db_id);
+                            }
+                            tx.commit()?;
+                        }
+                        Ok(persisted)
+                    },
+                )
                 .await;
-            if let Err(e) = res {
-                warn!(error=%e, "storage interact error batch upserting folders");
+            match res {
+                Ok(Ok(persisted)) => {
+                    for (remote_id, record) in folder_records.iter_mut() {
+                        if let Some(db_id) = persisted.get(remote_id) {
+                            record.id = db_id.clone();
+                        }
+                    }
+                }
+                Ok(Err(e)) => {
+                    warn!(error=%e, "failed to batch upsert folders");
+                }
+                Err(e) => {
+                    warn!(error=%e, "storage interact error batch upserting folders");
+                }
             }
         }
 
@@ -319,24 +490,64 @@ impl AccountWorker {
                     let mut summaries = Vec::new();
                     let mut msgs_to_store = Vec::new();
                     let mut blobs_to_write = Vec::new();
+                    // Cleared to false by any message we cannot materialise. The sync cursor
+                    // must not advance while messages are still missing, or the server will
+                    // never re-deliver them: IMAP uses CHANGEDSINCE <modseq> and JMAP
+                    // sinceState, both of which are past the dropped message forever.
+                    let mut ingest_complete = true;
 
                     for sync_msg in &delta.inserted {
-                        let raw_bytes_opt = if let Some(ref raw_bytes) = sync_msg.raw_rfc822 {
-                            Some(raw_bytes.clone())
-                        } else {
-                            self.provider
-                                .fetch_raw_message(&sync_msg.remote_uid.to_string())
-                                .await
-                                .ok()
+                        // `fetch_raw_message` takes the provider's own id. Passing the
+                        // numeric `remote_uid` 404s for JMAP and Graph, whose ids are not
+                        // the sequence-derived UIDs the provider synthesised.
+                        let fetch_id = sync_msg
+                            .remote_id
+                            .clone()
+                            .unwrap_or_else(|| sync_msg.remote_uid.to_string());
+                        let raw_bytes_opt = match &sync_msg.raw_rfc822 {
+                            Some(b) if !b.is_empty() => Some(b.clone()),
+                            Some(_) => {
+                                // Empty payload from the provider: fetch it properly.
+                                match self.provider.fetch_raw_message(&fetch_id).await {
+                                    Ok(b) if !b.is_empty() => Some(b),
+                                    Ok(_) => None,
+                                    Err(e) => {
+                                        error!(
+                                            remote_uid = sync_msg.remote_uid,
+                                            folder = %rf.name,
+                                            error=%e,
+                                            "failed to fetch message body; aborting this folder's sync so the cursor is not advanced past it"
+                                        );
+                                        // Transient failure. Leave the cursor alone so the
+                                        // next sync re-fetches this message.
+                                        return Ok(());
+                                    }
+                                }
+                            }
+                            None => match self.provider.fetch_raw_message(&fetch_id).await {
+                                Ok(b) if !b.is_empty() => Some(b),
+                                Ok(_) => None,
+                                Err(e) => {
+                                    error!(
+                                        remote_uid = sync_msg.remote_uid,
+                                        folder = %rf.name,
+                                        error=%e,
+                                        "failed to fetch message body; aborting this folder's sync so the cursor is not advanced past it"
+                                    );
+                                    return Ok(());
+                                }
+                            },
                         };
 
                         let raw_bytes = match raw_bytes_opt {
                             Some(ref b) if !b.is_empty() => b.clone(),
                             _ => {
-                                debug!(
+                                warn!(
                                     remote_uid = sync_msg.remote_uid,
-                                    "no raw rfc822 bytes available, skipping message"
+                                    folder = %rf.name,
+                                    "server returned no message body; not advancing the sync cursor past it"
                                 );
+                                ingest_complete = false;
                                 continue;
                             }
                         };
@@ -346,8 +557,10 @@ impl AccountWorker {
                             None => {
                                 warn!(
                                     remote_uid = sync_msg.remote_uid,
-                                    "failed to parse RFC822 message, skipping unparseable message"
+                                    folder = %rf.name,
+                                    "failed to parse RFC822 message; not advancing the sync cursor past it"
                                 );
+                                ingest_complete = false;
                                 continue;
                             }
                         };
@@ -361,8 +574,10 @@ impl AccountWorker {
                             _ => {
                                 warn!(
                                     remote_uid = sync_msg.remote_uid,
-                                    "message has no From address, skipping"
+                                    folder = %rf.name,
+                                    "message has no From address; not advancing the sync cursor past it"
                                 );
+                                ingest_complete = false;
                                 continue;
                             }
                         };
@@ -400,46 +615,114 @@ impl AccountWorker {
                         msg.body_snippet = parsed
                             .body_text(0)
                             .map(|t| t.chars().take(200).collect::<String>());
-                        msg.body_text_preview = parsed.body_text(0).map(|t| t.to_string());
+                        // Cap the preview. Storing the entire first text part meant a
+                        // multi-megabyte body was serialised into a SQLite column on every
+                        // message and then fed to the spam classifier.
+                        msg.body_text_preview = parsed
+                            .body_text(0)
+                            .map(|t| t.chars().take(MAX_BODY_PREVIEW_CHARS).collect::<String>());
+
+                        // `Message::new` sets sent_at = received_at = now(). Without reading
+                        // the Date header every synced message got the *sync* time, so
+                        // `ORDER BY sent_at DESC` returned a mailbox in essentially random
+                        // order and the order was unstable across re-syncs.
+                        if let Some(dt) = parsed.date().and_then(mail_date_to_utc) {
+                            msg.sent_at = dt;
+                            msg.received_at = dt;
+                        }
+
+                        // `has_attachments` stayed false for every message, so a
+                        // `FilterField::HasAttachments` rule never matched anything.
+                        msg.has_attachments = parsed.attachment_count() > 0;
+
+                        // cc/bcc/reply-to were never populated, so Reply targeted the From
+                        // address instead of Reply-To.
+                        msg.cc_addresses = parsed
+                            .cc()
+                            .map(|list| {
+                                list.iter()
+                                    .filter_map(|a| {
+                                        a.address.as_deref().map(|e| vespetrel_core::Address {
+                                            name: a.name.as_deref().map(|s| s.to_string()),
+                                            email: e.to_string(),
+                                        })
+                                    })
+                                    .collect()
+                            })
+                            .unwrap_or_default();
+                        msg.bcc_addresses = parsed
+                            .bcc()
+                            .map(|list| {
+                                list.iter()
+                                    .filter_map(|a| {
+                                        a.address.as_deref().map(|e| vespetrel_core::Address {
+                                            name: a.name.as_deref().map(|s| s.to_string()),
+                                            email: e.to_string(),
+                                        })
+                                    })
+                                    .collect()
+                            })
+                            .unwrap_or_default();
+                        // `reply_to` is a list, matching the storage column.
+                        msg.reply_to = parsed.reply_to().map(|list| {
+                            list.iter()
+                                .filter_map(|addr| {
+                                    addr.address().map(|e| vespetrel_core::Address {
+                                        name: addr.name().map(|s| s.to_string()),
+                                        email: e.to_string(),
+                                    })
+                                })
+                                .collect()
+                        });
+
                         msg.size_bytes = raw_bytes.len() as i64;
                         let shard = &msg.id[..2.min(msg.id.len())];
                         msg.blob_path = format!("{shard}/{}.lz4", msg.id);
 
-                        // Compute deterministic thread ID from In-Reply-To, References, or normalized Subject
+                        // Deterministic thread ID, namespaced by account.
+                        //
+                        // `threads.id` is a bare PRIMARY KEY, and the previous hash input
+                        // contained no account id, so two accounts receiving the same
+                        // `In-Reply-To` (any shared mailing list) collided on one row: B's
+                        // message overwrote A's, and because `list_threads` filters on
+                        // account_id the thread then vanished from A's list entirely.
                         use sha2::Digest;
-                        let thread_id = if let Some(ref reply_to) = msg.in_reply_to {
-                            let clean = reply_to.trim().trim_matches(['<', '>']);
+                        let thread_id = {
                             let mut hasher = sha2::Sha256::new();
-                            hasher.update(clean.as_bytes());
-                            format!("th_{:x}", hasher.finalize())
-                        } else {
-                            let norm = vespetrel_core::normalize_subject(&subject);
-                            let mut hasher = sha2::Sha256::new();
-                            hasher.update(norm.as_bytes());
+                            hasher.update(self.account_id.as_bytes());
+                            hasher.update(b"\0");
+                            if let Some(ref reply_to) = msg.in_reply_to {
+                                hasher.update(reply_to.trim().trim_matches(['<', '>']).as_bytes());
+                            } else {
+                                hasher
+                                    .update(vespetrel_core::normalize_subject(&subject).as_bytes());
+                            }
                             format!("th_{:x}", hasher.finalize())
                         };
                         msg.thread_id = Some(thread_id.clone());
 
-                        // Upsert thread record in storage
+                        // Upsert thread record in storage. Counters are recomputed from the
+                        // messages table rather than incremented here: the previous code
+                        // hardcoded message_count = 1 and derived unread_count from the
+                        // single message being synced, so a 12-message thread always
+                        // reported "1 message", and re-syncing a read message zeroed the
+                        // unread count even when 6 unread messages remained. Recomputing is
+                        // also idempotent, so a re-sync does not double-count.
                         if let Some(conn) = &storage_conn {
                             let th = vespetrel_core::thread::Thread {
                                 id: thread_id,
                                 account_id: self.account_id.clone(),
                                 subject: Some(subject.clone()),
                                 last_message_at: msg.received_at,
-                                message_count: 1,
-                                unread_count: if sync_msg
-                                    .flags
-                                    .contains(&vespetrel_core::Flag::Seen)
-                                {
-                                    0
-                                } else {
-                                    1
-                                },
+                                message_count: 0, // recomputed below
+                                unread_count: 0,
                                 snippet: msg.body_snippet.clone(),
                             };
                             let _ = conn
-                                .interact(move |c| vespetrel_storage::repo::upsert_thread(c, &th))
+                                .interact(move |c| {
+                                    vespetrel_storage::repo::upsert_thread(c, &th)?;
+                                    vespetrel_storage::repo::recount_thread(c, &th.id)
+                                })
                                 .await;
                         }
 
@@ -626,23 +909,35 @@ impl AccountWorker {
                             .await;
                     }
 
-                    // Persist updated delta tokens and folder modseqs back to accounts table only when changed
-                    if delta.new_sync_state != vespetrel_core::account::SyncState::default()
+                    // Persist updated delta tokens and folder modseqs back to accounts table
+                    // only when changed AND the folder was fully materialised. Advancing
+                    // the cursor past messages we failed to store means the server never
+                    // re-delivers them: IMAP uses CHANGEDSINCE <modseq> and JMAP sinceState.
+                    if !ingest_complete {
+                        warn!(
+                            account_id=%self.account_id,
+                            folder=%rf.name,
+                            "folder sync incomplete; leaving the sync cursor unchanged so missing messages are retried"
+                        );
+                    } else if delta.new_sync_state != vespetrel_core::account::SyncState::default()
                         && delta.new_sync_state != account_sync_state
                     {
                         account_sync_state = delta.new_sync_state.clone();
                         if let Some(conn) = &storage_conn {
                             let acct_id = self.account_id.clone();
                             let sync_state_to_save = account_sync_state.clone();
+                            // Write only the sync cursor. A get_account -> upsert_account
+                            // round-trip would rewrite every column, so a lossy read of a
+                            // deserialization-failed auth_config would overwrite the user's
+                            // stored credentials with a default and destroy them.
                             let res = conn
                                 .interact(move |c| {
-                                    if let Ok(Some(mut acct)) =
-                                        vespetrel_storage::repo::get_account(c, &acct_id)
-                                    {
-                                        acct.sync_state = sync_state_to_save;
-                                        if let Err(e) = vespetrel_storage::repo::upsert_account(c, &acct) {
-                                            error!(account_id=%acct.id, error=%e, "failed to update account sync state in DB");
-                                        }
+                                    if let Err(e) = vespetrel_storage::repo::update_account_sync_state(
+                                        c,
+                                        &acct_id,
+                                        &sync_state_to_save,
+                                    ) {
+                                        error!(error=%e, "failed to update account sync state in DB");
                                     }
                                 })
                                 .await;

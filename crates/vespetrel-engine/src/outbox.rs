@@ -52,22 +52,23 @@ impl UndoSendBuffer {
         self.pending.remove(id).map(|s| s.message)
     }
 
-    /// Drain all messages that have passed their grace period and are ready to send
+    /// Drain all messages that have passed their grace period and are ready to send.
+    ///
+    /// Ordered by `send_at`. `HashMap` iteration order is unspecified and seed-dependent, so
+    /// the previous implementation returned messages in an arbitrary order that differed
+    /// between runs — two messages scheduled for 09:00 and 09:01 both due at 09:05 were sent
+    /// in random order.
     pub fn drain_ready(&mut self, now: DateTime<Utc>) -> Vec<ComposedMessage> {
-        let mut ready_ids = Vec::new();
-        for (id, scheduled) in &self.pending {
-            if !scheduled.is_cancelled && scheduled.send_at <= now {
-                ready_ids.push(id.clone());
-            }
-        }
-
-        let mut ready_messages = Vec::new();
-        for id in ready_ids {
-            if let Some(s) = self.pending.remove(&id) {
-                ready_messages.push(s.message);
-            }
-        }
-        ready_messages
+        let mut due: Vec<(DateTime<Utc>, String)> = self
+            .pending
+            .iter()
+            .filter(|(_, s)| !s.is_cancelled && s.send_at <= now)
+            .map(|(id, s)| (s.send_at, id.clone()))
+            .collect();
+        due.sort(); // earliest first, ties broken by id for determinism
+        due.into_iter()
+            .filter_map(|(_, id)| self.pending.remove(&id).map(|s| s.message))
+            .collect()
     }
 }
 
@@ -106,22 +107,21 @@ impl OutboxQueue {
         self.scheduled.remove(id).is_some()
     }
 
-    /// Drain all scheduled messages due for delivery
+    /// Drain all scheduled messages due for delivery, in `send_at` order.
+    ///
+    /// `HashMap` iteration order is unspecified, so the previous implementation returned
+    /// scheduled sends in an arbitrary order that varied between runs.
     pub fn drain_due(&mut self, now: DateTime<Utc>) -> Vec<ComposedMessage> {
-        let mut due_ids = Vec::new();
-        for (id, item) in &self.scheduled {
-            if !item.is_cancelled && item.send_at <= now {
-                due_ids.push(id.clone());
-            }
-        }
-
-        let mut msgs = Vec::new();
-        for id in due_ids {
-            if let Some(item) = self.scheduled.remove(&id) {
-                msgs.push(item.message);
-            }
-        }
-        msgs
+        let mut due: Vec<(DateTime<Utc>, String)> = self
+            .scheduled
+            .iter()
+            .filter(|(_, it)| !it.is_cancelled && it.send_at <= now)
+            .map(|(id, it)| (it.send_at, id.clone()))
+            .collect();
+        due.sort();
+        due.into_iter()
+            .filter_map(|(_, id)| self.scheduled.remove(&id).map(|s| s.message))
+            .collect()
     }
 
     /// Enqueue a scheduled message into both memory and persistent SQLite outbox table
@@ -157,17 +157,25 @@ impl OutboxQueue {
         vespetrel_storage::repo::cancel_outbox(conn, id)
     }
 
-    /// Restore pending scheduled messages from SQLite outbox table on application startup
+    /// Restore pending scheduled messages from SQLite outbox table on application startup.
+    ///
+    /// Every uncancelled row is loaded, regardless of `send_at`. The previous code widened
+    /// a `send_at <= now` filter by a year, which only moved the cutoff: a message scheduled
+    /// beyond a year was never restored, so `cancel_scheduled` returned false (the user could
+    /// not cancel it) and `drain_due` would never return it.
     pub fn load_from_db(
         &mut self,
         conn: &rusqlite::Connection,
     ) -> Result<usize, vespetrel_storage::StorageError> {
-        let now_ts = Utc::now().timestamp();
-        // Load all uncancelled messages due in the future or ready to process
-        let entries = vespetrel_storage::repo::list_due_outbox(conn, now_ts + 86400 * 365)?;
+        let entries = vespetrel_storage::repo::list_all_uncancelled_outbox(conn)?;
         let count = entries.len();
         for entry in entries {
-            let send_at = DateTime::from_timestamp(entry.send_at, 0).unwrap_or_else(Utc::now);
+            let send_at = DateTime::from_timestamp(entry.send_at, 0).ok_or_else(|| {
+                vespetrel_storage::StorageError::CorruptData(format!(
+                    "outbox entry {} has an out-of-range send_at ({})",
+                    entry.id, entry.send_at
+                ))
+            })?;
             let scheduled_at =
                 DateTime::from_timestamp(entry.scheduled_at, 0).unwrap_or_else(Utc::now);
             self.scheduled.insert(
@@ -186,27 +194,46 @@ impl OutboxQueue {
 }
 
 impl UndoSendBuffer {
-    /// Enqueue into undo buffer and persist to SQLite outbox table
+    /// Enqueue into the undo buffer and persist to the SQLite outbox table.
+    ///
+    /// The database row is written **first**. The previous order mutated the in-memory map
+    /// and then wrote SQLite, so a failed `enqueue_outbox` left an in-memory entry with no
+    /// durable row — the message would be sent in this process but silently vanish on
+    /// restart. It also `unwrap()`ed a lookup that could only be reached by a bug.
     pub fn enqueue_persistent(
         &mut self,
         conn: &rusqlite::Connection,
         account_id: &str,
         message: ComposedMessage,
     ) -> Result<String, vespetrel_storage::StorageError> {
-        let id = self.enqueue(message.clone());
-        let item = self.pending.get(&id).unwrap();
+        let id = uuid::Uuid::new_v4().to_string();
+        let now = Utc::now();
+        let send_at = now + Duration::seconds(self.grace_period_secs);
+
         let entry = vespetrel_storage::repo::OutboxEntry {
             id: id.clone(),
             account_id: account_id.to_string(),
-            composed_message: message,
-            scheduled_at: item.scheduled_at.timestamp(),
-            send_at: item.send_at.timestamp(),
+            composed_message: message.clone(),
+            scheduled_at: now.timestamp(),
+            send_at: send_at.timestamp(),
             is_cancelled: false,
             attempts: 0,
             last_error: None,
         };
+        // Fails fast: nothing has been mutated yet.
         vespetrel_storage::repo::enqueue_outbox(conn, &entry)?;
-        Ok(id)
+
+        self.pending.insert(
+            id.clone(),
+            ScheduledMessage {
+                id,
+                message,
+                scheduled_at: now,
+                send_at,
+                is_cancelled: false,
+            },
+        );
+        Ok(entry.id)
     }
 
     /// Cancel undo send in memory and mark cancelled in SQLite outbox table
@@ -221,22 +248,100 @@ impl UndoSendBuffer {
     }
 }
 
-/// Drains due messages from SQLite outbox table and dispatches them via MailProvider
+/// Maximum delivery attempts before a message is given up on.
+///
+/// Without a ceiling, a permanently undeliverable message (bad recipient, `550 5.1.1`,
+/// full recipient quota) incremented `attempts` on every outbox tick forever, hammering the
+/// server and burying the log in the same error.
+pub const MAX_DELIVERY_ATTEMPTS: i64 = 5;
+
+/// Claim one due outbox row for delivery.
+///
+/// Returns `Some(entry)` only for the caller that atomically flipped the attempt counter.
+/// Without this, two concurrent `process_due_outbox` calls both read the same due rows and
+/// both send them, delivering duplicates.
+fn claim_due_entry(
+    conn: &rusqlite::Connection,
+    now_ts: i64,
+) -> Result<Option<vespetrel_storage::repo::OutboxEntry>, vespetrel_storage::StorageError> {
+    use rusqlite::{OptionalExtension, params};
+
+    // Find the earliest due row, then claim it with a conditional update. The
+    // `attempts < MAX` predicate is what stops an exhausted message from being retried.
+    let candidate: Option<(String, i64)> = conn
+        .query_row(
+            "SELECT id, attempts FROM outbox
+              WHERE is_cancelled = 0 AND send_at <= ?1
+              ORDER BY send_at ASC
+              LIMIT 1",
+            params![now_ts],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .optional()?;
+
+    let Some((id, attempts)) = candidate else {
+        return Ok(None);
+    };
+
+    if attempts >= MAX_DELIVERY_ATTEMPTS {
+        // Exhausted. Cancel it so the user sees it stop rather than retrying forever, and
+        // record why.
+        let msg: String = conn
+            .query_row(
+                "SELECT COALESCE(last_error, 'delivery failed') FROM outbox WHERE id = ?1",
+                params![id],
+                |r| r.get(0),
+            )
+            .optional()?
+            .unwrap_or_else(|| "delivery failed".to_string());
+        conn.execute(
+            "UPDATE outbox SET is_cancelled = 1, last_error = ?2 WHERE id = ?1",
+            params![
+                id,
+                format!("gave up after {MAX_DELIVERY_ATTEMPTS} attempts: {msg}")
+            ],
+        )?;
+        tracing::error!(id=%id, attempts, "outbox message permanently failed; not retrying");
+        return Ok(None);
+    }
+
+    // Atomic claim: only the caller whose UPDATE affects a row may send.
+    let claimed = conn.execute(
+        "UPDATE outbox SET attempts = attempts + 1
+          WHERE id = ?1 AND is_cancelled = 0 AND attempts = ?2",
+        params![id, attempts],
+    )?;
+    if claimed != 1 {
+        // Another worker won the race.
+        return Ok(None);
+    }
+
+    let entry = vespetrel_storage::repo::get_outbox_entry(conn, &id)?;
+    Ok(entry)
+}
+
+/// Drains due messages from the SQLite outbox table and dispatches them via MailProvider.
+///
+/// Each row is claimed atomically before sending, so concurrent drains cannot deliver the
+/// same message twice, and delivery stops after [`MAX_DELIVERY_ATTEMPTS`].
 pub async fn process_due_outbox(
     conn: &rusqlite::Connection,
     provider: &dyn vespetrel_core::provider::MailProvider,
     now: DateTime<Utc>,
 ) -> Vec<(String, Result<(), String>)> {
     let mut results = Vec::new();
-    let entries = match vespetrel_storage::repo::list_due_outbox(conn, now.timestamp()) {
-        Ok(e) => e,
-        Err(e) => {
-            tracing::error!(error=%e, "failed to query due outbox messages");
-            return results;
-        }
-    };
+    let now_ts = now.timestamp();
 
-    for entry in entries {
+    loop {
+        let entry = match claim_due_entry(conn, now_ts) {
+            Ok(Some(e)) => e,
+            Ok(None) => break,
+            Err(e) => {
+                tracing::error!(error=%e, "failed to claim a due outbox message");
+                break;
+            }
+        };
+
         match provider.send_message(&entry.composed_message).await {
             Ok(_) => {
                 tracing::info!(id=%entry.id, to=?entry.composed_message.to, "outbox message delivered successfully");
@@ -249,6 +354,11 @@ pub async fn process_due_outbox(
                 let _ = vespetrel_storage::repo::mark_outbox_failed(conn, &entry.id, &err_str);
                 results.push((entry.id, Err(err_str)));
             }
+        }
+
+        // Bound the work per pass so a large backlog cannot monopolise the caller.
+        if results.len() >= vespetrel_storage::repo::OUTBOX_PAGE_LIMIT as usize {
+            break;
         }
     }
     results
@@ -334,6 +444,133 @@ mod tests {
         assert_eq!(ready.len(), 1);
         assert_eq!(ready[0].subject, "Scheduled Update");
         assert!(!outbox.cancel_scheduled(&id));
+    }
+
+    /// Regression: `HashMap` iteration order made scheduled sends go out in a random order
+    /// that differed between runs.
+    #[test]
+    fn test_drain_is_ordered_by_send_at() {
+        let mk = |subject: &str| ComposedMessage {
+            from: Address {
+                name: None,
+                email: "u@example.com".into(),
+            },
+            to: vec![Address {
+                name: None,
+                email: "d@example.com".into(),
+            }],
+            cc: vec![],
+            bcc: vec![],
+            subject: subject.into(),
+            body_text: "x".into(),
+            body_html: None,
+            in_reply_to: None,
+            references: vec![],
+            attachments: vec![],
+        };
+
+        let now = Utc::now();
+        let mut outbox = OutboxQueue::new();
+        // Insert out of chronological order on purpose.
+        outbox.schedule_send(mk("third"), now + Duration::hours(3));
+        outbox.schedule_send(mk("first"), now + Duration::hours(1));
+        outbox.schedule_send(mk("second"), now + Duration::hours(2));
+
+        let ready = outbox.drain_due(now + Duration::hours(5));
+        let subjects: Vec<&str> = ready.iter().map(|m| m.subject.as_str()).collect();
+        assert_eq!(subjects, vec!["first", "second", "third"]);
+
+        // The same must hold for the undo buffer.
+        let mut undo = UndoSendBuffer::new(10);
+        undo.enqueue(mk("c"));
+        undo.enqueue(mk("a"));
+        undo.enqueue(mk("b"));
+        let drained: Vec<String> = undo
+            .drain_ready(now + Duration::hours(1))
+            .into_iter()
+            .map(|m| m.subject)
+            .collect();
+        // Grace periods are identical, so only require a deterministic, complete result.
+        assert_eq!(drained.len(), 3);
+    }
+
+    /// Regression: `load_from_db` used a `send_at <= now + 1 year` window, so a message
+    /// scheduled further out was never restored and could not be cancelled.
+    #[test]
+    fn test_load_from_db_restores_far_future_schedules() {
+        let conn = vespetrel_storage::open_in_memory().unwrap();
+        let acct = vespetrel_core::Account::new(
+            "far_acct",
+            "far@test.com",
+            vespetrel_core::ProviderType::Imap,
+        );
+        vespetrel_storage::repo::upsert_account(&conn, &acct).unwrap();
+
+        let mk = |subject: &str| ComposedMessage {
+            from: Address {
+                name: None,
+                email: "u@example.com".into(),
+            },
+            to: vec![Address {
+                name: None,
+                email: "d@example.com".into(),
+            }],
+            cc: vec![],
+            bcc: vec![],
+            subject: subject.into(),
+            body_text: "x".into(),
+            body_html: None,
+            in_reply_to: None,
+            references: vec![],
+            attachments: vec![],
+        };
+
+        let far = Utc::now() + chrono::Duration::days(900);
+        let mut q = OutboxQueue::new();
+        let id = q
+            .schedule_send_persistent(&conn, &acct.id, mk("far"), far)
+            .unwrap();
+
+        let mut restored = OutboxQueue::new();
+        assert_eq!(restored.load_from_db(&conn).unwrap(), 1);
+        assert!(restored.scheduled.contains_key(&id));
+        // And it is cancellable, which was impossible before.
+        assert!(restored.cancel_scheduled(&id));
+    }
+
+    /// Regression: `enqueue_persistent` mutated memory before the DB write, so a failed write
+    /// left an in-memory entry that vanished on restart.
+    #[test]
+    fn test_enqueue_persistent_does_not_mutate_on_db_failure() {
+        let conn = vespetrel_storage::open_in_memory().unwrap();
+        let mut undo = UndoSendBuffer::new(10);
+        let msg = ComposedMessage {
+            from: Address {
+                name: None,
+                email: "u@example.com".into(),
+            },
+            to: vec![Address {
+                name: None,
+                email: "d@example.com".into(),
+            }],
+            cc: vec![],
+            bcc: vec![],
+            subject: "s".into(),
+            body_text: "b".into(),
+            body_html: None,
+            in_reply_to: None,
+            references: vec![],
+            attachments: vec![],
+        };
+        // No account row exists, so the outbox FK fails.
+        assert!(
+            undo.enqueue_persistent(&conn, "no-such-account", msg)
+                .is_err()
+        );
+        assert!(
+            undo.pending.is_empty(),
+            "an in-memory entry survived a failed DB write"
+        );
     }
 
     #[tokio::test]

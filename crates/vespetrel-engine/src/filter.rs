@@ -90,7 +90,10 @@ impl FilterCondition {
 #[inline]
 fn contains_case_insensitive(haystack: &str, needle: &str) -> bool {
     if needle.is_empty() {
-        return true;
+        // A vacuous "contains nothing" test must not be vacuously *true*: a rule like
+        // `{field: Subject, predicate: Contains(""), actions: [Delete]}` would otherwise
+        // match every message and delete all of them.
+        return false;
     }
     if haystack.len() < needle.len() {
         return false;
@@ -107,7 +110,11 @@ fn contains_case_insensitive(haystack: &str, needle: &str) -> bool {
 
 #[inline]
 fn starts_with_case_insensitive(haystack: &str, needle: &str) -> bool {
-    if haystack.len() < needle.len() {
+    if needle.len() > haystack.len() || !haystack.is_char_boundary(needle.len()) {
+        // Byte-index slicing requires a char boundary. A byte-length check alone is not
+        // enough: a 6-byte needle against "Re: 議事録" (13 bytes) passes the length test and
+        // then panics on `haystack[..6]`, because index 6 is inside the 3-byte '議'.
+        // Remote message content reaches this, so it was a remotely triggerable panic.
         return false;
     }
     haystack[..needle.len()].eq_ignore_ascii_case(needle)
@@ -115,10 +122,13 @@ fn starts_with_case_insensitive(haystack: &str, needle: &str) -> bool {
 
 #[inline]
 fn ends_with_case_insensitive(haystack: &str, needle: &str) -> bool {
-    if haystack.len() < needle.len() {
+    if needle.len() > haystack.len() {
         return false;
     }
     let start = haystack.len() - needle.len();
+    if !haystack.is_char_boundary(start) {
+        return false;
+    }
     haystack[start..].eq_ignore_ascii_case(needle)
 }
 
@@ -210,6 +220,50 @@ impl FilterEngine {
 mod tests {
     use super::*;
     use chrono::Utc;
+
+    /// Regression: the guards compared *byte* lengths and then sliced at those byte offsets,
+    /// which panics unless the offset is a char boundary. Remote message content reaches
+    /// these functions, so this was a remotely triggerable panic.
+    #[test]
+    fn prefix_and_suffix_matching_never_panics_on_multibyte_text() {
+        // "Re: " is 4 bytes; "議" spans bytes 4..7. A 6-byte needle would slice at index 6,
+        // which is inside '議'.
+        assert!(!starts_with_case_insensitive("Re: 議事録", "議事"));
+        // The same needle on a haystack that *is* long enough does match.
+        assert!(starts_with_case_insensitive("議事録", "議事"));
+
+        // "café" is 5 bytes with the final 'é' at 3..5. A 3-byte needle would slice at
+        // index 2, which is inside that 'é' — so it must not match, and must not panic.
+        let needle_into_char: String = "fé".to_string() + "x"; // 4 bytes; starts at index 1
+        assert!(!ends_with_case_insensitive("café", "éab"));
+        assert!(!ends_with_case_insensitive("café", &needle_into_char));
+        // Valid boundaries still work.
+        assert!(ends_with_case_insensitive("café", "fé"));
+        assert!(ends_with_case_insensitive("café", "é"));
+
+        // Empty needles are valid boundaries and must not panic.
+        assert!(starts_with_case_insensitive("anything", ""));
+        assert!(ends_with_case_insensitive("anything", ""));
+        // Mixed scripts at every alignment: must be panic-free regardless of outcome.
+        for hay in [
+            "", "a", "é", "議", "aé", "議a", "é議", "a議é", "🙂x議", "café",
+        ] {
+            for needle in ["", "a", "é", "議", "aé", "議a", "🙂", "x議", "fé"] {
+                let _ = starts_with_case_insensitive(hay, needle);
+                let _ = ends_with_case_insensitive(hay, needle);
+            }
+        }
+    }
+
+    /// A vacuous "contains nothing" rule must not match everything, or
+    /// `{Subject, Contains(""), [Delete]}` deletes all mail.
+    #[test]
+    fn empty_contains_needle_matches_nothing() {
+        assert!(!contains_case_insensitive("anything", ""));
+        assert!(contains_case_insensitive("anything", "thing"));
+        assert!(starts_with_case_insensitive("anything", ""));
+        assert!(ends_with_case_insensitive("anything", ""));
+    }
 
     #[test]
     fn test_filter_rule_matching_and_actions() {

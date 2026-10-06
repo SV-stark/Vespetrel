@@ -30,6 +30,88 @@ impl MessageRowDensity {
     }
 }
 
+/// The message the reader is showing, plus the range of rows to act on.
+///
+/// The reader needs one "current" message and a bulk action needs "every selected
+/// message", and they are usually not the same set. Modelling selection as a
+/// separate set keeps the current row readable while a range operation has a
+/// defined target, instead of overloading one index to mean both.
+#[derive(Debug, Clone, Default)]
+pub struct MessageSelection {
+    current: Option<String>,
+    selected: HashSet<String>,
+}
+
+impl MessageSelection {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// The row the reader is showing, if any.
+    pub fn current(&self) -> Option<&str> {
+        self.current.as_deref()
+    }
+
+    pub fn set_current(&mut self, id: impl Into<String>) {
+        self.current = Some(id.into());
+    }
+
+    pub fn clear_current(&mut self) {
+        self.current = None;
+    }
+
+    pub fn is_selected(&self, id: &str) -> bool {
+        self.selected.contains(id)
+    }
+
+    pub fn toggle(&mut self, id: &str) {
+        if !self.selected.remove(id) {
+            self.selected.insert(id.to_string());
+        }
+    }
+
+    pub fn extend(&mut self, ids: impl IntoIterator<Item = String>) {
+        self.selected.extend(ids);
+    }
+
+    pub fn clear(&mut self) {
+        self.selected.clear();
+    }
+
+    pub fn selected_count(&self) -> usize {
+        self.selected.len()
+    }
+
+    /// The ids a bulk action should apply to.
+    ///
+    /// With nothing explicitly selected this is the current message, so a keystroke
+    /// always does something sensible. With a range selected it is that range, so
+    /// Shift-click then Archive acts on what the user highlighted.
+    pub fn target_ids(&self) -> Vec<String> {
+        if self.selected.is_empty() {
+            self.current.iter().cloned().collect()
+        } else {
+            self.selected.iter().cloned().collect()
+        }
+    }
+
+    /// Drop ids that are no longer present.
+    ///
+    /// Sync delivers deletions asynchronously, so a selection can outlive its
+    /// message. Acting on a stale id would report a failure the user cannot
+    /// explain, so the range is trimmed on every load.
+    pub fn retain(&mut self, present: &HashSet<String>) {
+        self.selected.retain(|id| present.contains(id));
+        if self
+            .current
+            .as_ref()
+            .is_some_and(|id| !present.contains(id))
+        {
+            self.current = None;
+        }
+    }
+}
+
 /// View-model for the virtual list. In gpui this wraps `gpui::VirtualList`.
 pub struct MessageListView {
     pub messages: Vec<MessageSummary>,

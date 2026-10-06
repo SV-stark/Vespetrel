@@ -27,6 +27,19 @@ pub struct MatrixBridge {
     pub access_token: String,
 }
 
+/// `access_token` is a bearer credential for the entire homeserver account, so it must never
+/// reach a log line, an error message or a panic message. A derived `Debug` prints it
+/// verbatim, which turns any `dbg!(bridge)` or `{:?}` in a log statement into a token leak.
+impl std::fmt::Debug for MatrixBridge {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("MatrixBridge")
+            .field("homeserver_url", &self.homeserver_url)
+            .field("user_id", &self.user_id)
+            .field("access_token", &"[REDACTED]")
+            .finish()
+    }
+}
+
 impl MatrixBridge {
     pub fn new(
         homeserver_url: impl Into<String>,
@@ -130,5 +143,16 @@ mod tests {
             summary.snippet.as_deref(),
             Some("Great progress on Phase 5 and 6!")
         );
+    }
+
+    #[test]
+    fn test_matrix_bridge_debug_redacts_token() {
+        let bridge = MatrixBridge::new("https://matrix.org", "@alice:matrix.org", "syt_topsecret");
+        let rendered = format!("{bridge:?}");
+        assert!(
+            !rendered.contains("syt_topsecret"),
+            "token leaked: {rendered}"
+        );
+        assert!(rendered.contains("REDACTED"), "{rendered}");
     }
 }

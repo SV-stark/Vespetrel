@@ -26,6 +26,21 @@ impl std::fmt::Debug for GraphConfig {
     }
 }
 
+/// Make a server-supplied string safe to splice into an RFC 5322 header value.
+///
+/// CR/LF would let a hostile response inject arbitrary headers into the blob we store;
+/// NUL is illegal in a header (RFC 5322 §3.2.6). RFC 2047 encoding is deliberately not
+/// applied here — the stored blob is later parsed by a real MIME parser, which handles
+/// encoded-words itself.
+pub fn hdr_safe(v: &str) -> String {
+    v.chars()
+        .map(|c| match c {
+            '\r' | '\n' | '\0' => ' ',
+            other => other,
+        })
+        .collect()
+}
+
 impl GraphConfig {
     pub fn new(access_token: impl Into<String>) -> Self {
         Self {
@@ -33,7 +48,6 @@ impl GraphConfig {
             base_url: GRAPH_BASE.into(),
         }
     }
-
     pub fn delta_url(&self, folder_id: &str, delta_token: Option<&str>) -> String {
         let enc_folder = url_encode(folder_id);
         if let Some(tok) = delta_token {
@@ -70,28 +84,72 @@ fn url_encode(input: &str) -> String {
 
 /// Convert ComposedMessage into Microsoft Graph sendMail JSON payload
 pub fn build_graph_sendmail_payload(msg: &ComposedMessage) -> serde_json::Value {
-    let to_recipients: Vec<serde_json::Value> = msg
-        .to
-        .iter()
-        .map(|a| {
-            serde_json::json!({
-                "emailAddress": {
-                    "name": a.name.clone().unwrap_or_default(),
-                    "address": a.email
-                }
+    use base64::Engine;
+
+    let recipients = |list: &[vespetrel_core::Address]| -> Vec<serde_json::Value> {
+        list.iter()
+            .map(|a| {
+                serde_json::json!({
+                    "emailAddress": {
+                        "name": a.name.clone().unwrap_or_default(),
+                        "address": a.email
+                    }
+                })
             })
-        })
-        .collect();
+            .collect()
+    };
+
+    // Build the object field by field so cc/bcc/attachments are only emitted when
+    // non-empty. The previous code hardcoded a `json!` literal containing only `toRecipients`,
+    // so `msg.cc`, `msg.bcc` and `msg.attachments` were read and then silently discarded and
+    // the send reported success having reached only the primary recipients.
+    let mut message = serde_json::Map::new();
+    message.insert("subject".into(), serde_json::json!(msg.subject));
+    message.insert(
+        "body".into(),
+        serde_json::json!({
+            "contentType": if msg.body_html.is_some() { "HTML" } else { "Text" },
+            "content": msg.body_html.clone().unwrap_or_else(|| msg.body_text.clone())
+        }),
+    );
+    message.insert(
+        "toRecipients".into(),
+        serde_json::json!(recipients(&msg.to)),
+    );
+    if !msg.cc.is_empty() {
+        message.insert(
+            "ccRecipients".into(),
+            serde_json::json!(recipients(&msg.cc)),
+        );
+    }
+    if !msg.bcc.is_empty() {
+        message.insert(
+            "bccRecipients".into(),
+            serde_json::json!(recipients(&msg.bcc)),
+        );
+    }
+    // Preserve threading: without internetMessageId a reply starts a brand new thread.
+    if let Some(irt) = &msg.in_reply_to {
+        message.insert("internetMessageId".into(), serde_json::json!(irt));
+    }
+    if !msg.attachments.is_empty() {
+        let atts: Vec<serde_json::Value> = msg
+            .attachments
+            .iter()
+            .map(|a| {
+                serde_json::json!({
+                    "@odata.type": "#microsoft.graph.fileAttachment",
+                    "name": a.filename,
+                    "contentType": a.content_type,
+                    "contentBytes": base64::engine::general_purpose::STANDARD.encode(&a.data)
+                })
+            })
+            .collect();
+        message.insert("attachments".into(), serde_json::json!(atts));
+    }
 
     serde_json::json!({
-        "message": {
-            "subject": msg.subject,
-            "body": {
-                "contentType": if msg.body_html.is_some() { "HTML" } else { "Text" },
-                "content": msg.body_html.clone().unwrap_or_else(|| msg.body_text.clone())
-            },
-            "toRecipients": to_recipients
-        },
+        "message": serde_json::Value::Object(message),
         "saveToSentItems": true
     })
 }
@@ -162,31 +220,10 @@ impl GraphProvider {
         &self.http
     }
 
+    /// Delegates to the shared builder so the two sendMail payload shapes cannot diverge
+    /// (the duplicate implementation here silently dropped cc, bcc and attachments).
     pub fn build_send_mail_payload(&self, msg: &ComposedMessage) -> serde_json::Value {
-        let to_recipients: Vec<serde_json::Value> = msg
-            .to
-            .iter()
-            .map(|to| {
-                serde_json::json!({
-                    "emailAddress": {
-                        "address": to.email,
-                        "name": to.name.as_deref().unwrap_or(&to.email)
-                    }
-                })
-            })
-            .collect();
-
-        serde_json::json!({
-            "message": {
-                "subject": msg.subject,
-                "body": {
-                    "contentType": if msg.body_html.is_some() { "HTML" } else { "Text" },
-                    "content": msg.body_html.as_ref().unwrap_or(&msg.body_text)
-                },
-                "toRecipients": to_recipients
-            },
-            "saveToSentItems": true
-        })
+        build_graph_sendmail_payload(msg)
     }
 }
 
@@ -262,11 +299,44 @@ impl MailProvider for GraphProvider {
             );
             let mut final_delta_token = state.graph_delta_token.clone();
 
+            // `@odata.nextLink` is an absolute URL taken verbatim from the response body and
+            // is used as the next request target *with the Graph bearer token attached*. A
+            // hostile or compromised endpoint (a self-hosted Exchange, a proxy, a MITM when
+            // base_url is http://) can therefore exfiltrate the token simply by returning
+            // `{"@odata.nextLink":"https://attacker.example/collect"}`. Pin the origin.
+            let base = url::Url::parse(&self.config.base_url).map_err(|e| {
+                vespetrel_core::provider::ProviderError::Protocol(format!(
+                    "invalid Graph base_url: {e}"
+                ))
+            })?;
+            let origin = base.origin().clone();
+            let mut pages: usize = 0;
+            // A nextLink that points at itself would otherwise loop forever.
+            const MAX_PAGES: usize = 500;
+
             while let Some(current_url) = next_url {
-                debug!(url=%current_url, "fetching Graph messages delta page");
+                pages += 1;
+                if pages > MAX_PAGES {
+                    return Err(vespetrel_core::provider::ProviderError::Protocol(format!(
+                        "Graph delta paging exceeded {MAX_PAGES} pages (runaway nextLink)"
+                    )));
+                }
+                let parsed = url::Url::parse(&current_url).map_err(|e| {
+                    vespetrel_core::provider::ProviderError::Protocol(format!(
+                        "bad Graph request URL: {e}"
+                    ))
+                })?;
+                if parsed.origin() != origin {
+                    return Err(vespetrel_core::provider::ProviderError::Protocol(format!(
+                        "refusing to follow a server-supplied paging link to foreign origin {}",
+                        parsed.origin().ascii_serialization()
+                    )));
+                }
+                // Log the path only: the query string carries the delta token.
+                debug!(path=%parsed.path(), "fetching Graph messages delta page");
                 let resp = self
                     .http
-                    .get(&current_url)
+                    .get(parsed.as_str())
                     .bearer_auth(&self.config.access_token)
                     .send()
                     .await
@@ -283,19 +353,33 @@ impl MailProvider for GraphProvider {
                     })?;
 
                 if let Some(link) = json.get("@odata.deltaLink").and_then(|v| v.as_str()) {
-                    let extracted = if let Ok(parsed_url) = url::Url::parse(link) {
-                        parsed_url
-                            .query_pairs()
-                            .find(|(k, _)| k == "$deltatoken" || k == "deltatoken")
-                            .map(|(_, v)| v.into_owned())
-                    } else {
-                        link.split("$deltatoken=")
-                            .nth(1)
-                            .and_then(|s| s.split('&').next())
-                            .map(|s| s.to_string())
-                    };
-                    final_delta_token = extracted.or(final_delta_token);
-                    next_url = None;
+                    // A deltaLink with no token means the cursor is unusable. Silently
+                    // keeping the previous token re-requests the same page forever.
+                    let extracted = url::Url::parse(link)
+                        .ok()
+                        .and_then(|u| {
+                            u.query_pairs()
+                                .find(|(k, _)| k == "$deltatoken" || k == "deltatoken")
+                                .map(|(_, v)| v.into_owned())
+                        })
+                        .or_else(|| {
+                            link.split("$deltatoken=")
+                                .nth(1)
+                                .and_then(|s| s.split('&').next())
+                                .map(|s| s.to_string())
+                        });
+                    match extracted {
+                        Some(tok) => {
+                            final_delta_token = Some(tok);
+                            next_url = None;
+                        }
+                        None => {
+                            return Err(vespetrel_core::provider::ProviderError::Protocol(
+                                "@odata.deltaLink carried no $deltatoken; a full resync is required"
+                                    .into(),
+                            ));
+                        }
+                    }
                 } else if let Some(next_link) = json.get("@odata.nextLink").and_then(|v| v.as_str())
                 {
                     next_url = Some(next_link.to_string());
@@ -360,8 +444,18 @@ impl MailProvider for GraphProvider {
                             format!("Date: {}\r\n", chrono::Utc::now().to_rfc2822())
                         };
 
+                        // Every one of these values comes from the response body and is
+                        // spliced into a header position. A subject of
+                        // "x\r\n\r\nX-Injected: yes" would otherwise add attacker-chosen
+                        // headers to the stored blob, which downstream MIME parsers, DKIM
+                        // and threading all trust.
                         let mime_data = format!(
-                            "From: {sender}\r\nTo: me@example.com\r\nSubject: {subject}\r\n{date_hdr}Message-ID: <{id}@graph.microsoft.com>\r\nMIME-Version: 1.0\r\n{content_type}\r\n\r\n{body_preview}"
+                            "From: {}\r\nTo: me@example.com\r\nSubject: {}\r\n{date_hdr}Message-ID: <{}@graph.microsoft.com>\r\nMIME-Version: 1.0\r\n{content_type}\r\n\r\n{}",
+                            hdr_safe(sender),
+                            hdr_safe(subject),
+                            hdr_safe(id),
+                            // The body is not a header, so only NUL is stripped.
+                            body_preview.replace('\0', ""),
                         )
                         .into_bytes();
 

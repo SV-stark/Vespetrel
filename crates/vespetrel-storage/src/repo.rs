@@ -7,6 +7,15 @@ use vespetrel_core::{Account, Attachment, Folder, Message};
 
 // Simple synchronous repository helpers - callers use deadpool-sqlite threadpool or blocking
 
+/// Build a rusqlite conversion error for a stored integer that does not fit its Rust type.
+fn corrupt_int(col: usize, msg: &str) -> rusqlite::Error {
+    rusqlite::Error::FromSqlConversionFailure(
+        col,
+        rusqlite::types::Type::Integer,
+        Box::new(crate::StorageError::CorruptData(msg.to_string())),
+    )
+}
+
 pub fn upsert_account(conn: &Connection, acct: &Account) -> StorageResult<()> {
     conn.execute(
         r#"INSERT INTO accounts (id, name, email, provider_type, auth_config, sync_state, is_active, color, created_at)
@@ -46,6 +55,9 @@ pub fn list_accounts(conn: &Connection) -> StorageResult<Vec<Account>> {
         };
         let auth_json: String = row.get(4)?;
         let sync_json: String = row.get(5)?;
+        // Never substitute a default for stored credentials. `upsert_account` rewrites every
+        // column, so a lossy read here would permanently erase the user's IMAP/SMTP auth the
+        // first time the JSON fails to deserialize (e.g. after a version-skewed upgrade).
         let auth_config = match serde_json::from_str(&auth_json) {
             Ok(a) => a,
             Err(e) => {
@@ -158,7 +170,32 @@ pub fn delete_account(conn: &Connection, id: &str) -> StorageResult<()> {
     Ok(())
 }
 
-pub fn upsert_folder(conn: &Connection, folder: &Folder) -> StorageResult<()> {
+/// Persist only the sync cursor for an account.
+///
+/// This exists instead of a `get_account` -> mutate -> `upsert_account` round-trip:
+/// `upsert_account` rewrites *every* column, so if `auth_config` ever failed to deserialize
+/// during the read, the lossy default would be written straight back over the user's
+/// stored credentials, permanently destroying them.
+pub fn update_account_sync_state(
+    conn: &Connection,
+    account_id: &str,
+    sync_state: &vespetrel_core::account::SyncState,
+) -> StorageResult<()> {
+    conn.execute(
+        "UPDATE accounts SET sync_state = ?2 WHERE id = ?1",
+        params![account_id, serde_json::to_string(sync_state)?],
+    )?;
+    Ok(())
+}
+
+/// Upsert a folder and return the **persisted** local `id`.
+///
+/// The conflict target is `(account_id, remote_id)`, and `id` is deliberately NOT
+/// overwritten: `messages.folder_id` references `folders(id)` with `ON DELETE CASCADE`,
+/// so re-keying an existing folder would break every message already filed under it.
+/// Callers must use the returned id rather than the one they generated, because
+/// `Folder::new` mints a fresh UUID on every sync cycle.
+pub fn upsert_folder(conn: &Connection, folder: &Folder) -> StorageResult<String> {
     conn.execute(
         r#"INSERT INTO folders (id, account_id, remote_id, name, path, role, uid_validity, highest_mod_seq, total_count, unread_count, color)
            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
@@ -173,14 +210,29 @@ pub fn upsert_folder(conn: &Connection, folder: &Folder) -> StorageResult<()> {
             folder.name,
             folder.path,
             folder.role.to_string(),
-            folder.uid_validity.map(|v| v as i64),
-            folder.highest_mod_seq.map(|v| v as i64),
+            folder.uid_validity.map(i64::from),
+            folder
+                .highest_mod_seq
+                .map(i64::try_from)
+                .transpose()
+                .map_err(|_| {
+                    crate::StorageError::CorruptData(format!(
+                        "highest_mod_seq {} out of range for SQLite INTEGER",
+                        folder.highest_mod_seq.unwrap_or_default()
+                    ))
+                })?,
             folder.total_count,
             folder.unread_count,
             folder.color,
         ],
     )?;
-    Ok(())
+    // Read back the id that actually survived the upsert (the pre-existing one on conflict).
+    conn.query_row(
+        "SELECT id FROM folders WHERE account_id = ?1 AND remote_id = ?2",
+        params![folder.account_id, folder.remote_id],
+        |r| r.get::<_, String>(0),
+    )
+    .map_err(Into::into)
 }
 
 pub fn list_folders(conn: &Connection, account_id: &str) -> StorageResult<Vec<Folder>> {
@@ -196,8 +248,16 @@ pub fn list_folders(conn: &Connection, account_id: &str) -> StorageResult<Vec<Fo
             role: role_str
                 .parse()
                 .unwrap_or(vespetrel_core::FolderRole::Custom),
-            uid_validity: row.get::<_, Option<i64>>(6)?.map(|v| v as u32),
-            highest_mod_seq: row.get::<_, Option<i64>>(7)?.map(|v| v as u64),
+            uid_validity: row
+                .get::<_, Option<i64>>(6)?
+                .map(u32::try_from)
+                .transpose()
+                .map_err(|_| corrupt_int(6, "uid_validity out of range"))?,
+            highest_mod_seq: row
+                .get::<_, Option<i64>>(7)?
+                .map(u64::try_from)
+                .transpose()
+                .map_err(|_| corrupt_int(7, "highest_mod_seq out of range"))?,
             total_count: row.get(8)?,
             unread_count: row.get(9)?,
             color: row.get(10)?,
@@ -223,8 +283,16 @@ pub fn get_folder(
             role: role_str
                 .parse()
                 .unwrap_or(vespetrel_core::FolderRole::Custom),
-            uid_validity: row.get::<_, Option<i64>>(6)?.map(|v| v as u32),
-            highest_mod_seq: row.get::<_, Option<i64>>(7)?.map(|v| v as u64),
+            uid_validity: row
+                .get::<_, Option<i64>>(6)?
+                .map(u32::try_from)
+                .transpose()
+                .map_err(|_| corrupt_int(6, "uid_validity out of range"))?,
+            highest_mod_seq: row
+                .get::<_, Option<i64>>(7)?
+                .map(u64::try_from)
+                .transpose()
+                .map_err(|_| corrupt_int(7, "highest_mod_seq out of range"))?,
             total_count: row.get(8)?,
             unread_count: row.get(9)?,
             color: row.get(10)?,
@@ -357,12 +425,23 @@ pub fn parse_message_row(row: &rusqlite::Row) -> rusqlite::Result<Message> {
             ))),
         )
     })?;
+    // `as u32` is a bit-reinterpretation: a corrupt -1 silently becomes 4294967295, which the
+    // sync engine then reads as "the server re-keyed this mailbox" and triggers a full re-sync.
+    let remote_uid = u32::try_from(row.get::<_, i64>(4)?).map_err(|_| {
+        rusqlite::Error::FromSqlConversionFailure(
+            4,
+            rusqlite::types::Type::Integer,
+            Box::new(crate::StorageError::CorruptData(
+                "remote_uid out of range".to_string(),
+            )),
+        )
+    })?;
     Ok(Message {
         id: row.get(0)?,
         account_id: row.get(1)?,
         folder_id: row.get(2)?,
         thread_id: row.get(3)?,
-        remote_uid: row.get::<_, i64>(4)? as u32,
+        remote_uid,
         message_id_header: row.get(5)?,
         in_reply_to: row.get(6)?,
         references: row.get(7)?,
@@ -383,7 +462,9 @@ pub fn parse_message_row(row: &rusqlite::Row) -> rusqlite::Result<Message> {
         body_text_preview: row.get(22)?,
         blob_path: row.get(23)?,
         size_bytes: row.get(24)?,
-        remote_id: row.get(25).ok(),
+        // Propagate read errors: `.ok()` would turn a SELECT that forgot this column into
+        // "every message has no remote_id" instead of a loud schema error.
+        remote_id: row.get(25)?,
     })
 }
 
@@ -393,13 +474,14 @@ pub fn list_messages_in_folder(
     limit: usize,
     offset: usize,
 ) -> StorageResult<Vec<Message>> {
+    // `usize as i64` is a bit-reinterpretation, not a checked conversion: usize::MAX becomes
+    // -1, and SQLite reads a negative LIMIT as "unbounded" and a negative OFFSET as 0.
+    let limit = i64::try_from(limit).unwrap_or(i64::MAX);
+    let offset = i64::try_from(offset).unwrap_or(i64::MAX);
     let mut stmt = conn.prepare(
-        "SELECT id, account_id, folder_id, thread_id, remote_uid, message_id_header, in_reply_to, references_header, subject, from_address, from_name, to_addresses, cc_addresses, bcc_addresses, reply_to, sent_at, received_at, is_read, is_flagged, is_draft, has_attachments, body_snippet, body_text_preview, blob_path, size_bytes, remote_id FROM messages WHERE folder_id = ?1 OR folder_id = (SELECT id FROM folders WHERE remote_id = ?1 LIMIT 1) ORDER BY sent_at DESC LIMIT ?2 OFFSET ?3"
+        "SELECT id, account_id, folder_id, thread_id, remote_uid, message_id_header, in_reply_to, references_header, subject, from_address, from_name, to_addresses, cc_addresses, bcc_addresses, reply_to, sent_at, received_at, is_read, is_flagged, is_draft, has_attachments, body_snippet, body_text_preview, blob_path, size_bytes, remote_id FROM messages WHERE folder_id = ?1 ORDER BY sent_at DESC LIMIT ?2 OFFSET ?3"
     )?;
-    let rows = stmt.query_map(
-        params![folder_id, limit as i64, offset as i64],
-        parse_message_row,
-    )?;
+    let rows = stmt.query_map(params![folder_id, limit, offset], parse_message_row)?;
     rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
 }
 
@@ -408,10 +490,12 @@ pub fn list_unified_inbox_messages(
     limit: usize,
     offset: usize,
 ) -> StorageResult<Vec<Message>> {
+    let limit = i64::try_from(limit).unwrap_or(i64::MAX);
+    let offset = i64::try_from(offset).unwrap_or(i64::MAX);
     let mut stmt = conn.prepare(
-        "SELECT id, account_id, folder_id, thread_id, remote_uid, message_id_header, in_reply_to, references_header, subject, from_address, from_name, to_addresses, cc_addresses, bcc_addresses, reply_to, sent_at, received_at, is_read, is_flagged, is_draft, has_attachments, body_snippet, body_text_preview, blob_path, size_bytes, remote_id FROM messages WHERE folder_id IN (SELECT id FROM folders WHERE role = 'inbox') OR folder_id IN (SELECT remote_id FROM folders WHERE role = 'inbox') ORDER BY sent_at DESC LIMIT ?1 OFFSET ?2"
+        "SELECT id, account_id, folder_id, thread_id, remote_uid, message_id_header, in_reply_to, references_header, subject, from_address, from_name, to_addresses, cc_addresses, bcc_addresses, reply_to, sent_at, received_at, is_read, is_flagged, is_draft, has_attachments, body_snippet, body_text_preview, blob_path, size_bytes, remote_id FROM messages WHERE folder_id IN (SELECT id FROM folders WHERE role = 'inbox') ORDER BY sent_at DESC LIMIT ?1 OFFSET ?2"
     )?;
-    let rows = stmt.query_map(params![limit as i64, offset as i64], parse_message_row)?;
+    let rows = stmt.query_map(params![limit, offset], parse_message_row)?;
     rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
 }
 
@@ -484,6 +568,33 @@ pub fn upsert_thread(conn: &Connection, thread: &vespetrel_core::Thread) -> Stor
     Ok(())
 }
 
+/// Recompute a thread's counters and latest-activity timestamp from the messages table.
+///
+/// Deriving these in the sync loop was wrong in both directions: a hardcoded
+/// `message_count = 1` made every thread report one message, and computing `unread_count`
+/// from only the message currently being synced zeroed it whenever a *read* message was
+/// re-synced, even with unread messages still present. Recomputing from the source of truth
+/// is also idempotent, so a re-sync does not double-count.
+pub fn recount_thread(conn: &Connection, thread_id: &str) -> StorageResult<()> {
+    let (count, unread, latest): (i64, i64, Option<i64>) = conn.query_row(
+        "SELECT COUNT(*),
+                COALESCE(SUM(CASE WHEN is_read = 0 THEN 1 ELSE 0 END), 0),
+                MAX(sent_at)
+         FROM messages
+         WHERE thread_id = ?1",
+        params![thread_id],
+        |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+    )?;
+    conn.execute(
+        "UPDATE threads
+            SET message_count = ?2, unread_count = ?3,
+                last_message_at = COALESCE(?4, last_message_at)
+          WHERE id = ?1",
+        params![thread_id, count, unread, latest],
+    )?;
+    Ok(())
+}
+
 pub fn list_threads(
     conn: &Connection,
     account_id: &str,
@@ -547,11 +658,12 @@ pub fn list_messages_by_ids(
         let m = msg?;
         map.insert(m.id.clone(), m);
     }
-    // Return in original search ranking order
+    // Return in original search ranking order. Use `get`, not `remove`: a duplicated id must
+    // still yield one row per requested id, not silently shrink the result.
     let mut result = Vec::new();
     for id in message_ids {
-        if let Some(m) = map.remove(id) {
-            result.push(m);
+        if let Some(m) = map.get(id) {
+            result.push(m.clone());
         }
     }
     Ok(result)
@@ -753,19 +865,31 @@ pub fn list_tasks(
     )?;
     let rows = stmt.query_map(params![calendar_id], |row| {
         let is_completed_int: i64 = row.get(6)?;
+        // `and_then` here would silently turn an out-of-range timestamp into "no due date";
+        // report it as corruption like every other timestamp read in this file.
+        let due_at = match row.get::<_, Option<i64>>(5)? {
+            None => None,
+            Some(ts) => Some(
+                DateTime::from_timestamp(ts, 0)
+                    .ok_or_else(|| corrupt_int(5, "invalid due_at timestamp"))?,
+            ),
+        };
+        let completed_at = match row.get::<_, Option<i64>>(7)? {
+            None => None,
+            Some(ts) => Some(
+                DateTime::from_timestamp(ts, 0)
+                    .ok_or_else(|| corrupt_int(7, "invalid completed_at timestamp"))?,
+            ),
+        };
         Ok(vespetrel_core::TaskItem {
             id: row.get(0)?,
             calendar_id: row.get(1)?,
             ical_uid: row.get(2)?,
             title: row.get(3)?,
             description: row.get(4)?,
-            due_at: row
-                .get::<_, Option<i64>>(5)?
-                .and_then(|ts| DateTime::from_timestamp(ts, 0)),
+            due_at,
             is_completed: is_completed_int != 0,
-            completed_at: row
-                .get::<_, Option<i64>>(7)?
-                .and_then(|ts| DateTime::from_timestamp(ts, 0)),
+            completed_at,
             priority: (row.get::<_, i64>(8)?).clamp(0, 255) as u8,
         })
     })?;
@@ -795,7 +919,11 @@ pub fn delete_task(conn: &Connection, id: &str) -> StorageResult<()> {
 }
 
 pub fn upsert_signature(conn: &Connection, sig: &vespetrel_core::Signature) -> StorageResult<()> {
-    conn.execute_batch("BEGIN IMMEDIATE;")?;
+    // A SAVEPOINT (not BEGIN/COMMIT) so this nests safely when the caller already holds a
+    // transaction: `Transaction` derefs to `Connection`, so `upsert_folder(&tx, ..)` and
+    // `upsert_signature(&tx, ..)` look identical at the call site. A bare `BEGIN IMMEDIATE`
+    // there fails with "cannot start a transaction within a transaction".
+    conn.execute_batch("SAVEPOINT vespetrel_upsert_signature;")?;
     let res = (|| -> Result<(), rusqlite::Error> {
         if sig.is_default {
             conn.execute(
@@ -827,11 +955,15 @@ pub fn upsert_signature(conn: &Connection, sig: &vespetrel_core::Signature) -> S
     })();
     match res {
         Ok(()) => {
-            conn.execute_batch("COMMIT;")?;
+            conn.execute_batch("RELEASE vespetrel_upsert_signature;")?;
             Ok(())
         }
         Err(e) => {
-            let _ = conn.execute_batch("ROLLBACK;");
+            // Surface a rollback failure instead of `let _ =`: a silently aborted rollback
+            // returns the connection to the pool with a transaction still open.
+            conn.execute_batch(
+                "ROLLBACK TO vespetrel_upsert_signature; RELEASE vespetrel_upsert_signature;",
+            )?;
             Err(e.into())
         }
     }
@@ -981,48 +1113,87 @@ pub fn cancel_outbox(conn: &Connection, id: &str) -> StorageResult<bool> {
     Ok(rows > 0)
 }
 
+/// Maximum number of due outbox rows returned in one call.
+///
+/// Each row carries a full serialized `ComposedMessage` *including attachment payloads*, so
+/// an unbounded read would load the entire backlog into memory at once. Callers page through.
+pub const OUTBOX_PAGE_LIMIT: i64 = 200;
+
 pub fn list_due_outbox(conn: &Connection, now: i64) -> StorageResult<Vec<OutboxEntry>> {
+    list_due_outbox_page(conn, now, OUTBOX_PAGE_LIMIT)
+}
+
+pub fn list_due_outbox_page(
+    conn: &Connection,
+    now: i64,
+    limit: i64,
+) -> StorageResult<Vec<OutboxEntry>> {
+    let limit = limit.clamp(1, OUTBOX_PAGE_LIMIT);
     let mut stmt = conn.prepare(
         "SELECT id, account_id, composed_message, scheduled_at, send_at, is_cancelled, attempts, last_error
          FROM outbox
          WHERE is_cancelled = 0 AND send_at <= ?1
-         ORDER BY send_at ASC",
+         ORDER BY send_at ASC
+         LIMIT ?2",
     )?;
-    let rows = stmt.query_map(params![now], |row| {
-        let id: String = row.get(0)?;
-        let account_id: String = row.get(1)?;
-        let msg_json: String = row.get(2)?;
-        let scheduled_at: i64 = row.get(3)?;
-        let send_at: i64 = row.get(4)?;
-        let is_cancelled: bool = row.get::<_, i64>(5)? != 0;
-        let attempts: i64 = row.get(6)?;
-        let last_error: Option<String> = row.get(7)?;
-
-        let composed_message = match serde_json::from_str(&msg_json) {
-            Ok(m) => m,
-            Err(e) => {
-                return Err(rusqlite::Error::FromSqlConversionFailure(
-                    2,
-                    rusqlite::types::Type::Text,
-                    Box::new(e),
-                ));
-            }
-        };
-
-        Ok(OutboxEntry {
-            id,
-            account_id,
-            composed_message,
-            scheduled_at,
-            send_at,
-            is_cancelled,
-            attempts,
-            last_error,
-        })
-    })?;
-
+    let rows = stmt.query_map(params![now, limit], outbox_row_to_entry)?;
     let mut result = Vec::new();
     for row in rows {
+        result.push(row?);
+    }
+    Ok(result)
+}
+
+/// Fetch a single outbox row by id.
+pub fn get_outbox_entry(conn: &Connection, id: &str) -> StorageResult<Option<OutboxEntry>> {
+    let mut stmt = conn.prepare(
+        "SELECT id, account_id, composed_message, scheduled_at, send_at, is_cancelled, attempts, last_error
+         FROM outbox
+         WHERE id = ?1",
+    )?;
+    let mut rows = stmt.query_map(params![id], outbox_row_to_entry)?;
+    match rows.next() {
+        Some(Ok(e)) => Ok(Some(e)),
+        Some(Err(e)) => Err(e.into()),
+        None => Ok(None),
+    }
+}
+
+fn outbox_row_to_entry(row: &rusqlite::Row) -> rusqlite::Result<OutboxEntry> {
+    let id: String = row.get(0)?;
+    let account_id: String = row.get(1)?;
+    let msg_json: String = row.get(2)?;
+    let composed_message = serde_json::from_str(&msg_json).map_err(|e| {
+        rusqlite::Error::FromSqlConversionFailure(2, rusqlite::types::Type::Text, Box::new(e))
+    })?;
+    Ok(OutboxEntry {
+        id,
+        account_id,
+        composed_message,
+        scheduled_at: row.get(3)?,
+        send_at: row.get(4)?,
+        is_cancelled: row.get::<_, i64>(5)? != 0,
+        attempts: row.get(6)?,
+        last_error: row.get(7)?,
+    })
+}
+
+/// Every uncancelled outbox row, regardless of `send_at`.
+///
+/// Used to restore the schedule on startup. `list_due_outbox` filters on
+/// `send_at <= now`, so widening the `now` argument by a year (as `load_from_db` did) merely
+/// moved the cutoff — a message scheduled for next year was never loaded at all, so the user
+/// could not cancel it and it was never sent. Fetching all rows and filtering in memory has
+/// no such horizon.
+pub fn list_all_uncancelled_outbox(conn: &Connection) -> StorageResult<Vec<OutboxEntry>> {
+    let mut stmt = conn.prepare(
+        "SELECT id, account_id, composed_message, scheduled_at, send_at, is_cancelled, attempts, last_error
+         FROM outbox
+         WHERE is_cancelled = 0
+         ORDER BY send_at ASC",
+    )?;
+    let mut result = Vec::new();
+    for row in stmt.query_map([], outbox_row_to_entry)? {
         result.push(row?);
     }
     Ok(result)
@@ -1228,5 +1399,322 @@ mod tests {
 
         // Delete outbox entry
         delete_outbox_entry(&conn, "out-1").unwrap();
+    }
+
+    /// Regression: `Folder::new` mints a fresh UUID every sync cycle, and the upsert's
+    /// conflict target is `(account_id, remote_id)`. Before the fix, the DO UPDATE silently
+    /// kept the *original* id while callers kept using their newly generated one, so every
+    /// `insert_message` after the first sync cycle died on the messages.folder_id FK and the
+    /// whole per-folder batch was rolled back.
+    #[test]
+    fn test_upsert_folder_returns_persisted_id_across_resync() {
+        let conn = open_in_memory().unwrap();
+        let acct = Account::new(
+            "Sync",
+            "sync@example.com",
+            vespetrel_core::ProviderType::Imap,
+        );
+        upsert_account(&conn, &acct).unwrap();
+
+        // Cycle 1
+        let f1 = Folder::new(&acct.id, "INBOX", "Inbox", "INBOX");
+        let id1 = upsert_folder(&conn, &f1).unwrap();
+        assert_eq!(id1, f1.id);
+
+        let m1 = Message::new(
+            &acct.id,
+            &id1,
+            1,
+            "First",
+            "a@x.com",
+            vec!["b@x.com".into()],
+        );
+        insert_message(&conn, &m1).unwrap();
+
+        // Cycle 2: a *different* freshly generated id for the same (account, remote_id)
+        let f2 = Folder::new(&acct.id, "INBOX", "Inbox", "INBOX");
+        assert_ne!(f2.id, f1.id, "precondition: Folder::new must mint a new id");
+        let id2 = upsert_folder(&conn, &f2).unwrap();
+        assert_eq!(id2, f1.id, "the pre-existing folder id must be reused");
+
+        // This is the insert that used to fail with FOREIGN KEY constraint failed
+        let m2 = Message::new(
+            &acct.id,
+            &id2,
+            2,
+            "Second",
+            "a@x.com",
+            vec!["b@x.com".into()],
+        );
+        insert_message(&conn, &m2).unwrap();
+
+        let msgs = list_messages_in_folder(&conn, &id1, 10, 0).unwrap();
+        assert_eq!(msgs.len(), 2);
+    }
+
+    /// Regression: the second `OR folder_id IN (SELECT remote_id ...)` disjunct compared a
+    /// local UUID against a server-side mailbox path, leaking another account's non-inbox
+    /// messages into the unified inbox.
+    #[test]
+    fn test_unified_inbox_excludes_non_inbox_folders() {
+        let conn = open_in_memory().unwrap();
+        let acct = Account::new("A", "a@x.com", vespetrel_core::ProviderType::Imap);
+        upsert_account(&conn, &acct).unwrap();
+
+        let inbox = Folder::new(&acct.id, "INBOX", "Inbox", "INBOX")
+            .with_role(vespetrel_core::FolderRole::Inbox);
+        let inbox_id = upsert_folder(&conn, &inbox).unwrap();
+        // A non-inbox folder whose *local id* collides with the inbox's *remote_id*.
+        let archive = Folder::new(&acct.id, "Archive", "Archive", "Archive")
+            .with_role(vespetrel_core::FolderRole::Archive);
+        upsert_folder(&conn, &archive).unwrap();
+        conn.execute(
+            "UPDATE folders SET id = 'INBOX' WHERE id = ?1",
+            params![archive.id],
+        )
+        .unwrap();
+
+        insert_message(
+            &conn,
+            &Message::new(&acct.id, &inbox_id, 1, "Inbox mail", "a@x.com", vec![]),
+        )
+        .unwrap();
+        insert_message(
+            &conn,
+            &Message::new(&acct.id, "INBOX", 2, "Archived mail", "a@x.com", vec![]),
+        )
+        .unwrap();
+
+        let unified = list_unified_inbox_messages(&conn, 100, 0).unwrap();
+        assert_eq!(
+            unified.len(),
+            1,
+            "archived message leaked into unified inbox"
+        );
+        assert_eq!(unified[0].subject.as_deref(), Some("Inbox mail"));
+    }
+
+    /// Regression: `list_messages_in_folder` treated the passed id as a `remote_id` too,
+    /// merging two unrelated folders' messages (non-deterministic `LIMIT 1`, no account
+    /// filter) before applying LIMIT/OFFSET.
+    #[test]
+    fn test_list_messages_in_folder_does_not_merge_by_remote_id() {
+        let conn = open_in_memory().unwrap();
+        let acct = Account::new("B", "b@x.com", vespetrel_core::ProviderType::Imap);
+        upsert_account(&conn, &acct).unwrap();
+
+        let inbox = Folder::new(&acct.id, "INBOX", "Inbox", "INBOX");
+        let inbox_id = upsert_folder(&conn, &inbox).unwrap();
+        let archive = Folder::new(&acct.id, "Archive", "Archive", "Archive");
+        let archive_id = upsert_folder(&conn, &archive).unwrap();
+
+        insert_message(
+            &conn,
+            &Message::new(&acct.id, &inbox_id, 1, "Inbox", "a@x.com", vec![]),
+        )
+        .unwrap();
+        insert_message(
+            &conn,
+            &Message::new(&acct.id, &archive_id, 2, "Archive", "a@x.com", vec![]),
+        )
+        .unwrap();
+
+        // "INBOX" is a *remote_id*, not a local folder id: must resolve to nothing.
+        assert!(
+            list_messages_in_folder(&conn, "INBOX", 10, 0)
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(
+            list_messages_in_folder(&conn, &inbox_id, 10, 0)
+                .unwrap()
+                .len(),
+            1
+        );
+        assert_eq!(
+            list_messages_in_folder(&conn, &archive_id, 10, 0)
+                .unwrap()
+                .len(),
+            1
+        );
+    }
+
+    /// Regression: `limit as i64` reinterprets usize::MAX as -1, and SQLite reads a negative
+    /// LIMIT as "unbounded" and a negative OFFSET as 0.
+    #[test]
+    fn test_paging_limit_offset_saturate_instead_of_wrapping() {
+        let conn = open_in_memory().unwrap();
+        let acct = Account::new("C", "c@x.com", vespetrel_core::ProviderType::Imap);
+        upsert_account(&conn, &acct).unwrap();
+        let folder = Folder::new(&acct.id, "INBOX", "Inbox", "INBOX");
+        let folder_id = upsert_folder(&conn, &folder).unwrap();
+
+        for uid in 1..=5 {
+            insert_message(
+                &conn,
+                &Message::new(
+                    &acct.id,
+                    &folder_id,
+                    uid,
+                    format!("m{uid}"),
+                    "a@x.com",
+                    vec![],
+                ),
+            )
+            .unwrap();
+        }
+
+        // A negative OFFSET used to silently re-render page 1 forever.
+        assert!(
+            list_messages_in_folder(&conn, &folder_id, 10, usize::MAX)
+                .unwrap()
+                .is_empty()
+        );
+        // A negative LIMIT used to silently remove the bound.
+        assert_eq!(
+            list_messages_in_folder(&conn, &folder_id, usize::MAX, 0)
+                .unwrap()
+                .len(),
+            5
+        );
+    }
+
+    /// Regression: `upsert_signature` issued its own `BEGIN IMMEDIATE`, so calling it with a
+    /// `&Transaction` (which derefs to `&Connection`) always failed, and its rollback error
+    /// was discarded.
+    #[test]
+    fn test_upsert_signature_nests_inside_caller_transaction() {
+        let conn = open_in_memory().unwrap();
+        let acct = Account::new("Sig", "sig@x.com", vespetrel_core::ProviderType::Imap);
+        upsert_account(&conn, &acct).unwrap();
+        let now = chrono::Utc::now();
+        let mk = |id: &str, name: &str, is_default: bool| vespetrel_core::Signature {
+            id: id.into(),
+            account_id: acct.id.clone(),
+            name: name.into(),
+            raw_html: "<p>hi</p>".into(),
+            plain_text: Some("hi".into()),
+            is_default,
+            include_in_replies: true,
+            created_at: now,
+            updated_at: now,
+        };
+
+        // Must not error with "cannot start a transaction within a transaction"
+        let tx = conn.unchecked_transaction().unwrap();
+        upsert_signature(&tx, &mk("s1", "Personal", true)).unwrap();
+        upsert_signature(&tx, &mk("s2", "Work", true)).unwrap();
+        tx.commit().unwrap();
+
+        let sigs = list_signatures_for_account(&conn, &acct.id).unwrap();
+        assert_eq!(sigs.len(), 2);
+        assert_eq!(
+            sigs.iter().filter(|s| s.is_default).count(),
+            1,
+            "exactly one signature must remain the default"
+        );
+    }
+
+    /// Regression: `row.get(25).ok()` swallowed column mismatches; a corrupt `remote_uid`
+    /// used to be reinterpreted via `as u32` (-1 -> 4294967295), which the sync engine reads
+    /// as "the server re-keyed this mailbox" and answers with a full re-sync.
+    #[test]
+    fn test_corrupt_numeric_columns_are_rejected_not_wrapped() {
+        let conn = open_in_memory().unwrap();
+        let acct = Account::new("D", "d@x.com", vespetrel_core::ProviderType::Imap);
+        upsert_account(&conn, &acct).unwrap();
+        let folder = Folder::new(&acct.id, "INBOX", "Inbox", "INBOX");
+        let folder_id = upsert_folder(&conn, &folder).unwrap();
+        let msg = Message::new(&acct.id, &folder_id, 7, "s", "a@x.com", vec![]);
+        insert_message(&conn, &msg).unwrap();
+
+        conn.execute("UPDATE messages SET remote_uid = -1", [])
+            .unwrap();
+        let err = get_message(&conn, &msg.id).unwrap_err();
+        assert!(
+            err.to_string().contains("remote_uid"),
+            "expected a corruption error, got: {err}"
+        );
+
+        conn.execute("UPDATE messages SET remote_uid = 7", [])
+            .unwrap();
+        conn.execute("UPDATE folders SET uid_validity = -5", [])
+            .unwrap();
+        assert!(
+            list_folders(&conn, &acct.id).is_err(),
+            "negative uid_validity must be reported, not wrapped to a huge u32"
+        );
+    }
+
+    /// Regression: duplicate ids in a search result set used to collapse, because the
+    /// ordering pass used `HashMap::remove` instead of `get`.
+    #[test]
+    fn test_list_messages_by_ids_preserves_duplicates() {
+        let conn = open_in_memory().unwrap();
+        let acct = Account::new("E", "e@x.com", vespetrel_core::ProviderType::Imap);
+        upsert_account(&conn, &acct).unwrap();
+        let folder = Folder::new(&acct.id, "INBOX", "Inbox", "INBOX");
+        let folder_id = upsert_folder(&conn, &folder).unwrap();
+        let msg = Message::new(&acct.id, &folder_id, 1, "s", "a@x.com", vec![]);
+        insert_message(&conn, &msg).unwrap();
+
+        let out = list_messages_by_ids(&conn, &[msg.id.clone(), msg.id.clone()]).unwrap();
+        assert_eq!(out.len(), 2, "duplicate id collapsed");
+        assert!(list_messages_by_ids(&conn, &[]).unwrap().is_empty());
+    }
+
+    /// Regression: a failed `auth_config` deserialization used to be replaced with a default
+    /// that the sync loop then wrote straight back, destroying the user's stored credentials.
+    #[test]
+    fn test_update_account_sync_state_preserves_auth_config() {
+        let conn = open_in_memory().unwrap();
+        let acct = Account::new("F", "f@x.com", vespetrel_core::ProviderType::Imap);
+        upsert_account(&conn, &acct).unwrap();
+
+        // Simulate version-skew corruption that makes auth_config unparseable on read.
+        let corrupt = r#"{"auth_method":"totally-not-a-real-method"}"#;
+        assert!(
+            serde_json::from_str::<vespetrel_core::AuthConfig>(corrupt).is_err(),
+            "precondition: the corrupt payload must not deserialize"
+        );
+        conn.execute(
+            "UPDATE accounts SET auth_config = ?2 WHERE id = ?1",
+            params![acct.id, corrupt],
+        )
+        .unwrap();
+        let read_back = get_account(&conn, &acct.id).unwrap().unwrap();
+        assert!(
+            !read_back.is_active,
+            "corrupt account must be marked inactive"
+        );
+
+        let mut state = read_back.sync_state;
+        state.last_sync_at = chrono::DateTime::from_timestamp(12345, 0);
+        state.jmap_state = Some("cursor-abc".into());
+        update_account_sync_state(&conn, &acct.id, &state).unwrap();
+
+        // The read returned `Default::default()` for the unparseable auth_config, but the
+        // column itself must be untouched by a sync-state write. Before the fix the engine's
+        // get_account -> upsert_account round-trip wrote that default back here, destroying
+        // the user's stored credentials irrecoverably.
+        let after: String = conn
+            .query_row(
+                "SELECT auth_config FROM accounts WHERE id = ?1",
+                params![acct.id],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            after, corrupt,
+            "sync-state write must not rewrite the auth_config column"
+        );
+        let cursor: String = conn
+            .query_row(
+                "SELECT sync_state FROM accounts WHERE id = ?1",
+                params![acct.id],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert!(cursor.contains("cursor-abc"), "sync state was not saved");
     }
 }

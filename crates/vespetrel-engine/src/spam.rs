@@ -92,7 +92,15 @@ impl BayesClassifier {
 
         let mut token_probs: Vec<(String, f64)> = Vec::new();
 
+        // The Graham-Robinson product formula combines *distinct* pieces of evidence.
+        // `tokens` contains one entry per occurrence, so a body repeating `free` fifty
+        // times produced fifty identical entries and the "top 15" selection became 15
+        // copies of one word, which both inflated the score and buried every other signal.
+        let mut seen: ahash::AHashSet<&str> = ahash::AHashSet::with_capacity(tokens.len());
         for token in &tokens {
+            if !seen.insert(token.as_str()) {
+                continue;
+            }
             let spam_count = self.spam_token_counts.get(token).copied().unwrap_or(0) as f64;
             let ham_count = self.ham_token_counts.get(token).copied().unwrap_or(0) as f64;
 

@@ -72,44 +72,82 @@ impl AutocryptHeader {
             )));
         }
 
-        // Validate that keydata contains valid base64 characters
+        // RFC 8252 §4: keydata is *standard* base64 (no base64url '-' or '_'), with
+        // RFC 5322 folding whitespace allowed. The previous check accepted base64url
+        // characters and, worse, validated the whitespace-stripped `clean_key` while
+        // storing the *unstripped* `keydata` — so two different strings were in play.
         let clean_key: String = keydata
             .chars()
             .filter(|c| !c.is_ascii_whitespace())
             .collect();
         if clean_key.is_empty()
-            || !clean_key.chars().all(|c| {
-                c.is_ascii_alphanumeric()
-                    || c == '+'
-                    || c == '/'
-                    || c == '='
-                    || c == '-'
-                    || c == '_'
-            })
+            || !clean_key
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '+' || c == '/' || c == '=')
         {
             return Err(PgpError::InvalidArmor(
                 "invalid or empty base64 in Autocrypt keydata".into(),
             ));
         }
 
+        // RFC 8252 §4: prefer-encrypt is a closed value set.
+        if !matches!(
+            prefer_encrypt.as_str(),
+            "mutual" | "opportunistic" | "nopreference"
+        ) {
+            return Err(PgpError::InvalidArmor(format!(
+                "invalid prefer-encrypt value '{prefer_encrypt}'"
+            )));
+        }
+
         Ok(Self {
             addr,
             prefer_encrypt,
-            keydata,
+            // Store exactly what we validated, so to_header_value() round-trips.
+            keydata: clean_key,
         })
     }
 
-    /// Bind and validate that the Autocrypt header's address matches the sender From address
-    pub fn validate_against_from(&self, from_email: &str) -> Result<(), PgpError> {
-        let clean_from = from_email.trim().to_ascii_lowercase();
-        let clean_addr = self.addr.trim().to_ascii_lowercase();
-        if clean_from != clean_addr
-            && !clean_from.contains(&format!("<{clean_addr}>"))
-            && !clean_from.starts_with(&format!("{clean_addr} "))
-        {
+    /// Bind and validate that the Autocrypt header's address matches the sender From address.
+    ///
+    /// RFC 8252 §5.1 requires `addr` to equal the parsed mailbox of the single `From` address.
+    /// The previous substring comparison matched anywhere in the raw header *including the
+    /// display name*, which is attacker-controlled and carries no authority:
+    /// `From: alice@corp.com <attacker@evil.com>` passed validation against
+    /// `addr=alice@corp.com`, letting an Autocrypt key be pinned to a victim's address.
+    pub fn validate_against_from(&self, from_header: &str) -> Result<(), PgpError> {
+        use mail_parser::MessageParser;
+
+        let raw = format!("From: {from_header}\r\n\r\n");
+        let parsed = MessageParser::default()
+            .parse(&raw)
+            .ok_or_else(|| PgpError::InvalidArmor("unparsable From header".into()))?;
+        let addrs = parsed
+            .from()
+            .ok_or_else(|| PgpError::InvalidArmor("From header has no address".into()))?;
+
+        let addrs_owned = addrs.clone();
+        let mut mailboxes = addrs_owned
+            .iter()
+            .filter_map(|a| a.address().map(|s| s.to_ascii_lowercase()));
+        let only = mailboxes
+            .next()
+            .ok_or_else(|| PgpError::InvalidArmor("From header is empty".into()))?;
+        if mailboxes.next().is_some() {
+            return Err(PgpError::InvalidArmor(
+                "Autocrypt requires a single From mailbox".into(),
+            ));
+        }
+
+        let clean_addr = self
+            .addr
+            .trim()
+            .trim_matches(['<', '>'])
+            .to_ascii_lowercase();
+        if clean_addr != only {
             return Err(PgpError::InvalidArmor(format!(
-                "Autocrypt address '{}' does not match From sender '{}'",
-                self.addr, from_email
+                "Autocrypt address '{}' does not match From mailbox '{only}'",
+                self.addr
             )));
         }
         Ok(())
@@ -124,10 +162,51 @@ impl AutocryptHeader {
     }
 }
 
-/// Trust-On-First-Use (TOFU) in-memory store for Autocrypt peer public keys
-#[derive(Debug, Clone, Default)]
+/// Trust-On-First-Use (TOFU) in-memory store for Autocrypt peer public keys.
+#[derive(Clone, Default)]
 pub struct AutocryptKeyStore {
     keys: std::collections::HashMap<String, (String, chrono::DateTime<chrono::Utc>)>,
+}
+
+/// Redacted `Debug`: the map holds raw key material and must never reach a log line.
+impl std::fmt::Debug for AutocryptKeyStore {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("AutocryptKeyStore")
+            .field("entries", &self.keys.len())
+            .finish()
+    }
+}
+
+/// Validate that `keydata` is decodable base64 carrying a real OpenPGP transferable public
+/// key, and return its canonical hex fingerprint.
+///
+/// The previous store accepted any string and pinned it under the peer's address, so a single
+/// forged first message poisoned that address for the process lifetime.
+fn validate_peer_keydata(keydata: &str) -> Result<String, PgpError> {
+    use base64::Engine;
+    use rpgp::types::PublicKeyTrait;
+
+    let clean: String = keydata
+        .chars()
+        .filter(|c| !c.is_ascii_whitespace())
+        .collect();
+    let der = base64::engine::general_purpose::STANDARD
+        .decode(clean.as_bytes())
+        .map_err(|_| PgpError::InvalidArmor("Autocrypt keydata is not valid base64".into()))?;
+    let key = rpgp::composed::SignedPublicKey::from_bytes(&der[..]).map_err(|e| {
+        PgpError::InvalidArmor(format!("Autocrypt keydata is not an OpenPGP cert: {e}"))
+    })?;
+    if !key.details.revocation_signatures.is_empty() {
+        return Err(PgpError::InvalidArmor(
+            "Autocrypt keydata carries a revocation signature".into(),
+        ));
+    }
+    Ok(key
+        .fingerprint()
+        .as_bytes()
+        .iter()
+        .map(|b| format!("{b:02X}"))
+        .collect())
 }
 
 impl AutocryptKeyStore {
@@ -135,9 +214,21 @@ impl AutocryptKeyStore {
         Self::default()
     }
 
-    /// Record peer key under TOFU rule. Returns true if key is accepted/unchanged, false if key substitution detected.
+    /// Record peer key under TOFU rule.
+    ///
+    /// Returns `true` if the key is accepted/unchanged and `false` if key substitution was
+    /// detected. Key material is validated before it is pinned, so an address can no longer
+    /// be poisoned with arbitrary text.
     pub fn record_peer_key(&mut self, addr: &str, keydata: &str) -> Result<bool, PgpError> {
         let clean_addr = addr.trim().to_ascii_lowercase();
+        if !clean_addr.contains('@') {
+            return Err(PgpError::InvalidArmor(format!(
+                "invalid Autocrypt peer address '{addr}'"
+            )));
+        }
+        // Validate before mutating: never pin key material we could not parse.
+        validate_peer_keydata(keydata)?;
+
         if let Some((existing_key, _)) = self.keys.get(&clean_addr) {
             if existing_key != keydata {
                 return Ok(false); // Potential key substitution
@@ -153,6 +244,29 @@ impl AutocryptKeyStore {
         self.keys
             .get(&addr.trim().to_ascii_lowercase())
             .map(|(k, _)| k.as_str())
+    }
+
+    /// Fingerprint of the pinned key for `addr`, if any.
+    pub fn get_fingerprint(&self, addr: &str) -> Option<String> {
+        let key = self.get_key(addr)?;
+        validate_peer_keydata(key).ok()
+    }
+
+    /// Accept a key change for `addr`.
+    ///
+    /// Without this, a legitimate key rotation returned `Ok(false)` forever and the peer
+    /// could never be re-trusted without restarting the process.
+    pub fn confirm_key_change(&mut self, addr: &str, new_keydata: &str) -> Result<(), PgpError> {
+        let clean_addr = addr.trim().to_ascii_lowercase();
+        validate_peer_keydata(new_keydata)?;
+        self.keys
+            .insert(clean_addr, (new_keydata.to_string(), chrono::Utc::now()));
+        Ok(())
+    }
+
+    /// Drop the pinned key for `addr`, forcing the next message to re-establish trust.
+    pub fn forget(&mut self, addr: &str) {
+        self.keys.remove(&addr.trim().to_ascii_lowercase());
     }
 }
 
@@ -209,31 +323,26 @@ impl PgpEngine {
         self.decrypt_with_passphrase(armored, private_key, None)
     }
 
-    /// Decrypt an OpenPGP message with explicit passphrase
+    /// Decrypt an OpenPGP message with explicit passphrase.
+    ///
+    /// The plaintext is only returned when the decrypted message carries a signature that
+    /// verifies. `Message::get_content()` on a `Signed` message returns the literal data
+    /// *without* checking the signature, so the previous implementation handed back
+    /// attacker-authored text as if it were authenticated mail: anyone holding the
+    /// recipient's *public* key can encrypt an arbitrary `Signed` message to them.
     pub fn decrypt_with_passphrase(
         &self,
         armored: &str,
         private_key: &str,
         passphrase: Option<&str>,
     ) -> Result<String, PgpError> {
-        let _payload = self.parse_armored_message(armored)?;
+        if !self.is_armored_pgp(armored) {
+            return Err(PgpError::InvalidArmor("not an armored pgp block".into()));
+        }
         if private_key.is_empty() {
             return Err(PgpError::KeyNotFound(
                 "empty private key supplied for decryption".into(),
             ));
-        }
-
-        let pass_str = passphrase.unwrap_or("").to_string();
-
-        // Try decrypting with rpgp engine
-        if let Ok((msg, _)) = rpgp::composed::Message::from_armor_single(armored.as_bytes())
-            && let Ok((sec_key, _)) =
-                rpgp::composed::SignedSecretKey::from_armor_single(private_key.as_bytes())
-            && let Ok(decrypted_tuple) = msg.decrypt(|| pass_str.clone(), &[&sec_key])
-            && let Ok(Some(bytes)) = decrypted_tuple.0.get_content()
-            && let Ok(s) = String::from_utf8(bytes)
-        {
-            return Ok(s);
         }
 
         if armored.contains("-----BEGIN PGP SIGNED MESSAGE-----") {
@@ -241,14 +350,56 @@ impl PgpEngine {
                 "Payload is a cleartext-signed OpenPGP message, not encrypted ciphertext; use verify()".into(),
             ));
         }
-        Err(PgpError::Decrypt(
-            "failed to decrypt OpenPGP packet: invalid ciphertext or missing secret key".into(),
-        ))
+
+        let pass_str = passphrase.unwrap_or("").to_string();
+
+        let (msg, _) = rpgp::composed::Message::from_armor_single(armored.as_bytes())
+            .map_err(|e| PgpError::Decrypt(format!("could not parse OpenPGP message: {e}")))?;
+        let (sec_key, _) =
+            rpgp::composed::SignedSecretKey::from_armor_single(private_key.as_bytes())
+                .map_err(|e| PgpError::KeyNotFound(format!("could not parse private key: {e}")))?;
+
+        let decrypted = msg
+            .decrypt(|| pass_str.clone(), &[&sec_key])
+            .map_err(|e| PgpError::Decrypt(format!("failed to decrypt session key: {e}")))?;
+
+        // Refuse to return content whose authenticity we have not established.
+        use rpgp::types::SecretKeyTrait;
+        match &decrypted.0 {
+            rpgp::composed::Message::Signed { .. } => {
+                decrypted.0.verify(&sec_key.public_key()).map_err(|e| {
+                    PgpError::Decrypt(format!("signature verification failed: {e}"))
+                })?;
+            }
+            _ => {
+                return Err(PgpError::Decrypt(
+                    "decrypted message is UNSIGNED; refusing to return unauthenticated content"
+                        .into(),
+                ));
+            }
+        }
+
+        let bytes = decrypted
+            .0
+            .get_content()
+            .map_err(|e| PgpError::Decrypt(format!("could not extract content: {e}")))?
+            .ok_or_else(|| {
+                PgpError::Decrypt("decrypted message carried no literal content".into())
+            })?;
+
+        String::from_utf8(bytes)
+            .map_err(|_| PgpError::Decrypt("decrypted content is not valid UTF-8".into()))
     }
 
-    /// Verify an OpenPGP cleartext signed message or signed message against sender public key
+    /// Verify an OpenPGP cleartext signed message or signed message against sender public key.
+    ///
+    /// `signer_fingerprint` and `message_content` are only populated on success. The previous
+    /// implementation always returned the *caller-supplied* key's fingerprint and always
+    /// returned the message text, so a failed verification still named a signer identity and
+    /// still handed back attacker-controlled content.
     pub fn verify(&self, armored: &str, sender_pubkey: &str) -> Result<PgpVerifyResult, PgpError> {
         use rpgp::types::PublicKeyTrait;
+
         if !self.is_armored_pgp(armored) {
             return Err(PgpError::InvalidArmor("not an armored pgp block".into()));
         }
@@ -263,6 +414,21 @@ impl PgpEngine {
             .map(|b| format!("{b:02X}"))
             .collect::<String>();
 
+        // Reject a revoked or expired sender key: rpgp's `verify` only checks issuer
+        // identity, hashing, and the signature itself.
+        if let Some(expires) = pub_key.expires_at()
+            && expires <= chrono::Utc::now()
+        {
+            return Err(PgpError::KeyNotFound(format!(
+                "sender key expired at {expires}"
+            )));
+        }
+        if pub_key.details.revocation_signatures.is_empty() {
+            // not revoked
+        } else {
+            return Err(PgpError::KeyNotFound("sender key is revoked".into()));
+        }
+
         if armored.contains("-----BEGIN PGP SIGNED MESSAGE-----") {
             let (signed_msg, _) = rpgp::composed::cleartext::CleartextSignedMessage::from_string(
                 armored,
@@ -270,25 +436,29 @@ impl PgpEngine {
             .map_err(|e| {
                 PgpError::InvalidArmor(format!("failed to parse cleartext signed message: {e}"))
             })?;
-            let text = signed_msg.signed_text();
-            let is_valid = signed_msg.verify(&pub_key).is_ok();
+            // Fail closed: propagate the verification error rather than returning
+            // `is_valid: false` alongside the caller's key fingerprint and the signed text.
+            signed_msg.verify(&pub_key).map_err(|e| {
+                PgpError::Pgp(format!("cleartext signature verification failed: {e}"))
+            })?;
             return Ok(PgpVerifyResult {
-                is_valid,
+                is_valid: true,
                 signer_fingerprint: Some(fingerprint),
-                message_content: text,
+                message_content: signed_msg.signed_text().to_string(),
             });
         }
 
         if let Ok((msg, _)) = rpgp::composed::Message::from_armor_single(armored.as_bytes()) {
-            let is_valid = msg.verify(&pub_key).is_ok();
+            msg.verify(&pub_key)
+                .map_err(|e| PgpError::Pgp(format!("signature verification failed: {e}")))?;
             let content = msg
                 .get_content()
-                .ok()
-                .flatten()
-                .and_then(|b| String::from_utf8(b).ok())
-                .unwrap_or_default();
+                .map_err(|e| PgpError::Pgp(format!("could not extract content: {e}")))?
+                .ok_or_else(|| PgpError::Pgp("signed message carried no content".into()))?;
+            let content = String::from_utf8(content)
+                .map_err(|_| PgpError::Pgp("signed content is not valid UTF-8".into()))?;
             return Ok(PgpVerifyResult {
-                is_valid,
+                is_valid: true,
                 signer_fingerprint: Some(fingerprint),
                 message_content: content,
             });
@@ -299,7 +469,12 @@ impl PgpEngine {
         ))
     }
 
-    /// Encrypt to recipient keys
+    /// Encrypt to recipient keys.
+    ///
+    /// Every requested recipient must be usable. The previous implementation silently dropped
+    /// any key that failed to parse and encrypted only to the remainder while returning
+    /// `Ok`, so a caller believed a message was confidential to all recipients when it was
+    /// not.
     pub fn encrypt(&self, plaintext: &str, recipient_keys: &[String]) -> Result<String, PgpError> {
         if recipient_keys.is_empty() {
             return Err(PgpError::KeyNotFound(
@@ -307,16 +482,40 @@ impl PgpEngine {
             ));
         }
 
-        // Parse recipient keys with rpgp
-        let mut parsed_keys = Vec::new();
-        for key_str in recipient_keys {
-            if let Ok((pub_key, _)) =
-                rpgp::composed::SignedPublicKey::from_armor_single(key_str.as_bytes())
+        let now = chrono::Utc::now();
+        let mut parsed_keys = Vec::with_capacity(recipient_keys.len());
+        let mut rejected: Vec<String> = Vec::new();
+
+        for (i, key_str) in recipient_keys.iter().enumerate() {
+            let key = match rpgp::composed::SignedPublicKey::from_armor_single(key_str.as_bytes()) {
+                Ok((k, _)) => k,
+                Err(e) => {
+                    rejected.push(format!("recipient {i}: unparsable key: {e}"));
+                    continue;
+                }
+            };
+            if let Some(expires) = key.expires_at()
+                && expires <= now
             {
-                parsed_keys.push(pub_key);
+                rejected.push(format!("recipient {i}: key expired at {expires}"));
+                continue;
             }
+            if !key.details.revocation_signatures.is_empty() {
+                rejected.push(format!("recipient {i}: key is revoked"));
+                continue;
+            }
+            parsed_keys.push((i, key));
         }
 
+        if !rejected.is_empty() {
+            // Refuse rather than send a message the user believes is confidential but isn't.
+            return Err(PgpError::Encrypt(format!(
+                "refusing to encrypt: {} of {} recipient keys unusable: {}",
+                rejected.len(),
+                recipient_keys.len(),
+                rejected.join("; ")
+            )));
+        }
         if parsed_keys.is_empty() {
             return Err(PgpError::InvalidArmor(
                 "none of the provided recipient keys are valid armored OpenPGP public keys".into(),
@@ -325,7 +524,8 @@ impl PgpEngine {
 
         let lit_msg = rpgp::composed::Message::new_literal("", plaintext);
         let mut rng = rand::rngs::OsRng;
-        let key_refs: Vec<&rpgp::composed::SignedPublicKey> = parsed_keys.iter().collect();
+        let key_refs: Vec<&rpgp::composed::SignedPublicKey> =
+            parsed_keys.iter().map(|(_, k)| k).collect();
         match lit_msg.encrypt_to_keys_seipdv1(
             &mut rng,
             rpgp::crypto::sym::SymmetricKeyAlgorithm::AES256,
@@ -383,11 +583,71 @@ mod tests {
 
     #[test]
     fn test_autocrypt_parse_roundtrip() {
-        let header_str = "addr=bob@example.com; prefer-encrypt=mutual; keydata=AAAA_KEY_DATA";
+        let header_str = "addr=bob@example.com; prefer-encrypt=mutual; keydata=AAAABBBBCCCC";
         let parsed = AutocryptHeader::parse(header_str).unwrap();
         assert_eq!(parsed.addr, "bob@example.com");
         assert_eq!(parsed.prefer_encrypt, "mutual");
-        assert_eq!(parsed.keydata, "AAAA_KEY_DATA");
+        assert_eq!(parsed.keydata, "AAAABBBBCCCC");
         assert_eq!(parsed.to_header_value(), header_str);
+    }
+
+    /// RFC 8252 mandates *standard* base64 for `keydata`. The previous alphabet check
+    /// accepted base64url characters, so a header that a real peer would reject parsed here.
+    #[test]
+    fn autocrypt_rejects_base64url_and_bad_prefer_encrypt() {
+        assert!(AutocryptHeader::parse("addr=a@b.com; keydata=AAA_BBBB").is_err());
+        assert!(
+            AutocryptHeader::parse("addr=a@b.com; prefer-encrypt=maybe; keydata=AAAA").is_err()
+        );
+        // Missing pieces are still rejected.
+        assert!(AutocryptHeader::parse("keydata=AAAA").is_err());
+        assert!(AutocryptHeader::parse("addr=a@b.com").is_err());
+    }
+
+    /// Regression: the Autocrypt `addr` must equal the parsed *From mailbox*. The old
+    /// substring match accepted a spoofed From whose display name contained the address:
+    /// `From: alice@corp.com <attacker@evil.com>`.
+    #[test]
+    fn autocrypt_from_binding_rejects_display_name_spoofing() {
+        let h = AutocryptHeader {
+            addr: "alice@corp.com".into(),
+            prefer_encrypt: "mutual".into(),
+            keydata: "AAAABBBBCCCC".into(),
+        };
+        // The attack: address matches only inside the attacker-controlled display name.
+        assert!(
+            h.validate_against_from("alice@corp.com <attacker@evil.com>")
+                .is_err()
+        );
+        assert!(
+            h.validate_against_from("\"<alice@corp.com>\" <attacker@evil.com>")
+                .is_err()
+        );
+        // A genuine single-mailbox From is accepted.
+        assert!(h.validate_against_from("Alice <alice@corp.com>").is_ok());
+        assert!(h.validate_against_from("alice@corp.com").is_ok());
+        // Multiple mailboxes are rejected.
+        assert!(
+            h.validate_against_from("alice@corp.com, bob@evil.com")
+                .is_err()
+        );
+    }
+
+    /// The TOFU store must not pin unvalidated key material, and a legitimate key rotation
+    /// must be recoverable.
+    #[test]
+    fn autocrypt_store_validates_and_allows_recovery() {
+        let mut store = AutocryptKeyStore::new();
+        // Garbage is rejected, not pinned.
+        assert!(
+            store
+                .record_peer_key("bob@example.com", "not-a-real-key")
+                .is_err()
+        );
+        assert!(store.get_key("bob@example.com").is_none());
+        // A bad address is rejected.
+        assert!(store.record_peer_key("not-an-address", "AAAABBBB").is_err());
+        // Redacted Debug must not dump key material.
+        assert!(!format!("{store:?}").contains("AAAABBBB"));
     }
 }
