@@ -5,7 +5,7 @@ edition.workspace = true
 license.workspace = true
 repository.workspace = true
 readme = "README.md"
-description = "SMTP submission with lettre + DKIM + XOAUTH2"
+description = "Lightweight, feature-complete SMTP client with Geary-style asynchronous outbox and Thunderbird-grade ESMTP support in pure Rust"
 
 [features]
 default = []
@@ -24,4 +24,7 @@ base64 = { workspace = true }
 aws-lc-rs = { workspace = true }
 chrono = { workspace = true }
 uuid = { workspace = true }
-
+rustls = { workspace = true }
+tokio-rustls = { workspace = true }
+webpki-roots = { workspace = true }
+futures = { workspace = true }

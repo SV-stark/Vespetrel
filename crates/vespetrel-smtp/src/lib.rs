@@ -1,599 +1,54 @@
-#[allow(unused_imports)]
-use tracing::{debug, info, warn};
-use vespetrel_core::message::ComposedMessage;
+//! # vespetrel-smtp
+//!
+//! A lightweight, feature-complete SMTP client engine inspired by Geary's simplicity
+//! and responsiveness, supporting maximum ESMTP features in pure Rust inspired by Thunderbird.
+//!
+//! ## Key Capabilities
+//! - **Geary-style Asynchronous Outbox**: Thread-safe background queuing, non-blocking UI delivery,
+//!   offline queuing, and exponential backoff retry for transient network and 4xx status codes.
+//! - **Thunderbird-grade Protocol Compliance**: RFC 5321 (ESMTP), RFC 5322 (Internet Message Format),
+//!   RFC 2045-2049 (MIME), RFC 2231 (Parameter Value Extensions), RFC 2047 (Header Encoding).
+//! - **Pure Rust Transport**: Asynchronous Tokio network engine with Rustls and WebPKI roots,
+//!   supporting Direct TLS (SMTPS, port 465) and Strict/Opportunistic STARTTLS (ports 587/25).
+//! - **Thunderbird Rich Headers**: Priorities (1-5 / High-Low), Read Receipts (`Disposition-Notification-To`),
+//!   Delivery Receipts (`Return-Receipt-To`), Sensitivity, Organization, User-Agent, and strict BCC privacy.
+//! - **ESMTP Extensions**: PIPELINING (RFC 2920), 8BITMIME (RFC 6152), SIZE (RFC 1870), DSN (RFC 3461),
+//!   SMTPUTF8 (RFC 6531), CHUNKING (RFC 3030), ENHANCEDSTATUSCODES (RFC 2034, RFC 3463).
+//! - **Full SASL Authentication**: PLAIN, LOGIN, XOAUTH2 (Gmail & Microsoft 365), OAUTHBEARER, CRAM-MD5.
+//! - **Cryptographic Signatures**: RFC 6376 DKIM signing (RSA-SHA256, relaxed/relaxed canonicalization)
+//!   and Autocrypt 1.1 header injection.
 
-#[derive(Clone)]
-pub struct SmtpConfig {
-    pub host: String,
-    pub port: u16,
-    pub username: String,
-    pub auth_token: String,
-    pub use_xoauth2: bool,
-    pub use_starttls: bool,
-    /// DKIM private key PEM (optional)
-    pub dkim_key: Option<String>,
-    pub dkim_selector: Option<String>,
-    pub dkim_domain: Option<String>,
-    /// Autocrypt 1.1 Header value (optional)
-    pub autocrypt_header: Option<String>,
-}
+pub mod auth;
+pub mod client;
+pub mod dkim;
+pub mod dsn;
+pub mod error;
+pub mod message;
+pub mod outbox;
+pub mod protocol;
+pub mod transport;
 
-impl std::fmt::Debug for SmtpConfig {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("SmtpConfig")
-            .field("host", &self.host)
-            .field("port", &self.port)
-            .field("username", &self.username)
-            .field("auth_token", &"[REDACTED]")
-            .field("use_xoauth2", &self.use_xoauth2)
-            .field("use_starttls", &self.use_starttls)
-            .field("dkim_key", &self.dkim_key.as_ref().map(|_| "[REDACTED]"))
-            .field("dkim_selector", &self.dkim_selector)
-            .field("dkim_domain", &self.dkim_domain)
-            .field("autocrypt_header", &self.autocrypt_header)
-            .finish()
-    }
-}
-
-impl SmtpConfig {
-    pub fn new(
-        host: impl Into<String>,
-        port: u16,
-        username: impl Into<String>,
-        auth_token: impl Into<String>,
-    ) -> Self {
-        Self {
-            host: host.into(),
-            port,
-            username: username.into(),
-            auth_token: auth_token.into(),
-            use_xoauth2: false,
-            use_starttls: true,
-            dkim_key: None,
-            dkim_selector: None,
-            dkim_domain: None,
-            autocrypt_header: None,
-        }
-    }
-
-    pub fn with_xoauth2(mut self) -> Self {
-        self.use_xoauth2 = true;
-        self
-    }
-    pub fn with_dkim(
-        mut self,
-        domain: impl Into<String>,
-        selector: impl Into<String>,
-        key: impl Into<String>,
-    ) -> Self {
-        self.dkim_domain = Some(domain.into());
-        self.dkim_selector = Some(selector.into());
-        self.dkim_key = Some(key.into());
-        self
-    }
-    pub fn with_autocrypt(mut self, header_val: impl Into<String>) -> Self {
-        self.autocrypt_header = Some(header_val.into());
-        self
-    }
-}
-
-pub struct SmtpClient {
-    config: SmtpConfig,
-}
-
-impl SmtpClient {
-    pub fn new(config: SmtpConfig) -> Self {
-        Self { config }
-    }
-
-    /// Build Lettre message (handles MIME headers, recipients, attachments, Message-ID, DKIM)
-    pub fn build_lettre_message(&self, msg: &ComposedMessage) -> anyhow::Result<lettre::Message> {
-        use lettre::message::Message as LettreMessage;
-
-        let from_addr: lettre::Address = msg.from.email.trim().replace(['\r', '\n'], "").parse()?;
-        let from_name = msg
-            .from
-            .name
-            .as_ref()
-            .map(|n| n.replace(['\r', '\n', '"'], ""));
-        let from_mailbox = lettre::message::Mailbox::new(from_name, from_addr);
-
-        let clean_subject = msg.subject.replace(['\r', '\n'], " ");
-        let domain = if let Some(pos) = msg.from.email.find('@') {
-            &msg.from.email[pos + 1..]
-        } else {
-            &self.config.host
-        };
-        let msg_id = format!("<{}@{}>", uuid::Uuid::new_v4(), domain);
-
-        let mut builder = LettreMessage::builder()
-            .from(from_mailbox)
-            .subject(clean_subject)
-            .message_id(Some(msg_id));
-
-        for to in &msg.to {
-            let addr: lettre::Address = to.email.trim().replace(['\r', '\n'], "").parse()?;
-            let name = to.name.as_ref().map(|n| n.replace(['\r', '\n', '"'], ""));
-            let mailbox = lettre::message::Mailbox::new(name, addr);
-            builder = builder.to(mailbox);
-        }
-        for cc in &msg.cc {
-            let addr: lettre::Address = cc.email.trim().replace(['\r', '\n'], "").parse()?;
-            let name = cc.name.as_ref().map(|n| n.replace(['\r', '\n', '"'], ""));
-            builder = builder.cc(lettre::message::Mailbox::new(name, addr));
-        }
-        for bcc in &msg.bcc {
-            let addr: lettre::Address = bcc.email.trim().replace(['\r', '\n'], "").parse()?;
-            let name = bcc.name.as_ref().map(|n| n.replace(['\r', '\n', '"'], ""));
-            builder = builder.bcc(lettre::message::Mailbox::new(name, addr));
-        }
-
-        if let Some(in_reply_to) = &msg.in_reply_to {
-            let clean = in_reply_to.replace(['\r', '\n'], " ");
-            let name = lettre::message::header::HeaderName::new_from_ascii_str("In-Reply-To");
-            let val = lettre::message::header::HeaderValue::new(name, clean);
-            builder = builder.raw_header(val);
-        }
-
-        if !msg.references.is_empty() {
-            let clean = msg.references.join(" ").replace(['\r', '\n'], " ");
-            let name = lettre::message::header::HeaderName::new_from_ascii_str("References");
-            let val = lettre::message::header::HeaderValue::new(name, clean);
-            builder = builder.raw_header(val);
-        }
-
-        if let Some(autocrypt) = &self.config.autocrypt_header {
-            let sanitized_autocrypt = autocrypt.replace(['\r', '\n'], " ");
-            let name = lettre::message::header::HeaderName::new_from_ascii_str("Autocrypt");
-            let val = lettre::message::header::HeaderValue::new(name, sanitized_autocrypt);
-            builder = builder.raw_header(val);
-        }
-
-        // Build base content (plain text, alternative plain+html, or html only)
-        let body_part = if let Some(html) = &msg.body_html {
-            if !msg.body_text.trim().is_empty() {
-                lettre::message::MultiPart::alternative_plain_html(
-                    msg.body_text.clone(),
-                    html.clone(),
-                )
-            } else {
-                lettre::message::MultiPart::alternative()
-                    .singlepart(lettre::message::SinglePart::html(html.clone()))
-            }
-        } else {
-            lettre::message::MultiPart::alternative()
-                .singlepart(lettre::message::SinglePart::plain(msg.body_text.clone()))
-        };
-
-        // Combine with attachments into MultiPart::mixed() if attachments are present
-        let multipart_body = if !msg.attachments.is_empty() {
-            let mut mixed = lettre::message::MultiPart::mixed().multipart(body_part);
-            for att in &msg.attachments {
-                let ct = att
-                    .content_type
-                    .parse::<lettre::message::header::ContentType>()
-                    .unwrap_or_else(|_| {
-                        "application/octet-stream"
-                            .parse::<lettre::message::header::ContentType>()
-                            .unwrap()
-                    });
-                let attachment_part = lettre::message::Attachment::new(att.filename.clone())
-                    .body(att.data.clone(), ct);
-                mixed = mixed.singlepart(attachment_part);
-            }
-            Some(mixed)
-        } else {
-            None
-        };
-
-        // Handle DKIM signing if configured
-        if let (Some(domain), Some(selector), Some(key)) = (
-            &self.config.dkim_domain,
-            &self.config.dkim_selector,
-            &self.config.dkim_key,
-        ) {
-            if !is_valid_dkim_domain(domain) {
-                anyhow::bail!("invalid DKIM signing domain: syntax check failed");
-            }
-            if !is_valid_dkim_selector(selector) {
-                anyhow::bail!("invalid DKIM selector: syntax check failed");
-            }
-            use base64::Engine;
-            use sha2::Digest;
-
-            let date_str = chrono::Utc::now().to_rfc2822();
-            let date_hdr_name = lettre::message::header::HeaderName::new_from_ascii_str("Date");
-            builder = builder.raw_header(lettre::message::header::HeaderValue::new(
-                date_hdr_name,
-                date_str.clone(),
-            ));
-
-            // Format preview message to compute exact canonicalized MIME body
-            let preview_builder = builder.clone();
-            let preview_email = if let Some(mixed) = multipart_body.clone() {
-                preview_builder.multipart(mixed)?
-            } else if let Some(html) = &msg.body_html {
-                if !msg.body_text.trim().is_empty() {
-                    preview_builder.multipart(
-                        lettre::message::MultiPart::alternative_plain_html(
-                            msg.body_text.clone(),
-                            html.clone(),
-                        ),
-                    )?
-                } else {
-                    preview_builder.body(html.clone())?
-                }
-            } else {
-                preview_builder.body(msg.body_text.clone())?
-            };
-
-            let preview_raw = preview_email.formatted();
-            let body_bytes =
-                if let Some(pos) = preview_raw.windows(4).position(|w| w == b"\r\n\r\n") {
-                    &preview_raw[pos + 4..]
-                } else {
-                    &preview_raw[..]
-                };
-
-            let canon_body = canonicalize_relaxed_body_bytes(body_bytes);
-            let mut hasher = <sha2::Sha256 as sha2::Digest>::new();
-            hasher.update(&canon_body);
-            let bh = base64::engine::general_purpose::STANDARD.encode(hasher.finalize());
-
-            // Canonicalize the signed headers from the *serialized* message, not from the
-            // in-memory model. The two differ whenever lettre rewrites a value: a non-ASCII
-            // subject or display name comes out RFC 2047 encoded, long address lists are
-            // folded, and the `From` display name is quoted differently. Signing the model
-            // produced a signature over bytes the receiving agent never sees, so DKIM
-            // verification failed for every message with a non-ASCII subject or sender name.
-            let mut signed_names: Vec<&str> = vec!["from", "to", "subject", "date"];
-            if !msg.cc.is_empty() {
-                signed_names.insert(2, "cc");
-            }
-            let signed_headers = signed_names.join(":");
-
-            let sig_input = format!(
-                "v=1; a=rsa-sha256; d={domain}; s={selector}; c=relaxed/relaxed; q=dns/txt; h={signed_headers}; bh={bh}; b="
-            );
-
-            let headers_to_sign = canonicalize_signed_headers(&preview_raw, &signed_names)
-                .ok_or_else(|| {
-                    anyhow::anyhow!(
-                        "DKIM: the serialized message is missing one of the signed headers \
-                         ({signed_headers}); refusing to emit an unverifiable signature"
-                    )
-                })?;
-
-            // The `dkim-signature` field is not in the serialized bytes yet: it is the
-            // signature being computed. RFC 6376 §3.5 signs it with the `b=` value removed,
-            // which is exactly `sig_input`, and it is always the last field in `h=`.
-            let mut signed_bytes = headers_to_sign;
-            signed_bytes.extend_from_slice(
-                canonicalize_relaxed_header("dkim-signature", &sig_input).as_bytes(),
-            );
-
-            // RSA PKCS#1 v1.5 signing via aws-lc-rs
-            let der_bytes = if key.contains("-----BEGIN") {
-                let stripped = key
-                    .lines()
-                    .filter(|l| !l.starts_with("-----"))
-                    .collect::<Vec<_>>()
-                    .concat();
-                base64::engine::general_purpose::STANDARD
-                    .decode(stripped.trim().as_bytes())
-                    .unwrap_or_else(|_| key.as_bytes().to_vec())
-            } else if let Ok(decoded) =
-                base64::engine::general_purpose::STANDARD.decode(key.trim().as_bytes())
-            {
-                decoded
-            } else {
-                key.as_bytes().to_vec()
-            };
-
-            let key_pair = aws_lc_rs::signature::RsaKeyPair::from_pkcs8(&der_bytes)
-                .or_else(|_| aws_lc_rs::signature::RsaKeyPair::from_der(&der_bytes))
-                .map_err(|_| {
-                    anyhow::anyhow!("invalid RSA private key for DKIM: expected PKCS#8 or DER key")
-                })?;
-
-            use aws_lc_rs::signature::KeyPair;
-            let rng = aws_lc_rs::rand::SystemRandom::new();
-            let mut sig = vec![0; key_pair.public_key().modulus_len()];
-            key_pair
-                .sign(
-                    &aws_lc_rs::signature::RSA_PKCS1_SHA256,
-                    &rng,
-                    &signed_bytes,
-                    &mut sig,
-                )
-                .map_err(|_| {
-                    anyhow::anyhow!("failed to compute RSASSA-PKCS1-v1_5 DKIM signature")
-                })?;
-
-            let b = base64::engine::general_purpose::STANDARD.encode(&sig);
-            let dkim_val = format!("{sig_input}{b}");
-            let name = lettre::message::header::HeaderName::new_from_ascii_str("DKIM-Signature");
-            let val = lettre::message::header::HeaderValue::new(name, dkim_val);
-            builder = builder.raw_header(val);
-        }
-
-        let email = if let Some(mixed) = multipart_body {
-            builder.multipart(mixed)?
-        } else if let Some(html) = &msg.body_html {
-            if !msg.body_text.trim().is_empty() {
-                builder.multipart(lettre::message::MultiPart::alternative_plain_html(
-                    msg.body_text.clone(),
-                    html.clone(),
-                ))?
-            } else {
-                builder.body(html.clone())?
-            }
-        } else {
-            builder.body(msg.body_text.clone())?
-        };
-
-        Ok(email)
-    }
-
-    /// Build RFC5322 raw bytes
-    pub fn build_rfc822(&self, msg: &ComposedMessage) -> anyhow::Result<Vec<u8>> {
-        let email = self.build_lettre_message(msg)?;
-        Ok(email.formatted())
-    }
-
-    pub async fn send(&self, msg: &ComposedMessage) -> anyhow::Result<()> {
-        if !self.config.host.is_empty()
-            && self.config.host != "localhost"
-            && self.config.host != "127.0.0.1"
-            && !self.config.host.ends_with(".example")
-            && self.config.port > 0
-        {
-            return self.send_live(msg).await;
-        }
-
-        #[cfg(any(test, feature = "mock"))]
-        {
-            let raw = self.build_rfc822(msg)?;
-            debug!(size=%raw.len(), to=?msg.to, "simulated test SMTP delivery");
-            info!(subject=%msg.subject, host=%self.config.host, "SMTP test delivery passed");
-            if self.config.dkim_key.is_some() {
-                debug!("DKIM signing configured");
-            }
-            Ok(())
-        }
-
-        #[cfg(not(any(test, feature = "mock")))]
-        {
-            self.send_live(msg).await
-        }
-    }
-
-    /// Live SMTP transport delivery connecting to Gmail/custom SMTP
-    pub async fn send_live(&self, msg: &ComposedMessage) -> anyhow::Result<()> {
-        use lettre::transport::smtp::authentication::Credentials;
-        use lettre::transport::smtp::client::{Tls, TlsParameters};
-        use lettre::{AsyncSmtpTransport, AsyncTransport, Tokio1Executor};
-
-        info!(subject=%msg.subject, host=%self.config.host, port=self.config.port, "connecting to live SMTP transport");
-
-        let mut transport_builder = if self.config.port == 465 {
-            // Port 465 is implicit TLS (SMTPS wrapper)
-            let tls_params = TlsParameters::new(self.config.host.clone())?;
-            AsyncSmtpTransport::<Tokio1Executor>::relay(&self.config.host)?
-                .tls(Tls::Wrapper(tls_params))
-        } else if self.config.use_starttls {
-            // `starttls_relay` maps to lettre's `Tls::Required`, which is *opportunistic*:
-            // if the server (or a MITM stripping the STARTTLS advertisement) does not offer
-            // TLS, the connection silently continues in plaintext. Say so, because the user
-            // asked for STARTTLS and will otherwise believe the mail was encrypted.
-            if !self.config.auth_token.is_empty() {
-                warn!(
-                    host=%self.config.host,
-                    port=self.config.port,
-                    "STARTTLS is opportunistic: if the server does not advertise STARTTLS, \
-                     credentials and the message are transmitted in cleartext"
-                );
-            }
-            AsyncSmtpTransport::<Tokio1Executor>::starttls_relay(&self.config.host)?
-        } else {
-            // `use_starttls = false` means plaintext. The previous code called
-            // `relay()`, which selects *implicit* TLS (`Tls::Wrapper`) and only works on
-            // 465; pointing it at 587 attempted a TLS handshake on the submission port and
-            // the connection failed for every server that speaks plaintext there.
-            if !self.config.auth_token.is_empty() {
-                warn!(
-                    host=%self.config.host,
-                    port=self.config.port,
-                    "STARTTLS is disabled for a remote host: sending the message and the \
-                     credentials unencrypted"
-                );
-            }
-            AsyncSmtpTransport::<Tokio1Executor>::builder_dangerous(&self.config.host)
-        };
-
-        transport_builder = transport_builder.port(self.config.port);
-
-        if !self.config.auth_token.is_empty() {
-            let creds =
-                Credentials::new(self.config.username.clone(), self.config.auth_token.clone());
-            if self.config.use_xoauth2 {
-                transport_builder = transport_builder.authentication(vec![
-                    lettre::transport::smtp::authentication::Mechanism::Xoauth2,
-                ]);
-            }
-            transport_builder = transport_builder.credentials(creds);
-        }
-
-        let transport = transport_builder.build();
-        let email = self.build_lettre_message(msg)?;
-        transport.send(email).await?;
-        info!(subject=%msg.subject, "SMTP message delivered successfully");
-        Ok(())
-    }
-}
-
-/// Canonicalizes an email body from raw bytes using RFC 6376 §3.4.4 relaxed body canonicalization.
-pub fn canonicalize_relaxed_body_bytes(body: &[u8]) -> Vec<u8> {
-    if body.is_empty() {
-        return Vec::new();
-    }
-    let s = String::from_utf8_lossy(body);
-    canonicalize_relaxed_body(&s)
-}
-
-/// Canonicalizes an email body using the RFC 6376 §3.4.4 relaxed body canonicalization algorithm.
-pub fn canonicalize_relaxed_body(body: &str) -> Vec<u8> {
-    if body.is_empty() {
-        return Vec::new();
-    }
-    let mut lines = Vec::new();
-    for line in body.lines() {
-        let mut canon_line = String::with_capacity(line.len());
-        let mut in_wsp = false;
-        for c in line.trim_end().chars() {
-            if c == ' ' || c == '\t' {
-                if !in_wsp {
-                    canon_line.push(' ');
-                    in_wsp = true;
-                }
-            } else {
-                canon_line.push(c);
-                in_wsp = false;
-            }
-        }
-        lines.push(canon_line);
-    }
-    while lines.last().map(|l| l.is_empty()).unwrap_or(false) {
-        lines.pop();
-    }
-    if lines.is_empty() {
-        return Vec::new();
-    }
-    let mut result = lines.join("\r\n");
-    result.push_str("\r\n");
-    result.into_bytes()
-}
-
-/// Canonicalizes a single header field using RFC 6376 §3.4.2 relaxed header canonicalization.
-pub fn canonicalize_relaxed_header(name: &str, value: &str) -> String {
-    let lower_name = name.trim().to_ascii_lowercase();
-    let mut canon_val = String::with_capacity(value.len());
-    let mut in_wsp = false;
-    for c in value.trim().chars() {
-        if c == ' ' || c == '\t' || c == '\r' || c == '\n' {
-            if !in_wsp {
-                canon_val.push(' ');
-                in_wsp = true;
-            }
-        } else {
-            canon_val.push(c);
-            in_wsp = false;
-        }
-    }
-    format!("{lower_name}:{canon_val}\r\n")
-}
-
-/// Canonicalize the named headers, in `names` order, from an actual serialized RFC 5322
-/// message, per RFC 6376 §3.4.2 relaxed header canonicalization.
-///
-/// Returns `None` when any named header is absent, so the caller fails closed rather than
-/// emitting a signature whose `h=` list promises a header the message does not contain.
-///
-/// When a header appears more than once, the bottom-most instance is used: that is what a
-/// verifier does, and any other choice produces a signature that can never validate.
-pub fn canonicalize_signed_headers(raw: &[u8], names: &[&str]) -> Option<Vec<u8>> {
-    let fields = split_header_fields(raw);
-    let mut out = Vec::new();
-    for name in names {
-        let want = name.trim().to_ascii_lowercase();
-        let value = fields
-            .iter()
-            .rev()
-            .find(|(n, _)| *n == want)
-            .map(|(_, v)| v.as_str())?;
-        out.extend_from_slice(canonicalize_relaxed_header(name, value).as_bytes());
-    }
-    Some(out)
-}
-
-/// Split a serialized message into unfolded header fields as `(lowercase name, value)`.
-///
-/// A bare LF is accepted as a line terminator as well as CRLF: some servers and test
-/// fixtures emit LF-only messages, and rejecting them would mean signing nothing.
-fn split_header_fields(raw: &[u8]) -> Vec<(String, String)> {
-    let text = String::from_utf8_lossy(raw);
-    let header_end = text.find("\r\n\r\n").or_else(|| text.find("\n\n"));
-    let block = match header_end {
-        Some(i) => &text[..i],
-        // No body separator: treat the whole input as the header block.
-        None => &text[..],
-    };
-
-    let mut fields: Vec<(String, String)> = Vec::new();
-    for line in block.split_inclusive(['\r', '\n']) {
-        let line = line.trim_end_matches(['\r', '\n']);
-        if line.is_empty() {
-            continue;
-        }
-        if line.starts_with(' ') || line.starts_with('\t') {
-            // Continuation of the previous field. RFC 5322 unfolding removes the line
-            // break but keeps the folding whitespace; relaxed canonicalization then
-            // collapses the run, so a single space is appended.
-            if let Some(last) = fields.last_mut() {
-                last.1.push(' ');
-                last.1.push_str(line);
-            }
-            continue;
-        }
-        if let Some((name, value)) = line.split_once(':') {
-            fields.push((name.trim().to_ascii_lowercase(), value.to_string()));
-        }
-    }
-    fields
-}
-
-/// A DKIM `d=` value must be a DNS domain name that can be looked up for a TXT record.
-///
-/// Rejecting anything that is not a plain ASCII LDH domain is what keeps a CR/LF, a space
-/// or a Unicode character from ending up inside the `DKIM-Signature` header value.
-pub fn is_valid_dkim_domain(domain: &str) -> bool {
-    if domain.is_empty() || domain.len() > 255 {
-        return false;
-    }
-    // A trailing dot is legal in a presentation-format FQDN but not in a DKIM `d=`.
-    if domain.ends_with('.') {
-        return false;
-    }
-    domain.split('.').all(valid_ldh_label)
-}
-
-/// A DKIM `s=` value is a sub-domain: dot-separated LDH labels (RFC 6376 §3.1,
-/// `selector = sub-domain ;`).
-///
-/// The previous check rejected the dot entirely, so any provider using a nested selector
-/// (`mail.sel1.sel2`) was rejected as invalid; and it accepted non-ASCII letters, producing
-/// a `s=` value that is not a legal DNS label.
-pub fn is_valid_dkim_selector(selector: &str) -> bool {
-    if selector.is_empty() || selector.len() > 255 {
-        return false;
-    }
-    selector.split('.').all(valid_ldh_label)
-}
-
-fn valid_ldh_label(label: &str) -> bool {
-    !label.is_empty()
-        && label.len() <= 63
-        && label
-            .bytes()
-            .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
-        && !label.starts_with('-')
-        && !label.ends_with('-')
-}
+// Re-exports
+pub use auth::Credentials;
+pub use client::{SmtpClient, SmtpConfig, SmtpSender};
+pub use dkim::{
+    Canonicalization, DkimAlgorithm, DkimSigner, canonicalize_relaxed_body,
+    canonicalize_relaxed_body_bytes, canonicalize_relaxed_header, canonicalize_signed_headers,
+    is_valid_dkim_domain, is_valid_dkim_selector,
+};
+pub use dsn::{DsnNotify, DsnOptions, DsnReturnMode};
+pub use error::{SmtpError, SmtpResult};
+pub use message::{InlineAttachment, Priority, Sensitivity, SmtpMessage};
+pub use outbox::{DeliveryStatus, OutboxEvent, OutboxItem, OutboxQueue, RetryPolicy};
+pub use protocol::{
+    AuthMechanism, EnhancedStatusCode, ServerCapabilities, SmtpCommand, SmtpResponse, codes,
+};
+pub use transport::{SmtpConnection, SmtpStream, TlsMode, dot_stuff_rfc5321};
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use vespetrel_core::message::Address;
+    use vespetrel_core::message::{Address, ComposedAttachment, ComposedMessage};
 
     #[test]
     fn test_smtp_build_message_with_autocrypt() {
@@ -662,12 +117,6 @@ mod tests {
         assert!(raw_str.contains("s=default"));
     }
 
-    /// The signed bytes must be derived from the headers the receiver actually parses.
-    ///
-    /// Signing the in-memory model broke verification as soon as lettre rewrote a value:
-    /// a non-ASCII subject comes out RFC 2047 encoded, and the signature was computed over
-    /// the raw UTF-8 instead. Reconstructing the canonicalized `h=` fields from the
-    /// serialized bytes and checking they match is the invariant that was violated.
     #[test]
     fn dkim_signs_the_serialized_headers_not_the_model() {
         let raw = b"From: =?utf-8?B?w4FsaWNl?= <alice@example.com>\r\n\
@@ -679,7 +128,6 @@ body\r\n";
         let canon =
             canonicalize_signed_headers(raw, &["from", "to", "subject", "date"]).expect("headers");
         let canon = String::from_utf8(canon).unwrap();
-        // RFC 6376 §3.4.2: `name:value` with no space after the colon.
         assert_eq!(
             canon,
             "from:=?utf-8?B?w4FsaWNl?= <alice@example.com>\r\n\
@@ -690,17 +138,12 @@ body\r\n";
         );
     }
 
-    /// A `bh=`/`b=` that is computed over headers the message does not contain can never
-    /// verify. Fail closed instead of emitting one.
     #[test]
     fn dkim_canonicalization_fails_closed_on_missing_header() {
         let raw = b"From: a@b.com\r\nTo: c@d.com\r\n\r\nbody\r\n";
         assert!(canonicalize_signed_headers(raw, &["from", "to", "subject"]).is_none());
     }
 
-    /// Verifiers use the bottom-most instance of a duplicated header. Signing any other
-    /// instance yields a signature that can never validate, so a message carrying an
-    /// attacker-supplied first `Subject:` must still sign the real one.
     #[test]
     fn dkim_uses_the_bottom_most_instance_of_a_duplicated_header() {
         let raw = b"Subject: attacker\r\n\
@@ -711,8 +154,6 @@ Subject: real\r\n\
         assert_eq!(String::from_utf8(canon).unwrap(), "subject:real\r\n");
     }
 
-    /// Folding whitespace must be undone before canonicalization, and the relaxation must
-    /// collapse it to a single space.
     #[test]
     fn dkim_unfolds_continuation_lines() {
         let raw = b"To: Bob <bob@example.com>,\r\n  Carol <carol@example.com>\r\n\r\nbody\r\n";
@@ -723,9 +164,6 @@ Subject: real\r\n\
         );
     }
 
-    /// The old selector check rejected the dot, so providers with a nested selector could
-    /// not sign at all, and it accepted non-ASCII letters, which are not legal in a DNS
-    /// label and would corrupt the `DKIM-Signature` header value.
     #[test]
     fn dkim_selector_and_domain_syntax() {
         assert!(is_valid_dkim_selector("default"));
@@ -787,8 +225,6 @@ Subject: real\r\n\
 
     #[test]
     fn test_smtp_build_message_with_attachments() {
-        use vespetrel_core::message::ComposedAttachment;
-
         let config = SmtpConfig::new("smtp.example.com", 587, "alice", "token");
         let client = SmtpClient::new(config);
 
@@ -821,5 +257,102 @@ Subject: real\r\n\
         assert!(raw_str.contains("application/pdf"));
         assert!(raw_str.contains("multipart/mixed"));
         assert!(raw_str.contains("Message-ID:"));
+    }
+
+    #[tokio::test]
+    async fn test_geary_style_outbox_queue_and_events() {
+        let queue = OutboxQueue::new();
+        let mut rx = queue.subscribe();
+
+        let msg = SmtpMessage::new(
+            Address {
+                name: Some("Alice".into()),
+                email: "alice@example.com".into(),
+            },
+            "Test Async Delivery",
+        )
+        .to(Address {
+            name: Some("Bob".into()),
+            email: "bob@example.com".into(),
+        })
+        .priority(Priority::High)
+        .request_read_receipt("alice@example.com");
+
+        let id = queue.enqueue(msg).await;
+
+        let event = rx.recv().await.unwrap();
+        assert!(matches!(event, OutboxEvent::Enqueued { id: ref eid, .. } if eid == &id));
+
+        let item = queue.get(&id).await.unwrap();
+        assert_eq!(item.status, DeliveryStatus::Queued);
+        assert_eq!(item.message.priority, Some(Priority::High));
+
+        // Mark sent
+        queue.mark_sent(&id, "250 OK Message accepted".into()).await;
+        let event2 = rx.recv().await.unwrap();
+        assert!(matches!(event2, OutboxEvent::Sent { id: ref eid, .. } if eid == &id));
+
+        let completed_item = queue.get(&id).await.unwrap();
+        assert!(completed_item.status.is_terminal());
+    }
+
+    #[test]
+    fn test_thunderbird_pure_rust_message_features() {
+        let msg = SmtpMessage::new(
+            Address {
+                name: Some("Suyash Stark".into()),
+                email: "suyash@vespetrel.org".into(),
+            },
+            "Release Announcement",
+        )
+        .to(Address {
+            name: Some("Community".into()),
+            email: "community@vespetrel.org".into(),
+        })
+        .bcc(Address {
+            name: None,
+            email: "archive@vespetrel.org".into(),
+        })
+        .priority(Priority::Highest)
+        .request_read_receipt("suyash@vespetrel.org")
+        .request_delivery_receipt("suyash@vespetrel.org")
+        .organization("Vespetrel Project")
+        .autocrypt("addr=suyash@vespetrel.org; keydata=mQEN...")
+        .body_text("Vespetrel 0.1 is here!")
+        .body_html("<h1>Vespetrel 0.1 is here!</h1><img src=\"cid:badge\">")
+        .attach_inline("badge", "badge.png", "image/png", b"fake-png".to_vec())
+        .attach(
+            "release_notes.txt",
+            "text/plain",
+            b"Full release notes".to_vec(),
+        );
+
+        let recipients = msg.envelope_recipients();
+        assert_eq!(recipients.len(), 2);
+        assert!(recipients.contains(&"community@vespetrel.org".to_string()));
+        assert!(recipients.contains(&"archive@vespetrel.org".to_string()));
+
+        let wire = msg.build_rfc5322_bytes("vespetrel.org").unwrap();
+        let s = String::from_utf8(wire).unwrap();
+
+        // Check privacy: BCC recipient MUST NOT be in header!
+        assert!(!s.contains("archive@vespetrel.org"));
+        assert!(!s.contains("Bcc:"));
+
+        // Check Thunderbird headers
+        assert!(s.contains("X-Priority: 1 (Highest)"));
+        assert!(s.contains("Importance: high"));
+        assert!(s.contains("Disposition-Notification-To: <suyash@vespetrel.org>"));
+        assert!(s.contains("Return-Receipt-To: <suyash@vespetrel.org>"));
+        assert!(s.contains("Organization: Vespetrel Project"));
+        assert!(s.contains("Autocrypt: addr=suyash@vespetrel.org"));
+        assert!(s.contains("User-Agent: Vespetrel/0.1.0"));
+
+        // Check nested MIME structure
+        assert!(s.contains("multipart/mixed"));
+        assert!(s.contains("multipart/related"));
+        assert!(s.contains("multipart/alternative"));
+        assert!(s.contains("Content-ID: <badge>"));
+        assert!(s.contains("filename=\"release_notes.txt\""));
     }
 }

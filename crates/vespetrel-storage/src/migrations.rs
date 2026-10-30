@@ -1,451 +1,25 @@
+//! Schema migration entry point.
+//!
+//! The migration bodies live in numbered `.sql` files under `sql/`, driven by
+//! [`crate::migration_files`]. They used to be inline `execute_batch` calls in this module:
+//! five migrations in one 478-line function, where reviewing a change to the last one meant
+//! reading the first four to confirm it was safe. As files, each version is independently
+//! reviewable, applied in numeric order, and applied exactly once.
+//!
+//! Add a migration by creating `sql/NNN_name.sql` and appending a [`Migration`] entry in
+//! [`crate::migration_files::MIGRATIONS`]. Keep the numbers contiguous — the runner's
+//! `PRAGMA user_version` fast path assumes no gaps.
+
 use crate::StorageResult;
 use rusqlite::Connection;
 
-/// Run all DDL migrations - §3.2 with version tracking
+/// Run every migration that has not been recorded yet.
+///
+/// Idempotent: safe to call on every open, which is what `db::init_connection` does. Each
+/// migration runs in its own exclusive transaction, so a failure leaves earlier versions
+/// applied and the failing one rolled back rather than leaving a half-migrated schema.
 pub fn run_migrations(conn: &mut Connection) -> StorageResult<()> {
-    // 1. Ensure migration tracking table exists
-    conn.execute_batch(
-        r#"
-        CREATE TABLE IF NOT EXISTS _schema_migrations (
-            version INTEGER PRIMARY KEY,
-            name TEXT NOT NULL,
-            applied_at INTEGER NOT NULL
-        );
-        "#,
-    )?;
-
-    let user_ver: i64 = conn
-        .query_row("PRAGMA user_version", [], |r| r.get(0))
-        .unwrap_or(0);
-
-    // Check if migration version 1 has been applied
-    let is_v1_applied: bool = user_ver >= 1
-        || conn
-            .query_row(
-                "SELECT count(*) FROM _schema_migrations WHERE version = 1",
-                [],
-                |r| r.get::<_, i64>(0),
-            )
-            .map(|count| count > 0)
-            .unwrap_or(false);
-
-    if !is_v1_applied {
-        let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Exclusive)?;
-        tx.execute_batch(
-            r#"
-            -- Accounts
-
-            CREATE TABLE IF NOT EXISTS accounts (
-                id TEXT PRIMARY KEY,
-                name TEXT NOT NULL,
-                email TEXT NOT NULL,
-                provider_type TEXT NOT NULL,
-                auth_config TEXT NOT NULL,
-                sync_state TEXT NOT NULL DEFAULT '{}',
-                is_active INTEGER NOT NULL DEFAULT 1,
-                color TEXT,
-                created_at INTEGER NOT NULL
-            );
-
-            -- Folders
-            CREATE TABLE IF NOT EXISTS folders (
-                id TEXT PRIMARY KEY,
-                account_id TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
-                remote_id TEXT NOT NULL,
-                name TEXT NOT NULL,
-                path TEXT NOT NULL,
-                role TEXT NOT NULL DEFAULT 'custom',
-                uid_validity INTEGER,
-                highest_mod_seq INTEGER DEFAULT 0,
-                total_count INTEGER DEFAULT 0,
-                unread_count INTEGER DEFAULT 0,
-                color TEXT,
-                UNIQUE(account_id, remote_id)
-            );
-
-            CREATE INDEX IF NOT EXISTS idx_folders_account ON folders(account_id);
-
-            -- Threads
-            CREATE TABLE IF NOT EXISTS threads (
-                id TEXT PRIMARY KEY,
-                account_id TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
-                subject TEXT,
-                last_message_at INTEGER NOT NULL,
-                message_count INTEGER NOT NULL DEFAULT 1,
-                unread_count INTEGER NOT NULL DEFAULT 0,
-                snippet TEXT
-            );
-            CREATE INDEX IF NOT EXISTS idx_threads_account ON threads(account_id);
-
-            -- Messages
-            CREATE TABLE IF NOT EXISTS messages (
-                id TEXT PRIMARY KEY,
-                account_id TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
-                folder_id TEXT NOT NULL REFERENCES folders(id) ON DELETE CASCADE,
-                thread_id TEXT REFERENCES threads(id) ON DELETE SET NULL,
-                remote_uid INTEGER NOT NULL,
-                message_id_header TEXT,
-                in_reply_to TEXT,
-                references_header TEXT,
-                subject TEXT,
-
-                from_address TEXT NOT NULL,
-                from_name TEXT,
-                to_addresses TEXT NOT NULL,
-                cc_addresses TEXT NOT NULL,
-                bcc_addresses TEXT NOT NULL,
-                reply_to TEXT,
-                sent_at INTEGER NOT NULL,
-                received_at INTEGER NOT NULL,
-                is_read INTEGER NOT NULL DEFAULT 0,
-                is_flagged INTEGER NOT NULL DEFAULT 0,
-                is_draft INTEGER NOT NULL DEFAULT 0,
-                has_attachments INTEGER NOT NULL DEFAULT 0,
-                body_snippet TEXT,
-                body_text_preview TEXT,
-                blob_path TEXT NOT NULL,
-                size_bytes INTEGER NOT NULL,
-                UNIQUE(folder_id, remote_uid)
-            );
-            CREATE INDEX IF NOT EXISTS idx_messages_folder ON messages(folder_id);
-            CREATE INDEX IF NOT EXISTS idx_messages_folder_sent ON messages(folder_id, sent_at DESC);
-            CREATE INDEX IF NOT EXISTS idx_messages_thread ON messages(thread_id);
-            CREATE INDEX IF NOT EXISTS idx_messages_account ON messages(account_id);
-            CREATE INDEX IF NOT EXISTS idx_messages_sent ON messages(sent_at DESC);
-
-            -- Labels
-            CREATE TABLE IF NOT EXISTS message_labels (
-                message_id TEXT NOT NULL REFERENCES messages(id) ON DELETE CASCADE,
-                label TEXT NOT NULL,
-                PRIMARY KEY(message_id, label)
-            );
-
-            -- Attachments
-            CREATE TABLE IF NOT EXISTS attachments (
-                id TEXT PRIMARY KEY,
-                message_id TEXT NOT NULL REFERENCES messages(id) ON DELETE CASCADE,
-                content_id TEXT,
-                filename TEXT NOT NULL,
-                content_type TEXT NOT NULL,
-                size_bytes INTEGER NOT NULL,
-                blob_path TEXT NOT NULL,
-                is_inline INTEGER NOT NULL DEFAULT 0
-            );
-            CREATE INDEX IF NOT EXISTS idx_attachments_message ON attachments(message_id);
-
-            -- FTS5 virtual table
-            CREATE VIRTUAL TABLE IF NOT EXISTS messages_fts USING fts5(
-                message_id UNINDEXED,
-                account_id UNINDEXED,
-                subject,
-                from_address,
-                from_name,
-                to_addresses,
-                body_content,
-                tokenize = 'unicode61'
-            );
-
-            -- Triggers for FTS5 sync
-            CREATE TRIGGER IF NOT EXISTS messages_ai AFTER INSERT ON messages BEGIN
-                INSERT INTO messages_fts(message_id, account_id, subject, from_address, from_name, to_addresses, body_content)
-                VALUES (new.id, new.account_id, new.subject, new.from_address, new.from_name, new.to_addresses, new.body_text_preview);
-            END;
-
-            CREATE TRIGGER IF NOT EXISTS messages_ad AFTER DELETE ON messages BEGIN
-                DELETE FROM messages_fts WHERE message_id = old.id;
-            END;
-
-            CREATE TRIGGER IF NOT EXISTS messages_au AFTER UPDATE ON messages
-            WHEN old.subject IS NOT new.subject
-              OR old.account_id IS NOT new.account_id
-              OR old.body_text_preview IS NOT new.body_text_preview
-              OR old.from_address IS NOT new.from_address
-              OR old.from_name IS NOT new.from_name
-              OR old.to_addresses IS NOT new.to_addresses
-            BEGIN
-                DELETE FROM messages_fts WHERE message_id = old.id;
-                INSERT INTO messages_fts(message_id, account_id, subject, from_address, from_name, to_addresses, body_content)
-                VALUES (new.id, new.account_id, new.subject, new.from_address, new.from_name, new.to_addresses, new.body_text_preview);
-            END;
-
-
-            -- Calendar & Contacts (PIM)
-            CREATE TABLE IF NOT EXISTS calendars (
-                id TEXT PRIMARY KEY,
-                account_id TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
-                remote_id TEXT NOT NULL,
-                name TEXT NOT NULL,
-                color TEXT,
-                UNIQUE(account_id, remote_id)
-            );
-
-            CREATE TABLE IF NOT EXISTS calendar_events (
-                id TEXT PRIMARY KEY,
-                calendar_id TEXT NOT NULL REFERENCES calendars(id) ON DELETE CASCADE,
-                ical_uid TEXT,
-                title TEXT NOT NULL,
-                description TEXT,
-                start_at INTEGER NOT NULL,
-                end_at INTEGER NOT NULL,
-                location TEXT,
-                raw_ical TEXT NOT NULL DEFAULT ''
-            );
-            CREATE INDEX IF NOT EXISTS idx_calendar_events_calendar ON calendar_events(calendar_id);
-
-            CREATE TABLE IF NOT EXISTS contacts (
-                id TEXT PRIMARY KEY,
-                account_id TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
-                remote_id TEXT,
-                display_name TEXT,
-                email TEXT NOT NULL,
-                vcard_data TEXT
-            );
-            CREATE INDEX IF NOT EXISTS idx_contacts_account ON contacts(account_id);
-
-            CREATE TABLE IF NOT EXISTS tasks (
-                id TEXT PRIMARY KEY,
-                calendar_id TEXT NOT NULL REFERENCES calendars(id) ON DELETE CASCADE,
-                ical_uid TEXT,
-                title TEXT NOT NULL,
-                description TEXT,
-                due_at INTEGER,
-                is_completed INTEGER NOT NULL DEFAULT 0,
-                completed_at INTEGER,
-                priority INTEGER NOT NULL DEFAULT 0
-            );
-            CREATE INDEX IF NOT EXISTS idx_tasks_calendar ON tasks(calendar_id);
-
-            -- Signatures
-            CREATE TABLE IF NOT EXISTS signatures (
-                id TEXT PRIMARY KEY,
-                account_id TEXT NOT NULL,
-                name TEXT NOT NULL,
-                raw_html TEXT NOT NULL,
-                plain_text TEXT,
-                is_default INTEGER NOT NULL DEFAULT 0,
-                include_in_replies INTEGER NOT NULL DEFAULT 1,
-                created_at INTEGER NOT NULL,
-                updated_at INTEGER NOT NULL
-            );
-            CREATE INDEX IF NOT EXISTS idx_signatures_account ON signatures(account_id);
-
-            -- User Settings Key-Value JSON store
-            CREATE TABLE IF NOT EXISTS user_settings (
-                key TEXT PRIMARY KEY,
-                value TEXT NOT NULL,
-                updated_at INTEGER NOT NULL
-            );
-            "#,
-        )?;
-
-        // Record migration version 1
-        let now = chrono::Utc::now().timestamp();
-        tx.execute(
-            "INSERT OR IGNORE INTO _schema_migrations (version, name, applied_at) VALUES (1, 'initial_schema_fts5', ?1)",
-            [now],
-        )?;
-        tx.commit()?;
-        conn.execute_batch("PRAGMA user_version = 1")?;
-    }
-
-    // Check if migration version 2 has been applied (FTS5 unicode61 remove_diacritics 2 + rebuild)
-    let is_v2_applied: bool = user_ver >= 2
-        || conn
-            .query_row(
-                "SELECT count(*) FROM _schema_migrations WHERE version = 2",
-                [],
-                |r| r.get::<_, i64>(0),
-            )
-            .map(|count| count > 0)
-            .unwrap_or(false);
-
-    if !is_v2_applied {
-        let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Exclusive)?;
-        // Recreate FTS5 table with accent-folding unicode61 tokenizer
-        tx.execute_batch(
-            r#"
-            DROP TABLE IF EXISTS messages_fts;
-
-            CREATE VIRTUAL TABLE IF NOT EXISTS messages_fts USING fts5(
-                message_id UNINDEXED,
-                account_id UNINDEXED,
-                subject,
-                from_address,
-                from_name,
-                to_addresses,
-                body_content,
-                tokenize = 'unicode61 remove_diacritics 2'
-            );
-
-            -- Re-populate FTS5 index from messages table
-            INSERT INTO messages_fts(message_id, account_id, subject, from_address, from_name, to_addresses, body_content)
-            SELECT id, account_id, subject, from_address, from_name, to_addresses, COALESCE(body_text_preview, body_snippet, '')
-            FROM messages;
-
-            -- Re-create sync triggers on messages table
-            DROP TRIGGER IF EXISTS messages_ai;
-            DROP TRIGGER IF EXISTS messages_ad;
-            DROP TRIGGER IF EXISTS messages_au;
-
-            CREATE TRIGGER IF NOT EXISTS messages_ai AFTER INSERT ON messages BEGIN
-                INSERT INTO messages_fts(message_id, account_id, subject, from_address, from_name, to_addresses, body_content)
-                VALUES (new.id, new.account_id, new.subject, new.from_address, new.from_name, new.to_addresses, COALESCE(new.body_text_preview, new.body_snippet, ''));
-            END;
-
-            CREATE TRIGGER IF NOT EXISTS messages_ad AFTER DELETE ON messages BEGIN
-                DELETE FROM messages_fts WHERE message_id = old.id;
-            END;
-
-            CREATE TRIGGER IF NOT EXISTS messages_au AFTER UPDATE ON messages
-            WHEN old.subject IS NOT new.subject
-              OR old.account_id IS NOT new.account_id
-              OR old.from_address IS NOT new.from_address
-              OR old.from_name IS NOT new.from_name
-              OR old.to_addresses IS NOT new.to_addresses
-              OR old.body_text_preview IS NOT new.body_text_preview
-              OR old.body_snippet IS NOT new.body_snippet
-            BEGIN
-                DELETE FROM messages_fts WHERE message_id = old.id;
-                INSERT INTO messages_fts(message_id, account_id, subject, from_address, from_name, to_addresses, body_content)
-                VALUES (new.id, new.account_id, new.subject, new.from_address, new.from_name, new.to_addresses, COALESCE(new.body_text_preview, new.body_snippet, ''));
-            END;
-            "#,
-        )?;
-
-        let now = chrono::Utc::now().timestamp();
-        tx.execute(
-            "INSERT OR IGNORE INTO _schema_migrations (version, name, applied_at) VALUES (2, 'fts5_unicode61_diacritics_rebuild', ?1)",
-            [now],
-        )?;
-        tx.commit()?;
-        conn.execute_batch("PRAGMA user_version = 2")?;
-    }
-
-    // Check if migration version 3 has been applied (add remote_id column to messages)
-    let is_v3_applied: bool = user_ver >= 3
-        || conn
-            .query_row(
-                "SELECT count(*) FROM _schema_migrations WHERE version = 3",
-                [],
-                |r| r.get::<_, i64>(0),
-            )
-            .map(|count| count > 0)
-            .unwrap_or(false);
-
-    if !is_v3_applied {
-        let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Exclusive)?;
-        let has_remote_id: bool = tx
-            .query_row(
-                "SELECT count(*) FROM pragma_table_info('messages') WHERE name = 'remote_id'",
-                [],
-                |r| r.get::<_, i64>(0),
-            )
-            .map(|c| c > 0)
-            .unwrap_or(false);
-
-        if !has_remote_id {
-            tx.execute_batch(
-                r#"
-                ALTER TABLE messages ADD COLUMN remote_id TEXT;
-                CREATE INDEX IF NOT EXISTS idx_messages_remote_id ON messages(folder_id, remote_id);
-                "#,
-            )?;
-        }
-
-        let now = chrono::Utc::now().timestamp();
-        tx.execute(
-            "INSERT OR IGNORE INTO _schema_migrations (version, name, applied_at) VALUES (3, 'messages_remote_id_col', ?1)",
-            [now],
-        )?;
-        tx.commit()?;
-        conn.execute_batch("PRAGMA user_version = 3")?;
-    }
-
-    // Check if migration version 4 has been applied (outbox table)
-    let is_v4_applied: bool = user_ver >= 4
-        || conn
-            .query_row(
-                "SELECT count(*) FROM _schema_migrations WHERE version = 4",
-                [],
-                |r| r.get::<_, i64>(0),
-            )
-            .map(|count| count > 0)
-            .unwrap_or(false);
-
-    if !is_v4_applied {
-        let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Exclusive)?;
-        tx.execute_batch(
-            r#"
-            CREATE TABLE IF NOT EXISTS outbox (
-                id TEXT PRIMARY KEY,
-                account_id TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
-                composed_message TEXT NOT NULL,
-                scheduled_at INTEGER NOT NULL,
-                send_at INTEGER NOT NULL,
-                is_cancelled INTEGER NOT NULL DEFAULT 0,
-                attempts INTEGER NOT NULL DEFAULT 0,
-                last_error TEXT
-            );
-            CREATE INDEX IF NOT EXISTS idx_outbox_send ON outbox(send_at, is_cancelled);
-            CREATE INDEX IF NOT EXISTS idx_outbox_account ON outbox(account_id);
-            "#,
-        )?;
-
-        let now = chrono::Utc::now().timestamp();
-        tx.execute(
-            "INSERT OR IGNORE INTO _schema_migrations (version, name, applied_at) VALUES (4, 'outbox_table', ?1)",
-            [now],
-        )?;
-        tx.commit()?;
-        conn.execute_batch("PRAGMA user_version = 4")?;
-    }
-
-    // Migration v5: restore the `account_id` arm of the messages_au trigger.
-    // v2 recreated that trigger and dropped `OR old.account_id IS NOT new.account_id`.
-    // `account_id` is an UNINDEXED column of messages_fts and is the tenancy filter in
-    // search_messages, so without this arm a message moved between accounts keeps its old
-    // account tag: invisible to its new owner and still returned to the old one.
-    let is_v5_applied: bool = user_ver >= 5
-        || conn
-            .query_row(
-                "SELECT count(*) FROM _schema_migrations WHERE version = 5",
-                [],
-                |r| r.get::<_, i64>(0),
-            )
-            .map(|count| count > 0)
-            .unwrap_or(false);
-
-    if !is_v5_applied {
-        let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Exclusive)?;
-        tx.execute_batch(
-            r#"
-            DROP TRIGGER IF EXISTS messages_au;
-            CREATE TRIGGER messages_au AFTER UPDATE ON messages
-            WHEN old.subject IS NOT new.subject
-              OR old.account_id IS NOT new.account_id
-              OR old.from_address IS NOT new.from_address
-              OR old.from_name IS NOT new.from_name
-              OR old.to_addresses IS NOT new.to_addresses
-              OR old.body_text_preview IS NOT new.body_text_preview
-              OR old.body_snippet IS NOT new.body_snippet
-            BEGIN
-              DELETE FROM messages_fts WHERE message_id = old.id;
-              INSERT INTO messages_fts(message_id, account_id, subject, from_address, from_name, to_addresses, body_content)
-              VALUES (new.id, new.account_id, new.subject, new.from_address, new.from_name, new.to_addresses, COALESCE(new.body_text_preview, new.body_snippet, ''));
-            END;
-            "#,
-        )?;
-
-        let now = chrono::Utc::now().timestamp();
-        tx.execute(
-            "INSERT OR IGNORE INTO _schema_migrations (version, name, applied_at) VALUES (5, 'fts5_update_trigger_account_id', ?1)",
-            [now],
-        )?;
-        tx.commit()?;
-        conn.execute_batch("PRAGMA user_version = 5")?;
-    }
-
-    Ok(())
+    crate::migration_files::run(conn)
 }
 
 /// Explicit job to rebuild the FTS5 index from the `messages` table.
@@ -471,7 +45,7 @@ pub fn rebuild_fts(conn: &Connection) -> StorageResult<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rusqlite::Connection;
+    use crate::migration_files::{MIGRATIONS, applied};
 
     #[test]
     fn migrations_idempotent() {
@@ -481,50 +55,115 @@ mod tests {
         // verify tables exist
         let count: i64 = conn
             .query_row(
-                "SELECT count(*) FROM sqlite_master WHERE type='table' AND name='messages'",
+                "SELECT count(*) FROM sqlite_master WHERE type='table' AND name IN ('messages','accounts','folders','outbox')",
                 [],
                 |r| r.get(0),
             )
             .unwrap();
-        assert_eq!(count, 1);
+        assert_eq!(count, 4, "core tables must all exist after migration");
+    }
 
-        let v1_count: i64 = conn
+    #[test]
+    fn every_migration_is_recorded_with_its_declared_name() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        run_migrations(&mut conn).unwrap();
+
+        let recorded = applied(&conn).unwrap();
+        let expected: Vec<(i64, String)> = MIGRATIONS
+            .iter()
+            .map(|m| (m.version, m.name.to_string()))
+            .collect();
+        assert_eq!(
+            recorded, expected,
+            "recorded migration history must match the declared sequence exactly"
+        );
+    }
+
+    #[test]
+    fn remote_id_column_and_index_exist_after_migration() {
+        // Version 3 adds the column conditionally; verify both halves landed.
+        let mut conn = Connection::open_in_memory().unwrap();
+        run_migrations(&mut conn).unwrap();
+
+        let has_column: i64 = conn
             .query_row(
-                "SELECT count(*) FROM _schema_migrations WHERE version = 1",
+                "SELECT count(*) FROM pragma_table_info('messages') WHERE name='remote_id'",
                 [],
                 |r| r.get(0),
             )
             .unwrap();
-        assert_eq!(v1_count, 1);
+        assert_eq!(has_column, 1, "messages.remote_id must exist");
 
-        let v2_count: i64 = conn
+        let has_index: i64 = conn
             .query_row(
-                "SELECT count(*) FROM _schema_migrations WHERE version = 2",
+                "SELECT count(*) FROM sqlite_master WHERE type='index' AND name='idx_messages_remote_id'",
                 [],
                 |r| r.get(0),
             )
             .unwrap();
-        assert_eq!(v2_count, 1);
+        assert_eq!(has_index, 1, "idx_messages_remote_id must exist");
+    }
 
-        let v3_count: i64 = conn
+    #[test]
+    fn fts_update_trigger_watches_account_id() {
+        // Regression guard for migration 5: version 2 recreated `messages_au` and dropped the
+        // `account_id` arm, so a message moved between accounts kept its old account tag —
+        // invisible to its new owner and still returned to the old one.
+        let mut conn = Connection::open_in_memory().unwrap();
+        run_migrations(&mut conn).unwrap();
+
+        let sql: String = conn
             .query_row(
-                "SELECT count(*) FROM _schema_migrations WHERE version = 3",
+                "SELECT sql FROM sqlite_master WHERE type='trigger' AND name='messages_au'",
                 [],
                 |r| r.get(0),
             )
             .unwrap();
-        assert_eq!(v3_count, 1);
+        assert!(
+            sql.contains("old.account_id IS NOT new.account_id"),
+            "messages_au must re-index on account_id change; trigger was:\n{sql}"
+        );
+    }
 
-        let v4_count: i64 = conn
-            .query_row(
-                "SELECT count(*) FROM _schema_migrations WHERE version = 4",
-                [],
-                |r| r.get(0),
-            )
+    #[test]
+    fn rebuild_fts_restores_every_message() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        run_migrations(&mut conn).unwrap();
+
+        conn.execute_batch(
+            "INSERT INTO accounts VALUES ('a','A','a@example.com','imap','{}','{}',1,NULL,0);
+             INSERT INTO folders VALUES ('f','a','INBOX','INBOX','INBOX','inbox',NULL,0,1,1,NULL);
+             INSERT INTO messages (id, account_id, folder_id, remote_uid, subject, from_address,
+                to_addresses, cc_addresses, bcc_addresses, sent_at, received_at, blob_path,
+                size_bytes, body_text_preview)
+             VALUES ('m1','a','f',1,'Rechnung für März','s@example.com','a@example.com','','',1,1,'b',5,'Café');",
+        )
+        .unwrap();
+
+        // Wipe the index to simulate drift, then rebuild from `messages`.
+        conn.execute_batch("DELETE FROM messages_fts").unwrap();
+        let before: i64 = conn
+            .query_row("SELECT count(*) FROM messages_fts", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(v4_count, 1);
+        assert_eq!(before, 0);
 
-        // Verify rebuild_fts works
         rebuild_fts(&conn).unwrap();
+        let after: i64 = conn
+            .query_row("SELECT count(*) FROM messages_fts", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(
+            after, 1,
+            "rebuild must restore every message into the index"
+        );
+
+        // The rebuilt index must still fold accents, or the migration's tokenizer was lost.
+        let hits: i64 = conn
+            .query_row(
+                "SELECT count(*) FROM messages_fts WHERE messages_fts MATCH 'cafe'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(hits, 1, "accent folding must survive the rebuild");
     }
 }

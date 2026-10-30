@@ -12,12 +12,16 @@ vespetrel-core = { workspace = true }
 vespetrel-storage = { workspace = true }
 vespetrel-crypto = { workspace = true }
 vespetrel-imap = { workspace = true }
+vespetrel-gmail = { workspace = true }
 vespetrel-jmap = { workspace = true }
 vespetrel-graph = { workspace = true }
 tokio = { workspace = true }
 async-trait = { workspace = true }
 futures = { workspace = true }
 tracing = { workspace = true }
+# Used only to name the pooled-connection type in worker.rs signatures; `deadpool_sqlite`
+# deliberately exports no alias for it.
+deadpool = "0.13"
 thiserror = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }

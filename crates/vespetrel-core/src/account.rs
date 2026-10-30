@@ -111,6 +111,20 @@ pub struct SyncState {
     /// Map folder_remote_id -> highestmodseq / uidvalidity
     #[serde(default)]
     pub folder_states: std::collections::HashMap<String, FolderSyncState>,
+    /// Gmail REST delta cursor: the `historyId` the next poll starts from.
+    ///
+    /// Gmail's history feed is a monotonic per-mailbox sequence number, which is strictly more
+    /// informative than IMAP's per-folder `HIGHESTMODSEQ`: one cursor covers the whole mailbox,
+    /// so a label change anywhere is picked up without polling every folder. `None` means no
+    /// baseline has been taken yet and the next sync must run a full sync before recording one.
+    #[serde(default)]
+    pub gmail_history_id: Option<String>,
+    /// Continuation token for an in-progress multi-page `users.history.list` walk.
+    ///
+    /// `Some` means a history walk started and has not finished. The cursor may only advance
+    /// once every page of the walk has been applied — see `vespetrel-gmail`'s `HistoryCursor`.
+    #[serde(default)]
+    pub gmail_history_page_token: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -168,6 +182,67 @@ impl Account {
     }
 }
 
+/// An alternate sending identity or email alias for an account.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AccountAlias {
+    pub id: String,
+    pub account_id: String,
+    pub email: String,
+    pub name: Option<String>,
+    pub reply_to: Option<String>,
+    pub signature_id: Option<String>,
+    pub is_default: bool,
+    pub created_at: DateTime<Utc>,
+}
+
+impl AccountAlias {
+    pub fn new(
+        account_id: impl Into<String>,
+        email: impl Into<String>,
+        name: Option<String>,
+    ) -> Self {
+        Self {
+            id: uuid::Uuid::new_v4().to_string(),
+            account_id: account_id.into(),
+            email: email.into(),
+            name,
+            reply_to: None,
+            signature_id: None,
+            is_default: false,
+            created_at: Utc::now(),
+        }
+    }
+
+    pub fn with_reply_to(mut self, reply_to: impl Into<String>) -> Self {
+        self.reply_to = Some(reply_to.into());
+        self
+    }
+
+    pub fn with_signature(mut self, signature_id: impl Into<String>) -> Self {
+        self.signature_id = Some(signature_id.into());
+        self
+    }
+
+    pub fn with_default(mut self, is_default: bool) -> Self {
+        self.is_default = is_default;
+        self
+    }
+
+    pub fn to_address(&self) -> crate::message::Address {
+        crate::message::Address {
+            name: self.name.clone(),
+            email: self.email.clone(),
+        }
+    }
+
+    pub fn validate(&self) -> Result<(), String> {
+        if !self.email.contains('@') {
+            return Err("invalid alias email address".into());
+        }
+        Ok(())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -203,5 +278,20 @@ mod tests {
 
         let invalid_email = Account::new("Personal", "notanemail", ProviderType::Graph);
         assert!(invalid_email.validate().is_err());
+    }
+
+    #[test]
+    fn test_account_alias_creation_and_address() {
+        let alias = AccountAlias::new("acc-1", "support@company.com", Some("Support Team".into()))
+            .with_reply_to("replies@company.com")
+            .with_default(true);
+
+        assert!(alias.validate().is_ok());
+        assert!(alias.is_default);
+        assert_eq!(alias.reply_to.as_deref(), Some("replies@company.com"));
+
+        let addr = alias.to_address();
+        assert_eq!(addr.email, "support@company.com");
+        assert_eq!(addr.name.as_deref(), Some("Support Team"));
     }
 }

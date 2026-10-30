@@ -187,6 +187,7 @@ impl HardwareSecurityKey {
     ///
     /// The previous load-then-`fetch_add` let N concurrent calls all pass the threshold.
     fn record_failure(&self) {
+        #[allow(deprecated)]
         self.failed_attempts
             .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |n| {
                 Some(n.saturating_add(1))

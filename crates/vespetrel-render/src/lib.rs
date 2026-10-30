@@ -5,6 +5,7 @@ pub mod cleaner;
 pub mod html;
 pub mod mdn;
 pub mod mime;
+pub mod preview;
 pub mod unsubscribe;
 
 pub use auth_badge::{AuthBadgeParser, AuthStatus, EmailSecuritySummary};
@@ -14,4 +15,8 @@ pub use cleaner::{
 pub use html::{RewriteOptions, SanitizeOptions, render_sandboxed_document, sanitize};
 pub use mdn::{DispositionType, MdnEngine, MdnRequest};
 pub use mime::ParsedMail;
+pub use preview::{
+    AttachmentKind, AttachmentPreviewData, detect_attachment_kind, format_file_size,
+    generate_preview,
+};
 pub use unsubscribe::{ListUnsubscribe, UnsubscribeAction};

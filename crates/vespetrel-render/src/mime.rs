@@ -24,15 +24,13 @@ const MAX_ATTACHMENT_SIZE: usize = 25 * 1024 * 1024; // 25 MB
 
 pub fn sanitize_attachment_filename(name: &str) -> String {
     let without_nulls: String = name.chars().filter(|&c| c != '\0').collect();
-    let path = std::path::Path::new(&without_nulls);
+    let normalized = without_nulls.replace('\\', "/");
+    let path = std::path::Path::new(&normalized);
     let base = path
         .file_name()
         .and_then(|f| f.to_str())
         .unwrap_or("attachment");
-    let safe_base = base
-        .replace("../", "")
-        .replace("..\\", "")
-        .replace(['/', '\\'], "_");
+    let safe_base = base.replace("../", "").replace(['/', '\\'], "_");
     if safe_base.is_empty() || safe_base == "." || safe_base == ".." {
         "attachment".to_string()
     } else {

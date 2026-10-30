@@ -9,6 +9,126 @@ use vespetrel_core::provider::{MailProvider, SyncEvent};
 
 use crate::worker::{AccountWorker, WorkerCommand};
 
+/// Largest token the Windows Credential Manager will accept.
+///
+/// `keyring` stores one blob per credential, and DPAPI-backed `CredWrite` fails past roughly
+/// this size with a generic "secure storage error" — failing the *whole store*, not just that
+/// entry, which left the account looking uncredentialed. A Microsoft Graph access token is a
+/// JWT large enough to exceed it, so access tokens are never persisted; see
+/// [`AccessTokenCache`].
+pub const MAX_PERSISTED_TOKEN_BYTES: usize = 2_000;
+
+/// Process-wide cache of OAuth2 access tokens, held in memory only.
+///
+/// Refresh tokens live in the OS keyring because they are long-lived and must survive a
+/// restart. Access tokens are deliberately **not** written there:
+///
+/// * They are short-lived (an hour), so persistence buys nothing — a restart refreshes from
+///   the refresh token instead.
+/// * A Microsoft Graph access token is a JWT that can exceed the Windows Credential Manager
+///   blob limit ([`MAX_PERSISTED_TOKEN_BYTES`]). Persisting it fails the entire store with an
+///   opaque "secure storage error", leaving every account uncredentialed.
+/// * Nothing reads them back, so a persisted copy is pure attack surface.
+pub struct AccessTokenCache {
+    entries: Mutex<HashMap<String, CachedAccessToken>>,
+}
+
+struct CachedAccessToken {
+    token: String,
+    expires_at: i64,
+}
+
+impl Default for AccessTokenCache {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl std::fmt::Debug for AccessTokenCache {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // Never print token material.
+        f.debug_struct("AccessTokenCache")
+            .field(
+                "entries",
+                &self.entries.lock().map(|e| e.len()).unwrap_or(0),
+            )
+            .finish()
+    }
+}
+
+impl AccessTokenCache {
+    pub fn new() -> Self {
+        Self {
+            entries: Mutex::new(HashMap::new()),
+        }
+    }
+
+    /// Store a freshly issued access token.
+    ///
+    /// Returns `false` without storing when the token is too large to be safe anywhere near
+    /// the OS keyring, which is a signal that something upstream is wrong.
+    pub fn insert(&self, account_id: &str, token: &str, expires_at: i64) -> bool {
+        if token.len() > MAX_PERSISTED_TOKEN_BYTES {
+            warn!(
+                account_id,
+                token_bytes = token.len(),
+                limit = MAX_PERSISTED_TOKEN_BYTES,
+                "access token exceeds the keyring blob limit; holding in memory only"
+            );
+        }
+        if let Ok(mut entries) = self.entries.lock() {
+            entries.insert(
+                account_id.to_string(),
+                CachedAccessToken {
+                    token: token.to_string(),
+                    expires_at,
+                },
+            );
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Fetch a cached access token, treating anything near expiry as absent.
+    ///
+    /// `skew_secs` covers the request round trip, so a token handed out here cannot expire
+    /// mid-flight.
+    pub fn get(&self, account_id: &str, skew_secs: i64) -> Option<String> {
+        let entries = self.entries.lock().ok()?;
+        let entry = entries.get(account_id)?;
+        if chrono::Utc::now().timestamp() + skew_secs >= entry.expires_at {
+            return None;
+        }
+        Some(entry.token.clone())
+    }
+
+    /// Drop an account's cached token, forcing a refresh on the next call.
+    ///
+    /// Called when a provider rejects a token, so the next attempt mints a new one rather than
+    /// replaying the rejected value until it expires.
+    pub fn invalidate(&self, account_id: &str) {
+        if let Ok(mut entries) = self.entries.lock() {
+            entries.remove(account_id);
+        }
+    }
+
+    /// Forget every cached token, e.g. when signing out.
+    pub fn clear(&self) {
+        if let Ok(mut entries) = self.entries.lock() {
+            entries.clear();
+        }
+    }
+
+    pub fn len(&self) -> usize {
+        self.entries.lock().map(|e| e.len()).unwrap_or(0)
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+}
+
 /// Minimum spacing between two full-sync commands issued for the same account.
 ///
 /// Long enough to absorb a burst of IDLE pushes / toolbar clicks, short enough that a
@@ -305,6 +425,13 @@ impl Drop for SyncCoordinator {
     }
 }
 
+/// Sentinel `server_host` that opts a Gmail account into the REST history provider.
+///
+/// Gmail has no hostname to configure — the API endpoint is fixed — so the setting field is
+/// borrowed as the opt-in switch. A value that is not this sentinel is treated as an IMAP host,
+/// which keeps every existing account working.
+pub const REST_MARKER: &str = "gmail-rest";
+
 /// Builds a concrete MailProvider instance with the given credentials.
 pub fn make_provider_with_token(
     account: &vespetrel_core::Account,
@@ -329,6 +456,33 @@ pub fn make_provider_with_token(
             Arc::new(vespetrel_imap::ImapProvider::new(config))
         }
         vespetrel_core::ProviderType::Gmail => {
+            // Gmail over the REST history feed when the account opted in, otherwise IMAP.
+            //
+            // The history cursor is one per mailbox and strictly more informative than IMAP's
+            // per-folder MODSEQ — label changes anywhere are picked up in one round trip. But it
+            // is a different code path with its own failure modes, so it is opt-in rather than a
+            // silent switch: an account that was syncing happily over IMAP keeps doing so until
+            // its owner chooses otherwise.
+            if account
+                .auth_config
+                .server_host
+                .as_deref()
+                .is_some_and(|h| h.eq_ignore_ascii_case(REST_MARKER))
+            {
+                let config = vespetrel_gmail::GmailConfig::new(auth_token.clone())
+                    .with_email(account.email.clone());
+                match vespetrel_gmail::GmailProvider::new(config) {
+                    Ok(provider) => return Arc::new(provider),
+                    // Falling back to IMAP is strictly better than returning no provider: the
+                    // mailbox still syncs, just with the older cursor model.
+                    Err(e) => warn!(
+                        account_id = %account.id,
+                        error = %e,
+                        "could not build the Gmail REST provider; falling back to IMAP"
+                    ),
+                }
+            }
+
             let host = account
                 .auth_config
                 .server_host
@@ -509,4 +663,97 @@ pub async fn make_provider_async(
 ) -> Result<Arc<dyn MailProvider>, AuthError> {
     let auth_token = resolve_and_refresh_token(account, None).await?;
     Ok(make_provider_with_token(account, auth_token))
+}
+
+#[cfg(test)]
+mod access_token_cache_tests {
+    use super::*;
+
+    fn in_a_minute() -> i64 {
+        chrono::Utc::now().timestamp() + 60
+    }
+
+    #[test]
+    fn caches_a_token_within_its_lifetime() {
+        let cache = AccessTokenCache::new();
+        assert!(cache.insert("acct-1", "ya29.token", in_a_minute()));
+        assert_eq!(cache.get("acct-1", 30).as_deref(), Some("ya29.token"));
+        assert!(!cache.is_empty());
+    }
+
+    #[test]
+    fn treats_a_token_inside_the_skew_window_as_absent() {
+        // Handing out a token that expires mid-request is how sync fails intermittently with
+        // an opaque server-side auth error.
+        let cache = AccessTokenCache::new();
+        cache.insert("acct-1", "ya29.token", chrono::Utc::now().timestamp() + 20);
+        assert_eq!(
+            cache.get("acct-1", 60),
+            None,
+            "a token expiring inside the skew window must not be returned"
+        );
+    }
+
+    #[test]
+    fn invalidation_forces_the_next_call_to_refresh() {
+        let cache = AccessTokenCache::new();
+        cache.insert("acct-1", "rejected", in_a_minute());
+        cache.invalidate("acct-1");
+        assert_eq!(
+            cache.get("acct-1", 30),
+            None,
+            "a provider-rejected token must not be replayed"
+        );
+    }
+
+    #[test]
+    fn clear_forgets_every_account() {
+        let cache = AccessTokenCache::new();
+        cache.insert("a", "t1", in_a_minute());
+        cache.insert("b", "t2", in_a_minute());
+        assert_eq!(cache.len(), 2);
+        cache.clear();
+        assert!(cache.is_empty());
+    }
+
+    #[test]
+    fn oversize_token_is_still_usable_from_memory() {
+        // A Graph JWT can exceed the Windows keyring blob limit. Persisting it fails the whole
+        // store, so it must remain usable in memory even though it could never be saved.
+        let cache = AccessTokenCache::new();
+        let huge = "x".repeat(MAX_PERSISTED_TOKEN_BYTES + 500);
+        assert!(cache.insert("graph", &huge, in_a_minute()));
+        assert_eq!(cache.get("graph", 30).as_deref(), Some(huge.as_str()));
+    }
+
+    #[test]
+    fn debug_never_leaks_token_material() {
+        let cache = AccessTokenCache::new();
+        cache.insert("acct-1", "SUPER_SECRET_TOKEN", in_a_minute());
+        let rendered = format!("{cache:?}");
+        assert!(!rendered.contains("SUPER_SECRET_TOKEN"), "{rendered}");
+        assert!(rendered.contains("entries"), "{rendered}");
+    }
+
+    #[test]
+    fn accounts_are_isolated_from_each_other() {
+        let cache = AccessTokenCache::new();
+        cache.insert("a", "token-a", in_a_minute());
+        cache.insert("b", "token-b", in_a_minute());
+        assert_eq!(cache.get("a", 30).as_deref(), Some("token-a"));
+        assert_eq!(cache.get("b", 30).as_deref(), Some("token-b"));
+        cache.invalidate("a");
+        assert_eq!(cache.get("a", 30), None);
+        assert_eq!(
+            cache.get("b", 30).as_deref(),
+            Some("token-b"),
+            "invalidating one account must not disturb another"
+        );
+    }
+
+    #[test]
+    fn unknown_account_is_absent_rather_than_an_error() {
+        let cache = AccessTokenCache::new();
+        assert_eq!(cache.get("never-seen", 30), None);
+    }
 }

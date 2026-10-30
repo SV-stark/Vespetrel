@@ -5,7 +5,17 @@ use std::time::Duration;
 use tokio::sync::mpsc;
 use tracing::{debug, error, info, warn};
 
-use vespetrel_core::provider::{MailProvider, SyncEvent};
+use vespetrel_core::provider::{
+    MailProvider, RemoteFolder, SyncDelta, SyncEvent, SyncMessage, SyncScope,
+};
+
+/// A connection checked out of the storage pool.
+///
+/// `deadpool_sqlite` exports no alias for the handle `Pool::get` returns, so the parameters are
+/// spelled out once here rather than at every signature. The `rusqlite` version must match the
+/// workspace pin: a mismatch makes this resolve to a *different* type that happens to compile,
+/// which fails at the call site rather than here.
+type PooledConn = deadpool::managed::Object<deadpool_sqlite::Manager>;
 
 /// Upper bound on the plain-text preview stored in the `body_text_preview` column.
 ///
@@ -456,6 +466,15 @@ impl AccountWorker {
             {
                 account_sync_state = acct.sync_state;
             }
+        }
+
+        // A mailbox-scoped provider (Gmail) is called exactly once and returns deltas already
+        // partitioned by folder. Iterating it per folder instead would re-walk the same shared
+        // cursor N times and attach every change to whichever folder ran first.
+        if self.provider.sync_scope() == SyncScope::Mailbox {
+            return self
+                .sync_mailbox_cycle(&folders, &folder_records, account_sync_state, storage_conn)
+                .await;
         }
 
         for rf in &folders {
@@ -964,5 +983,609 @@ impl AccountWorker {
 
     fn emit(&self, ev: SyncEvent) {
         self.event_tx.send(ev);
+    }
+}
+
+/// Result of persisting one folder's slice of a mailbox delta.
+enum IngestOutcome {
+    /// Committed. Carries the summaries to announce and the local ids removed.
+    Ok(Vec<vespetrel_core::message::MessageSummary>, Vec<String>),
+    /// Some message could not be materialised; the cursor must not advance.
+    Incomplete,
+    /// A hard failure worth reporting.
+    Failed(anyhow::Error),
+}
+
+impl AccountWorker {
+    /// One sync cycle for a mailbox-scoped provider.
+    ///
+    /// The provider returns one delta per affected folder, already partitioned. This mirrors the
+    /// per-folder loop's contract — persist messages, apply deletions, then advance the cursor
+    /// only once everything committed — but iterates a single mailbox delta rather than
+    /// re-walking a shared cursor per folder.
+    async fn sync_mailbox_cycle(
+        &mut self,
+        folders: &[RemoteFolder],
+        folder_records: &ahash::AHashMap<String, vespetrel_core::Folder>,
+        account_sync_state: vespetrel_core::account::SyncState,
+        storage_conn: Option<PooledConn>,
+    ) -> anyhow::Result<()> {
+        // Hand the provider the set of ids already mirrored locally, so it can tell a genuinely
+        // new message from one that merely changed labels. Without this every star toggle costs
+        // a full RFC822 refetch, which exhausts Gmail's per-project quota on an active mailbox.
+        if let Some(conn) = &storage_conn {
+            let acct_id = self.account_id.clone();
+            if let Ok(Ok(ids)) = conn
+                .interact(move |c| vespetrel_storage::repo::list_all_remote_ids(c, &acct_id))
+                .await
+            {
+                self.provider.set_stored_message_ids(ids);
+            }
+        }
+
+        let mut mailbox_res = self.provider.sync_mailbox(account_sync_state.clone()).await;
+        if let Err(ref e) = mailbox_res {
+            let err_str = e.to_string().to_lowercase();
+            if err_str.contains("401")
+                || err_str.contains("unauthorized")
+                || err_str.contains("authenticate")
+            {
+                warn!(account_id=%self.account_id, "authentication error in sync_mailbox, attempting OAuth refresh");
+                if self.try_refresh_auth().await.is_ok() {
+                    mailbox_res = self.provider.sync_mailbox(account_sync_state.clone()).await;
+                }
+            }
+        }
+
+        let deltas = match mailbox_res {
+            Ok(d) => d,
+            Err(e) => {
+                warn!(account_id=%self.account_id, error=%e, "mailbox sync failed");
+                self.emit(SyncEvent::SyncError {
+                    folder: "mailbox".into(),
+                    error: e.to_string(),
+                });
+                return Ok(());
+            }
+        };
+
+        let mut newest_state = account_sync_state;
+        let mut ingest_complete = true;
+        let mut any_changed = false;
+        let mut all_summaries: Vec<vespetrel_core::message::MessageSummary> = Vec::new();
+        let mut all_deleted: Vec<String> = Vec::new();
+
+        for folder_delta in deltas {
+            let delta = folder_delta.delta;
+
+            // The empty remote id marks a mailbox-wide change (Gmail deletions), which applies to
+            // every folder and is resolved by message id rather than by folder.
+            let rf = if folder_delta.folder_remote_id.is_empty() {
+                None
+            } else {
+                folders
+                    .iter()
+                    .find(|f| f.remote_id == folder_delta.folder_remote_id)
+            };
+
+            let outcome = match rf {
+                Some(rf) => {
+                    let record = folder_records
+                        .get(&rf.remote_id)
+                        .cloned()
+                        .unwrap_or_else(|| {
+                            vespetrel_core::Folder::new(
+                                &self.account_id,
+                                &rf.remote_id,
+                                &rf.name,
+                                &rf.path,
+                            )
+                        });
+                    self.ingest_delta(rf, &record, &delta, storage_conn.as_ref())
+                        .await
+                }
+                None => {
+                    self.ingest_mailbox_wide(&delta, storage_conn.as_ref())
+                        .await
+                }
+            };
+
+            match outcome {
+                IngestOutcome::Ok(summaries, deleted) => {
+                    all_summaries.extend(summaries);
+                    all_deleted.extend(deleted);
+                }
+                IngestOutcome::Incomplete => ingest_complete = false,
+                IngestOutcome::Failed(err) => {
+                    error!(
+                        account_id=%self.account_id,
+                        folder=%rf.map(|f| f.name.as_str()).unwrap_or("mailbox"),
+                        error=%err,
+                        "mailbox delta ingest failed"
+                    );
+                    ingest_complete = false;
+                }
+            }
+
+            if !delta.is_empty() {
+                any_changed = true;
+            }
+            if delta.new_sync_state != vespetrel_core::account::SyncState::default() {
+                newest_state = delta.new_sync_state;
+            }
+        }
+
+        if !all_summaries.is_empty() {
+            self.emit(SyncEvent::MessagesInserted(all_summaries));
+        }
+        if !all_deleted.is_empty() {
+            if let Some(store) = self.blob_store.clone() {
+                let ids = all_deleted.clone();
+                let _ = tokio::task::spawn_blocking(move || {
+                    for id in ids {
+                        let _ = store.delete(&id);
+                    }
+                })
+                .await;
+            }
+            self.emit(SyncEvent::MessagesDeleted(all_deleted));
+        }
+
+        // The cursor advances only after every folder committed. This is the ordering that makes
+        // a history-based provider safe: Gmail has no other queue, so a cursor advanced past
+        // uncommitted work means those messages were never delivered and never would be.
+        if !ingest_complete {
+            warn!(
+                account_id=%self.account_id,
+                "mailbox sync incomplete; leaving the sync cursor unchanged so missing messages are retried"
+            );
+        } else if any_changed
+            && newest_state != vespetrel_core::account::SyncState::default()
+            && let Some(conn) = &storage_conn
+        {
+            let acct_id = self.account_id.clone();
+            let state_to_save = newest_state.clone();
+            let res = conn
+                .interact(move |c| {
+                    if let Err(e) = vespetrel_storage::repo::update_account_sync_state(
+                        c,
+                        &acct_id,
+                        &state_to_save,
+                    ) {
+                        error!(error=%e, "failed to update account sync state in DB");
+                    }
+                })
+                .await;
+            if let Err(e) = res {
+                error!(account_id=%self.account_id, error=%e, "storage interact error saving sync state");
+            }
+        }
+
+        self.emit(SyncEvent::SyncFinished {
+            account_id: self.account_id.clone(),
+        });
+        Ok(())
+    }
+
+    /// Parse raw RFC822 into a storable message, queueing its body for the blob store.
+    ///
+    /// Returns `Err` with the reason rather than a default message: a body the parser rejects or
+    /// a message with no `From` address is not materialisable, and storing a placeholder would
+    /// put a broken row in the mailbox while advancing the cursor past the real content.
+    fn build_message_from_raw(
+        &self,
+        folder_db_id: &str,
+        sync_msg: &SyncMessage,
+        raw_bytes: &[u8],
+        blobs_to_write: &mut Vec<(String, Vec<u8>)>,
+    ) -> Result<vespetrel_core::Message, String> {
+        let parsed = MessageParser::default()
+            .parse(raw_bytes)
+            .ok_or_else(|| "failed to parse RFC822 message".to_string())?;
+
+        let from_addr = parsed
+            .from()
+            .and_then(|f| f.first())
+            .and_then(|a| a.address.as_deref())
+            .filter(|a| !a.is_empty())
+            .ok_or_else(|| "message has no From address".to_string())?
+            .to_string();
+
+        let from_name = parsed
+            .from()
+            .and_then(|f| f.first())
+            .and_then(|a| a.name.as_deref())
+            .map(|s| s.to_string());
+        let to_addrs = parsed
+            .to()
+            .map(|t| {
+                t.iter()
+                    .filter_map(|a| a.address.as_deref())
+                    .map(|s| s.to_string())
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+
+        let subject = parsed.subject().unwrap_or("No Subject").to_string();
+        let mut msg = vespetrel_core::Message::new(
+            &self.account_id,
+            folder_db_id,
+            sync_msg.remote_uid,
+            &subject,
+            from_addr,
+            to_addrs,
+        );
+        msg.remote_id = sync_msg.remote_id.clone();
+        msg.from_name = from_name;
+        msg.message_id_header = parsed.message_id().map(|s| s.to_string());
+        msg.in_reply_to = parsed.in_reply_to().as_text().map(|s| s.to_string());
+        msg.references = parsed.references().as_text().map(|s| s.to_string());
+        // Cap the preview. Storing the entire first text part meant a multi-megabyte body was
+        // serialised into a SQLite column on every message and then fed to the spam classifier.
+        msg.body_snippet = parsed
+            .body_text(0)
+            .map(|t| t.chars().take(MAX_BODY_PREVIEW_CHARS).collect::<String>());
+        msg.body_text_preview = parsed
+            .body_text(0)
+            .map(|t| t.chars().take(MAX_BODY_PREVIEW_CHARS).collect::<String>());
+
+        // `Message::new` sets sent_at = received_at = now(). Without reading the Date header
+        // every synced message got the *sync* time, so `ORDER BY sent_at DESC` returned a
+        // mailbox in essentially random order and the order was unstable across re-syncs.
+        if let Some(dt) = parsed.date().and_then(mail_date_to_utc) {
+            msg.sent_at = dt;
+            msg.received_at = dt;
+        }
+
+        msg.has_attachments = parsed.attachment_count() > 0;
+
+        // cc/bcc/reply-to were never populated, so Reply targeted the From address instead of
+        // Reply-To.
+        //
+        // `mail_parser` returns an address *group* (`Option<&Address>`) whose items are `Addr`
+        // with `name()`/`address()` accessors, while the storage column is a `Vec<Address>`.
+        let to_core_addresses =
+            |group: Option<&mail_parser::Address>| -> Vec<vespetrel_core::Address> {
+                group
+                    .map(|g| {
+                        g.iter()
+                            .filter_map(|a| {
+                                a.address().map(|email| vespetrel_core::Address {
+                                    name: a.name().map(|s| s.to_string()),
+                                    email: email.to_string(),
+                                })
+                            })
+                            .collect()
+                    })
+                    .unwrap_or_default()
+            };
+        msg.cc_addresses = to_core_addresses(parsed.cc());
+        msg.bcc_addresses = to_core_addresses(parsed.bcc());
+        msg.reply_to = parsed
+            .reply_to()
+            .map(|g| to_core_addresses(Some(g)))
+            .filter(|v| !v.is_empty());
+
+        // Provider-reported flags win over the headers: a message marked unread in Gmail but
+        // carrying a `Status: RO` header must stay unread.
+        msg.is_read = sync_msg.flags.contains(&vespetrel_core::Flag::Seen);
+        msg.is_flagged = sync_msg.flags.contains(&vespetrel_core::Flag::Flagged);
+
+        msg.size_bytes = raw_bytes.len() as i64;
+        msg.blob_path = msg.id.clone();
+        blobs_to_write.push((msg.id.clone(), raw_bytes.to_vec()));
+
+        Ok(msg)
+    }
+
+    /// Persist one folder's slice of a mailbox delta.
+    ///
+    /// Returns the summaries to announce and the local ids removed. `Incomplete` means some
+    /// message could not be materialised, which must suppress the cursor advance.
+    async fn ingest_delta(
+        &mut self,
+        rf: &RemoteFolder,
+        folder_record: &vespetrel_core::Folder,
+        delta: &SyncDelta,
+        storage_conn: Option<&PooledConn>,
+    ) -> IngestOutcome {
+        let mut summaries = Vec::new();
+        let mut msgs_to_store = Vec::new();
+        let mut blobs_to_write = Vec::new();
+        let mut ingest_complete = true;
+
+        for sync_msg in &delta.inserted {
+            let fetch_id = sync_msg
+                .remote_id
+                .clone()
+                .unwrap_or_else(|| sync_msg.remote_uid.to_string());
+            let raw_bytes = match &sync_msg.raw_rfc822 {
+                Some(b) if !b.is_empty() => b.clone(),
+                _ => match self.provider.fetch_raw_message(&fetch_id).await {
+                    Ok(b) if !b.is_empty() => b,
+                    Ok(_) => {
+                        ingest_complete = false;
+                        continue;
+                    }
+                    Err(e) => {
+                        error!(
+                            account_id=%self.account_id,
+                            folder=%rf.name,
+                            error=%e,
+                            "failed to fetch message body; aborting so the cursor is not advanced past it"
+                        );
+                        return IngestOutcome::Incomplete;
+                    }
+                },
+            };
+
+            match self.build_message_from_raw(
+                &folder_record.id,
+                sync_msg,
+                &raw_bytes,
+                &mut blobs_to_write,
+            ) {
+                Ok(message) => {
+                    summaries.push(message.summary());
+                    msgs_to_store.push(message);
+                }
+                Err(msg) => {
+                    warn!(
+                        account_id=%self.account_id,
+                        folder=%rf.name,
+                        reason=%msg,
+                        "could not materialise message; not advancing the sync cursor past it"
+                    );
+                    ingest_complete = false;
+                }
+            }
+        }
+
+        // Blobs before rows: a message row whose body was never written would render empty.
+        if let Some(store) = &self.blob_store
+            && !blobs_to_write.is_empty()
+        {
+            let store = store.clone();
+            let blobs = blobs_to_write.clone();
+            let res = tokio::task::spawn_blocking(move || {
+                for (message_id, bytes) in blobs {
+                    if let Err(e) = store.write(&message_id, &bytes) {
+                        error!(message_id=%message_id, error=%e, "failed to write message body");
+                    }
+                }
+            })
+            .await;
+            if let Err(e) = res {
+                error!(error=%e, "blob store batch write task panicked");
+                ingest_complete = false;
+            }
+        }
+
+        if let Some(conn) = storage_conn.filter(|_| !msgs_to_store.is_empty()) {
+            let msgs_batch = msgs_to_store.clone();
+            let res = conn
+                .interact(move |c| -> anyhow::Result<()> {
+                    let tx = c.transaction()?;
+                    for m in &msgs_batch {
+                        vespetrel_storage::repo::insert_message(&tx, m)?;
+                    }
+                    tx.commit()?;
+                    Ok(())
+                })
+                .await;
+            if let Err(e) = res {
+                error!(error=%e, "storage interact error batch inserting messages");
+                ingest_complete = false;
+            }
+        }
+
+        let events = self.apply_flag_updates(&delta.updated, storage_conn).await;
+        for ev in events {
+            self.emit(ev);
+        }
+
+        let deleted = self.apply_deletions(delta, storage_conn).await;
+
+        if ingest_complete {
+            IngestOutcome::Ok(summaries, deleted)
+        } else {
+            IngestOutcome::Incomplete
+        }
+    }
+
+    /// Apply a mailbox-wide deletion slice, resolved by provider-native message id.
+    async fn ingest_mailbox_wide(
+        &mut self,
+        delta: &SyncDelta,
+        storage_conn: Option<&PooledConn>,
+    ) -> IngestOutcome {
+        if delta.inserted.is_empty() && delta.updated.is_empty() {
+            // Deletions only: record the state so the caller can advance the cursor.
+            let deleted = self.apply_deletions(delta, storage_conn).await;
+            return IngestOutcome::Ok(Vec::new(), deleted);
+        }
+
+        let Some(conn) = storage_conn else {
+            return IngestOutcome::Failed(anyhow::anyhow!(
+                "mailbox delta carries message data but no storage connection is available"
+            ));
+        };
+
+        let acct_id = self.account_id.clone();
+        let remote_ids = delta.deleted_remote_ids.clone();
+        let removed = conn
+            .interact(move |c| -> anyhow::Result<Vec<String>> {
+                let mut removed = Vec::new();
+                for remote_id in &remote_ids {
+                    if let Some(id) =
+                        vespetrel_storage::repo::find_message_by_remote_id(c, &acct_id, remote_id)?
+                    {
+                        let _ = vespetrel_storage::repo::delete_message(c, &id);
+                        removed.push(id);
+                    }
+                }
+                Ok(removed)
+            })
+            .await;
+
+        // `interact` returns `Result<Result<T, E>, InteractError>`; both layers are failures here.
+        match removed {
+            Ok(Ok(ids)) => IngestOutcome::Ok(Vec::new(), ids),
+            Ok(Err(e)) => {
+                error!(error=%e, "failed to apply mailbox-wide deletions");
+                IngestOutcome::Incomplete
+            }
+            Err(e) => {
+                error!(error=%e, "storage interaction failed during deletion pass");
+                IngestOutcome::Incomplete
+            }
+        }
+    }
+
+    /// Reconcile read/starred state for messages a provider reported as changed.
+    ///
+    /// Resolves by `remote_id`: Gmail ids are opaque strings carrying no numeric UID, so
+    /// matching on `remote_uid` would silently update nothing.
+    async fn apply_flag_updates(
+        &self,
+        updated: &[SyncMessage],
+        storage_conn: Option<&PooledConn>,
+    ) -> Vec<SyncEvent> {
+        if updated.is_empty() {
+            return Vec::new();
+        }
+        let Some(conn) = storage_conn else {
+            warn!("flag updates received but no storage connection is available");
+            return Vec::new();
+        };
+
+        let acct_id = self.account_id.clone();
+        let updated = updated.to_vec();
+        match conn
+            .interact(move |c| -> anyhow::Result<Vec<SyncEvent>> {
+                let mut events = Vec::new();
+                for umsg in &updated {
+                    let new_read = umsg.flags.contains(&vespetrel_core::Flag::Seen);
+                    let new_flagged = umsg.flags.contains(&vespetrel_core::Flag::Flagged);
+
+                    let Some(id) = umsg.remote_id.as_ref().and_then(|rid| {
+                        vespetrel_storage::repo::find_message_by_remote_id(c, &acct_id, rid)
+                            .ok()
+                            .flatten()
+                    }) else {
+                        // Never stored: its flags arrive with its first fetch.
+                        continue;
+                    };
+
+                    let (cur_read, cur_flagged): (i64, i64) = c.query_row(
+                        "SELECT is_read, is_flagged FROM messages WHERE id = ?1",
+                        rusqlite::params![id],
+                        |r| Ok((r.get(0)?, r.get(1)?)),
+                    )?;
+                    let is_read_changed = (cur_read != 0) != new_read;
+                    let is_flagged_changed = (cur_flagged != 0) != new_flagged;
+                    if !is_read_changed && !is_flagged_changed {
+                        continue;
+                    }
+                    let _ = vespetrel_storage::repo::update_message_flags(
+                        c,
+                        &id,
+                        if is_read_changed {
+                            Some(new_read)
+                        } else {
+                            None
+                        },
+                        if is_flagged_changed {
+                            Some(new_flagged)
+                        } else {
+                            None
+                        },
+                    );
+                    events.push(SyncEvent::MessageFlagsUpdated {
+                        id,
+                        is_read: new_read,
+                        is_flagged: new_flagged,
+                    });
+                }
+                Ok(events)
+            })
+            .await
+        {
+            // Both layers are failures: the inner is the closure's error, the outer is the pool.
+            Ok(Ok(events)) => events,
+            Ok(Err(e)) => {
+                warn!(error=%e, "flag update pass failed");
+                Vec::new()
+            }
+            Err(e) => {
+                warn!(error=%e, "storage interaction failed during flag update pass");
+                Vec::new()
+            }
+        }
+    }
+
+    /// Delete the messages a provider reported gone, by UID or by remote id.
+    async fn apply_deletions(
+        &self,
+        delta: &SyncDelta,
+        storage_conn: Option<&PooledConn>,
+    ) -> Vec<String> {
+        if delta.deleted_uids.is_empty() && delta.deleted_remote_ids.is_empty() {
+            return Vec::new();
+        }
+        let Some(conn) = storage_conn else {
+            warn!("deletions received but no storage connection is available");
+            return Vec::new();
+        };
+
+        let acct_id = self.account_id.clone();
+        let uids = delta.deleted_uids.clone();
+        let remote_ids = delta.deleted_remote_ids.clone();
+
+        match conn
+            .interact(move |c| -> anyhow::Result<Vec<String>> {
+                let mut removed: Vec<String> = Vec::new();
+
+                // Remote ids are mailbox-wide: a deleted message may sit in several folders.
+                for remote_id in &remote_ids {
+                    if let Some(id) =
+                        vespetrel_storage::repo::find_message_by_remote_id(c, &acct_id, remote_id)?
+                    {
+                        let _ = vespetrel_storage::repo::delete_message(c, &id);
+                        removed.push(id);
+                    }
+                }
+
+                // Numeric UIDs are only unambiguous when the provider gave no remote ids
+                // alongside them; a provider that supplies both has already scoped the change.
+                if !uids.is_empty() && remote_ids.is_empty() {
+                    let mut stmt = c.prepare(
+                        "SELECT id FROM messages WHERE account_id = ?1 AND remote_uid = ?2",
+                    )?;
+                    for uid in &uids {
+                        let mut rows = stmt.query(rusqlite::params![acct_id, *uid as i64])?;
+                        while let Ok(Some(row)) = rows.next() {
+                            let id: String = row.get(0)?;
+                            let _ = vespetrel_storage::repo::delete_message(c, &id);
+                            removed.push(id);
+                        }
+                    }
+                }
+
+                Ok(removed)
+            })
+            .await
+        {
+            // Both layers are failures: the inner is the closure's error, the outer is the pool.
+            Ok(Ok(ids)) => ids,
+            Ok(Err(e)) => {
+                warn!(error=%e, "deletion pass failed");
+                Vec::new()
+            }
+            Err(e) => {
+                warn!(error=%e, "storage interaction failed during deletion pass");
+                Vec::new()
+            }
+        }
     }
 }

@@ -4,7 +4,7 @@ pub mod client;
 pub mod idle;
 pub mod sync;
 
-pub use client::{ImapConfig, ImapConnection};
+pub use client::{ImapConfig, ImapConnection, Xoauth2Error, Xoauth2Failure};
 pub use sync::ImapProvider;
 
 use thiserror::Error;

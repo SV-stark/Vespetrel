@@ -548,6 +548,77 @@ pub fn delete_message(conn: &Connection, message_id: &str) -> StorageResult<()> 
     Ok(())
 }
 
+/// Every message id in an account that is *not* in `remote_ids`.
+///
+/// The complement query behind a Gmail full sync: given the set of ids the server still reports,
+/// anything local and absent from it is gone. Doing this in SQL rather than by listing every
+/// stored id avoids pulling an unbounded mailbox into memory.
+///
+/// Excludes drafts, which Gmail's `messages.list` does not return by default — otherwise every
+/// unsent draft would be treated as deleted.
+pub fn list_stale_message_ids(
+    conn: &Connection,
+    account_id: &str,
+    keep_remote_ids: &[String],
+) -> StorageResult<Vec<String>> {
+    let mut stmt =
+        conn.prepare("SELECT id, remote_id FROM messages WHERE account_id = ?1 AND is_draft = 0")?;
+    let rows = stmt.query_map(params![account_id], |r| {
+        Ok((r.get::<_, String>(0)?, r.get::<_, Option<String>>(1)?))
+    })?;
+
+    let keep: std::collections::HashSet<&str> =
+        keep_remote_ids.iter().map(|s| s.as_str()).collect();
+    let mut stale = Vec::new();
+    for row in rows {
+        let (id, remote_id) = row?;
+        // A row with no remote_id predates provider-native ids and cannot be matched; leave it
+        // alone rather than deleting it on a guess.
+        match remote_id {
+            Some(rid) if !keep.contains(rid.as_str()) => stale.push(id),
+            _ => {}
+        }
+    }
+    Ok(stale)
+}
+
+/// All message ids for an account, as provider-native remote ids.
+///
+/// Supplied to a provider so it can tell a genuinely new message from one that merely changed
+/// labels; without it a delta sync refetches every relabelled message.
+pub fn list_all_remote_ids(
+    conn: &Connection,
+    account_id: &str,
+) -> StorageResult<std::collections::BTreeSet<String>> {
+    let mut stmt = conn.prepare(
+        "SELECT DISTINCT remote_id FROM messages WHERE account_id = ?1 AND remote_id IS NOT NULL",
+    )?;
+    let rows = stmt.query_map(params![account_id], |r| r.get::<_, String>(0))?;
+    let mut out = std::collections::BTreeSet::new();
+    for row in rows {
+        out.insert(row?);
+    }
+    Ok(out)
+}
+
+/// Locate the local message carrying a provider-native id within an account.
+///
+/// Gmail ids are opaque strings, so flag updates and deletions must resolve through `remote_id`
+/// rather than the IMAP-shaped `remote_uid`.
+pub fn find_message_by_remote_id(
+    conn: &Connection,
+    account_id: &str,
+    remote_id: &str,
+) -> StorageResult<Option<String>> {
+    Ok(conn
+        .query_row(
+            "SELECT id FROM messages WHERE account_id = ?1 AND remote_id = ?2 LIMIT 1",
+            params![account_id, remote_id],
+            |r| r.get(0),
+        )
+        .optional()?)
+}
+
 pub fn upsert_thread(conn: &Connection, thread: &vespetrel_core::Thread) -> StorageResult<()> {
     conn.execute(
         r#"INSERT INTO threads (id, account_id, subject, last_message_at, message_count, unread_count, snippet)
@@ -1031,6 +1102,146 @@ pub fn get_default_signature(
 pub fn delete_signature(conn: &Connection, id: &str) -> StorageResult<()> {
     conn.execute("DELETE FROM signatures WHERE id = ?1", params![id])?;
     Ok(())
+}
+
+pub fn upsert_alias(conn: &Connection, alias: &vespetrel_core::AccountAlias) -> StorageResult<()> {
+    conn.execute_batch("SAVEPOINT vespetrel_upsert_alias;")?;
+    let run = || -> Result<(), rusqlite::Error> {
+        if alias.is_default {
+            conn.execute(
+                "UPDATE account_aliases SET is_default = 0 WHERE account_id = ?1",
+                params![alias.account_id],
+            )?;
+        }
+        conn.execute(
+            r#"INSERT INTO account_aliases (id, account_id, email, name, reply_to, signature_id, is_default, created_at)
+               VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+               ON CONFLICT(id) DO UPDATE SET
+                 account_id = excluded.account_id,
+                 email = excluded.email,
+                 name = excluded.name,
+                 reply_to = excluded.reply_to,
+                 signature_id = excluded.signature_id,
+                 is_default = excluded.is_default"#,
+            params![
+                alias.id,
+                alias.account_id,
+                alias.email,
+                alias.name,
+                alias.reply_to,
+                alias.signature_id,
+                if alias.is_default { 1 } else { 0 },
+                alias.created_at.timestamp(),
+            ],
+        )?;
+        Ok(())
+    };
+
+    match run() {
+        Ok(()) => {
+            conn.execute_batch("RELEASE vespetrel_upsert_alias;")?;
+            Ok(())
+        }
+        Err(err) => {
+            let _ = conn.execute_batch(
+                "ROLLBACK TO vespetrel_upsert_alias; RELEASE vespetrel_upsert_alias;",
+            );
+            Err(err.into())
+        }
+    }
+}
+
+pub fn list_aliases_for_account(
+    conn: &Connection,
+    account_id: &str,
+) -> StorageResult<Vec<vespetrel_core::AccountAlias>> {
+    let mut stmt = conn.prepare(
+        "SELECT id, account_id, email, name, reply_to, signature_id, is_default, created_at
+         FROM account_aliases
+         WHERE account_id = ?1
+         ORDER BY is_default DESC, email ASC",
+    )?;
+
+    let rows = stmt.query_map(params![account_id], |row| {
+        let is_def: i64 = row.get(6)?;
+        let created_ts: i64 = row.get(7)?;
+        let created_at = DateTime::from_timestamp(created_ts, 0).ok_or_else(|| {
+            rusqlite::Error::FromSqlConversionFailure(
+                7,
+                rusqlite::types::Type::Integer,
+                Box::new(crate::StorageError::CorruptData(format!(
+                    "Invalid created_at timestamp: {created_ts}"
+                ))),
+            )
+        })?;
+        Ok(vespetrel_core::AccountAlias {
+            id: row.get(0)?,
+            account_id: row.get(1)?,
+            email: row.get(2)?,
+            name: row.get(3)?,
+            reply_to: row.get(4)?,
+            signature_id: row.get(5)?,
+            is_default: is_def != 0,
+            created_at,
+        })
+    })?;
+
+    rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+}
+
+pub fn get_default_alias(
+    conn: &Connection,
+    account_id: &str,
+) -> StorageResult<Option<vespetrel_core::AccountAlias>> {
+    let list = list_aliases_for_account(conn, account_id)?;
+    Ok(list.into_iter().find(|a| a.is_default))
+}
+
+pub fn delete_alias(conn: &Connection, id: &str) -> StorageResult<()> {
+    conn.execute("DELETE FROM account_aliases WHERE id = ?1", params![id])?;
+    Ok(())
+}
+
+pub fn find_alias_by_email(
+    conn: &Connection,
+    email: &str,
+) -> StorageResult<Option<vespetrel_core::AccountAlias>> {
+    let mut stmt = conn.prepare(
+        "SELECT id, account_id, email, name, reply_to, signature_id, is_default, created_at
+         FROM account_aliases
+         WHERE LOWER(email) = LOWER(?1)
+         LIMIT 1",
+    )?;
+
+    let mut rows = stmt.query_map(params![email], |row| {
+        let is_def: i64 = row.get(6)?;
+        let created_ts: i64 = row.get(7)?;
+        let created_at = DateTime::from_timestamp(created_ts, 0).ok_or_else(|| {
+            rusqlite::Error::FromSqlConversionFailure(
+                7,
+                rusqlite::types::Type::Integer,
+                Box::new(crate::StorageError::CorruptData(format!(
+                    "Invalid created_at timestamp: {created_ts}"
+                ))),
+            )
+        })?;
+        Ok(vespetrel_core::AccountAlias {
+            id: row.get(0)?,
+            account_id: row.get(1)?,
+            email: row.get(2)?,
+            name: row.get(3)?,
+            reply_to: row.get(4)?,
+            signature_id: row.get(5)?,
+            is_default: is_def != 0,
+            created_at,
+        })
+    })?;
+
+    if let Some(res) = rows.next() {
+        Ok(Some(res?))
+    } else {
+        Ok(None)
+    }
 }
 
 pub fn save_user_settings(
@@ -1716,5 +1927,47 @@ mod tests {
             )
             .unwrap();
         assert!(cursor.contains("cursor-abc"), "sync state was not saved");
+    }
+
+    #[test]
+    fn test_account_alias_lifecycle_and_lookup() {
+        let conn = open_in_memory().unwrap();
+        let acct = vespetrel_core::Account::new(
+            "Primary",
+            "primary@example.com",
+            vespetrel_core::ProviderType::Imap,
+        );
+        upsert_account(&conn, &acct).unwrap();
+
+        let alias1 = vespetrel_core::AccountAlias::new(
+            &acct.id,
+            "alias1@example.com",
+            Some("Alias One".into()),
+        )
+        .with_default(true);
+        let alias2 = vespetrel_core::AccountAlias::new(
+            &acct.id,
+            "alias2@example.com",
+            Some("Alias Two".into()),
+        )
+        .with_reply_to("reply@example.com");
+
+        upsert_alias(&conn, &alias1).unwrap();
+        upsert_alias(&conn, &alias2).unwrap();
+
+        let list = list_aliases_for_account(&conn, &acct.id).unwrap();
+        assert_eq!(list.len(), 2);
+
+        let default_alias = get_default_alias(&conn, &acct.id).unwrap().unwrap();
+        assert_eq!(default_alias.email, "alias1@example.com");
+
+        let found = find_alias_by_email(&conn, "ALIAS2@EXAMPLE.COM")
+            .unwrap()
+            .unwrap();
+        assert_eq!(found.email, "alias2@example.com");
+        assert_eq!(found.reply_to.as_deref(), Some("reply@example.com"));
+
+        delete_alias(&conn, &alias1.id).unwrap();
+        assert_eq!(list_aliases_for_account(&conn, &acct.id).unwrap().len(), 1);
     }
 }

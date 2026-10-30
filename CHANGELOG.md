@@ -9,7 +9,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-10-30
+
 ### Added
+- **Thunderbird-Style Zero-Friction Account Setup & Autodiscover**:
+  - Unified 3-field setup (Your name, Email address, Password / OAuth2 toggle) matching Mozilla Thunderbird's single-step account creation workflow.
+  - Active Mozilla ISPDB XML parser (`parse_mozilla_ispdb_xml`) and directory query integration targeting `https://autoconfig.thunderbird.net/v1.1/{domain}`.
+  - Comprehensive global provider catalog: Google (Gmail & Google Workspace), Microsoft 365 / Exchange Online / Outlook / Hotmail, Fastmail (JMAP), Apple iCloud, Yahoo/AOL, Zoho, ProtonMail Bridge, GMX, WEB.DE, Mail.ru, Yandex, OVH, and standard heuristics fallback (`imap.{domain}:993` SSL/TLS, `smtp.{domain}:587` STARTTLS).
+  - Out-of-the-box zero-config OAuth2 for Google and Microsoft 365 using public Thunderbird desktop client IDs with seamless fallback to App Password / IMAP mode.
+  - Expandable "Configure manually" tray for fine-grained port, hostname, socket encryption (SSL/TLS vs STARTTLS), and live "Re-test / Detect" probing.
+- **Account Aliases & Identity Switching**:
+  - Relational SQLite schema migration 006 introducing the `account_aliases` table with cascade deletion and indexing.
+  - Multi-alias identity support allowing users to send and receive from multiple email aliases per account.
+  - Interactive sender identity dropdown in compose modal with automatic matching of incoming replies to the receiving alias.
+- **Custom HTML & Plaintext Signatures**:
+  - Per-account rich signature management supporting both HTML and plaintext formats.
+  - Dynamic template variable substitution (`{name}`, `{email}`, `{title}`, `{company}`, `{phone}`).
+  - Automatic signature injection when composing new messages or generating reply/forward quotation templates.
+- **Rich Attachment Preview & Inspection Engine (`vespetrel-render::preview`)**:
+  - In-app interactive preview modal supporting multi-format inspection without launching external viewers.
+  - Format-specific inspectors: image rendering, syntax-highlighted code/text, PDF metadata and text stream inspection, audio/video duration and codec detection, archive (ZIP/TAR/GZ) file tree listing, and vCard/iCalendar parsing.
+- **Pure Rust Lightweight SMTP Client Engine (`vespetrel-smtp`)**:
+  - Native asynchronous SMTP submission engine built on Lettre and `tokio-rustls`.
+  - Cryptographic DKIM message signing (RFC 6376) and Delivery Status Notifications (DSN RFC 3461).
+  - Transactional SQLite outbox integration with retry backoff and scheduled dispatch.
 - **`vespetrel-core::search`**: Canonical FTS5 query sanitization (`escape_fts5_query`, `escape_fts5_term`, `fts5_predicate`), shared by `storage::fts` and `core::virtual_folder` so the two cannot drift again.
 - **`vespetrel-crypto::LoopbackListener`**: Loopback listener holding one socket per address family on a single port, so `localhost` resolves usably regardless of which stack the browser picks.
 - **Interactive New Mail Setup Wizard**:

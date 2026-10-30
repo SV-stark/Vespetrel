@@ -20,7 +20,7 @@ pub mod template;
 pub mod thread;
 pub mod virtual_folder;
 
-pub use account::{Account, AuthConfig, ProviderType, SyncState};
+pub use account::{Account, AccountAlias, AuthConfig, ProviderType, SyncState};
 pub use attachment::Attachment;
 pub use contact::{CalendarEvent, Contact, TaskItem};
 pub use error::{CoreError, CoreResult};
@@ -30,7 +30,7 @@ pub use mailing_list::{MailingList, MailingListExpander};
 pub use message::{
     Address, ComposedAttachment, ComposedMessage, Flag, Message, MessageSummary, stable_uid_from_id,
 };
-pub use provider::{MailProvider, RemoteFolder, SyncDelta, SyncEvent};
+pub use provider::{FolderDelta, MailProvider, RemoteFolder, SyncDelta, SyncEvent, SyncScope};
 pub use richtext::{BlockKind, InlineStyle, RichTextDocument, TextSpan};
 pub use search::{escape_fts5_query, escape_fts5_term, fts5_predicate};
 pub use settings::*;

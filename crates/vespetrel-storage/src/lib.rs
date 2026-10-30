@@ -3,6 +3,7 @@
 pub mod blob;
 pub mod db;
 pub mod fts;
+pub mod migration_files;
 pub mod migrations;
 pub mod repo;
 

@@ -119,11 +119,14 @@ Vespetrel natively abstracts differences between modern and legacy email protoco
 
 ---
 
-### 🧙 Interactive Setup Wizard & Dual Gmail Auth
-* **New Mail Setup Wizard**: Real `gpui-kit` `Input`/`InputState` fields for Email Address, Display Name, Password / App Password, Incoming Server & Port, and Outgoing Server & Port, with masked password + show/hide eye toggle and quick preset chips (Personal / Work / Team).
-* **OAuth2 Browser Redirect (PKCE)**: Ephemeral loopback listener on `127.0.0.1:0`, SHA-256 code challenge + CSRF state, strict Host-header check (DNS-rebinding guard), system-browser consent (`accounts.google.com` / `login.microsoftonline.com`), friendly HTML confirmation page, and automatic OpenID userinfo discovery to fill email/display name.
-* **Dual Gmail Modes**: `🌐 Browser OAuth2` one-click web auth with token exchange + OS keyring storage, or `🔑 App Password (IMAP)` direct `imap.gmail.com:993` / `smtp.gmail.com:587` with contextual hint to `myaccount.google.com/apppasswords`.
-* **Persistent Outbox & Token Refresh**: Disk-backed SQLite outbox with retry backoff, scheduled-send support, background worker with graceful shutdown + `flume` wake triggers; proactive OAuth2 refresh 60s before expiry with cached-credential fallback.
+### 🧙 Thunderbird-Style Zero-Friction Setup & Autodiscover
+* **3-Field Instant Setup**: True Thunderbird simplicity. Users only enter **Your Name**, **Email Address**, and **Password** (or OAuth2 toggle). Vespetrel automatically detects optimal server protocols, hostnames, ports, and encryption without requiring manual provider selection.
+* **Mozilla ISPDB & Active Autodiscover**: Native XML parser and live queries targeting Mozilla's Thunderbird ISP database (`https://autoconfig.thunderbird.net/v1.1/{domain}`) with intelligent heuristic fallback (`imap.{domain}:993` SSL/TLS, `smtp.{domain}:587` STARTTLS). Pre-configured global coverage for Google Workspace, Microsoft 365 / Exchange, Fastmail, Apple iCloud, Yahoo/AOL, Zoho, ProtonMail Bridge, GMX, WEB.DE, Mail.ru, Yandex, and OVH.
+* **Zero-Configuration OAuth2**: Built-in public desktop client IDs for Google and Microsoft 365 Entra ID. Clicking "Sign in with Google" or "Sign in with Microsoft" instantly opens the browser with zero manual cloud project setup, alongside seamless fallback to App Password / IMAP mode.
+* **Expandable Manual Configuration**: Thunderbird-style collapsible tray allowing users to inspect or override incoming/outgoing hostnames, ports, socket encryption (SSL/TLS vs STARTTLS), and run live "Re-test / Detect" probes.
+* **Account Aliases & Identity Switching**: Full multi-alias support backed by dedicated SQLite schema (`account_aliases`). Compose and reply from any configured alias with automatic reply matching.
+* **Rich In-App Attachment Previewer**: Inspect images, syntax-highlighted code/text, PDF metadata, audio/video codecs/duration, archive trees (ZIP/TAR/GZ), and vCard/iCal data without third-party viewers.
+* **Custom Signatures with Variables**: Per-account rich signatures supporting dynamic placeholders (`{name}`, `{email}`, `{title}`, `{company}`, `{phone}`) with automatic compose injection.
 
 ### 🎨 7-Pillar Customization & Betterbird Parity
 * **Diacritic-Insensitive Quick Filter**: Sub-millisecond search across active folder lists with automatic accent folding (`é, à, ö, ü, ñ, ç, ß` → ASCII) and full `/regex/` pattern evaluation.

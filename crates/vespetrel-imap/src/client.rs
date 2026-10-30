@@ -79,6 +79,10 @@ impl ImapConfig {
 pub enum ImapStream {
     Plain(tokio::net::TcpStream),
     Tls(tokio_rustls::client::TlsStream<tokio::net::TcpStream>),
+    /// In-memory duplex pipe, used to drive the protocol state machine in tests without a
+    /// real server. Never constructed in production paths.
+    #[cfg(test)]
+    Test(tokio::io::DuplexStream),
 }
 
 impl ImapStream {
@@ -87,6 +91,8 @@ impl ImapStream {
         match self {
             Self::Plain(s) => s.read(buf).await,
             Self::Tls(s) => s.read(buf).await,
+            #[cfg(test)]
+            Self::Test(s) => s.read(buf).await,
         }
     }
 
@@ -95,6 +101,8 @@ impl ImapStream {
         match self {
             Self::Plain(s) => s.write_all(src).await,
             Self::Tls(s) => s.write_all(src).await,
+            #[cfg(test)]
+            Self::Test(s) => s.write_all(src).await,
         }
     }
 
@@ -103,6 +111,8 @@ impl ImapStream {
         match self {
             Self::Plain(s) => s.flush().await,
             Self::Tls(s) => s.flush().await,
+            #[cfg(test)]
+            Self::Test(s) => s.flush().await,
         }
     }
 }
@@ -261,6 +271,84 @@ fn extract_first_literal(buf: &[u8]) -> Option<Vec<u8>> {
     None
 }
 
+/// How an XOAUTH2 failure should be handled by the caller.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Xoauth2Failure {
+    /// The credential is bad; the user must re-authorize.
+    NeedsReauth,
+    /// A backend hiccup; a reconnect is likely to succeed.
+    Transient,
+    /// Anything else, including malformed challenges.
+    Rejected,
+}
+
+/// An `AUTHENTICATE XOAUTH2` failure, carrying enough classification for the sync engine to
+/// choose between backoff and re-consent.
+#[derive(Debug, thiserror::Error)]
+pub enum Xoauth2Error {
+    #[error("{0}")]
+    NeedsReauth(String),
+    #[error("{0}")]
+    Transient(String),
+    #[error("{0}")]
+    Rejected(String),
+    #[error("XOAUTH2 transport failure: {0}")]
+    Transport(String),
+}
+
+impl Xoauth2Error {
+    /// Does this failure mean the user must re-authorize?
+    pub fn needs_reauth(&self) -> bool {
+        matches!(self, Self::NeedsReauth(_))
+    }
+
+    /// Is this failure worth retrying without user action?
+    pub fn is_transient(&self) -> bool {
+        matches!(self, Self::Transient(_))
+    }
+}
+
+/// Read the next SASL line that advances an `AUTHENTICATE` exchange: a continuation
+/// request (`+`) or a tagged response.
+///
+/// [`read_imap_line`] waits for a single expected prefix, but the SASL state machine must react
+/// to whichever of the two arrives first.
+async fn read_sasl_line(
+    stream: &mut ImapStream,
+    tag: &str,
+    timeout_secs: u64,
+) -> anyhow::Result<String> {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(timeout_secs);
+    let mut acc: Vec<u8> = Vec::with_capacity(512);
+    let mut buf = vec![0u8; 4096];
+
+    loop {
+        if std::time::Instant::now() >= deadline {
+            anyhow::bail!("timed out after {timeout_secs}s waiting for SASL response");
+        }
+        let n = match tokio::time::timeout(std::time::Duration::from_secs(5), stream.read(&mut buf))
+            .await
+        {
+            Ok(Ok(0)) => anyhow::bail!("IMAP server closed the connection during AUTHENTICATE"),
+            Ok(Ok(n)) => n,
+            Ok(Err(e)) => return Err(e.into()),
+            Err(_) => continue,
+        };
+        acc.extend_from_slice(&buf[..n]);
+
+        let text = String::from_utf8_lossy(&acc).to_string();
+        if let Some(line) = text
+            .lines()
+            .find(|l| l.starts_with('+') || l.starts_with(tag))
+        {
+            return Ok(line.trim_end().to_string());
+        }
+        if acc.len() > ImapConnection::MAX_IMAP_RESPONSE {
+            anyhow::bail!("IMAP response exceeded 16MB limit: potential DoS");
+        }
+    }
+}
+
 /// Read IMAP lines until one starts with `expect` (a continuation `+` or a tag).
 ///
 /// Bounded by `timeout_secs` and treats a closed connection as an error.
@@ -398,42 +486,13 @@ impl ImapConnection {
 
                     // Perform authentication if credentials are provided and propagate error
                     if self.config.use_xoauth2 && !self.config.auth_token.is_empty() {
-                        let auth_cmd = self.cmd_authenticate_xoauth2();
-                        let auth_resp = self.execute_cmd(&auth_cmd).await?;
-                        let auth_tag = self.last_tag.clone();
-                        if let Some(challenge_line) = auth_resp.iter().find(|l| l.starts_with('+'))
-                        {
-                            use base64::Engine;
-                            let b64 = challenge_line.trim_start_matches('+').trim();
-                            let detail = base64::engine::general_purpose::STANDARD
-                                .decode(b64)
-                                .ok()
-                                .and_then(|bytes| String::from_utf8(bytes).ok())
-                                .unwrap_or_else(|| challenge_line.clone());
-                            anyhow::bail!(
-                                "IMAP XOAUTH2 authentication rejected for user {}: {}",
-                                self.config.username,
-                                detail
-                            );
-                        }
-                        // Match the tagged response by prefix. The old check looked for the
-                        // substring `" OK "`, which does not match a bare `A0002 OK` (no
-                        // response text) — a legal and common reply that several servers
-                        // send, which made XOAUTH2 auth fail on them while LOGIN worked.
-                        if !auth_resp
-                            .iter()
-                            .any(|l| l.starts_with(&format!("{auth_tag} OK")))
-                            || auth_resp.iter().any(|l| {
-                                l.starts_with(&format!("{auth_tag} NO"))
-                                    || l.starts_with(&format!("{auth_tag} BAD"))
-                            })
-                        {
-                            anyhow::bail!(
-                                "IMAP XOAUTH2 authentication failed for user {}: token expired or invalid scopes ({})",
-                                self.config.username,
-                                auth_resp.join("; ")
-                            );
-                        }
+                        // Runs the RFC 7628 exchange explicitly. The previous single-shot
+                        // `AUTHENTICATE XOAUTH2 <payload>` mis-read a legitimate continuation
+                        // as rejection and discarded the server's stated reason.
+                        self.authenticate_xoauth2().await.map_err(|e| match &e {
+                            Xoauth2Error::Transport(m) => anyhow::anyhow!("{m}"),
+                            other => anyhow::anyhow!("{other}"),
+                        })?;
                     } else if !self.config.username.is_empty() && !self.config.auth_token.is_empty()
                     {
                         let login_cmd = self.cmd_login();
@@ -796,6 +855,177 @@ impl ImapConnection {
         base64::engine::general_purpose::STANDARD.encode(payload)
     }
 
+    /// Decode a SASL challenge body into the server's JSON error, when it carries one.
+    ///
+    /// Gmail and Outlook answer a failed XOAUTH2 with `+ <base64 JSON>`, e.g.
+    /// `{"status":"4.7.0","schemes":"Bearer","scope":"..."}`. Returning that text is the
+    /// difference between "token expired" and a base64 blob the user cannot act on.
+    fn decode_xoauth2_challenge(challenge_line: &str) -> String {
+        use base64::Engine;
+        let body = challenge_line.trim_start_matches('+').trim();
+        if body.is_empty() {
+            return String::new();
+        }
+        base64::engine::general_purpose::STANDARD
+            .decode(body)
+            .ok()
+            .and_then(|bytes| String::from_utf8(bytes).ok())
+            .filter(|decoded| decoded.contains('{'))
+            .unwrap_or_else(|| body.to_string())
+    }
+
+    /// Classify an XOAUTH2 failure as a credential problem or a transient one.
+    ///
+    /// Exchange Online sometimes accepts the OAuth identity but fails to attach the resulting
+    /// session to the mailbox, answering `"User is authenticated but not connected"`. That is a
+    /// backend hiccup, not evidence the refresh token was revoked: reporting it as an auth
+    /// failure sends the user to re-consent for a problem that a reconnect fixes. Callers use
+    /// this to decide between backoff and re-authentication.
+    pub fn classify_xoauth2_failure(detail: &str) -> Xoauth2Failure {
+        let lower = detail.to_ascii_lowercase();
+
+        // Checked first: Exchange Online's mailbox-attach hiccup is reported with the same
+        // SASL status as a genuine rejection, so the status alone cannot be trusted.
+        if lower.contains("user is authenticated but not connected") {
+            return Xoauth2Failure::Transient;
+        }
+
+        // A `Bearer` scheme challenge is the server asking to re-authenticate over OAuth.
+        if lower.contains("\"schemes\"") && lower.contains("bearer") {
+            return Xoauth2Failure::NeedsReauth;
+        }
+
+        // SASL status 4.7.x is "authentication failure" (RFC 4422 §3.1), which for XOAUTH2
+        // means the access token is no longer usable.
+        if lower.contains("\"4.7.")
+            || lower.contains("invalid_grant")
+            || lower.contains("token expired")
+        {
+            return Xoauth2Failure::NeedsReauth;
+        }
+
+        Xoauth2Failure::Rejected
+    }
+
+    /// Run the RFC 7628 XOAUTH2 exchange to completion.
+    ///
+    /// The previous implementation sent `AUTHENTICATE XOAUTH2 <payload>` in one shot and
+    /// treated *any* `+` continuation as failure. That is wrong in both directions:
+    ///
+    /// * A server that supports the SASL-IR initial response may reply with a bare `+`
+    ///   continuation before its tagged verdict, which was read as a rejection.
+    /// * When the token genuinely is rejected, the server sends `+ <base64 error>` and waits
+    ///   for the client to answer. RFC 7628 §3.2 requires an **empty** response so the server
+    ///   can then emit the tagged `NO` carrying the real reason. Bailing at the `+` threw that
+    ///   reason away, leaving the user with a base64 blob.
+    ///
+    /// This drives the state machine explicitly: send the initial response, then reply `""`
+    /// to any error challenge so the tagged response arrives.
+    pub async fn authenticate_xoauth2(&mut self) -> Result<(), Xoauth2Error> {
+        let (_tag_num, tag) = self.next_tag();
+        self.last_tag = tag.clone();
+
+        // The initial response rides along with the AUTHENTICATE command (SASL-IR). Servers
+        // without SASL-IR ignore the extra argument and challenge instead, which the loop
+        // below handles.
+        let payload = self.build_xoauth2_payload();
+        let command = format!("{tag} AUTHENTICATE XOAUTH2 {payload}\r\n");
+
+        let stream = self
+            .stream
+            .as_mut()
+            .ok_or_else(|| Xoauth2Error::Transport("no stream".into()))?;
+        stream
+            .write_all(command.as_bytes())
+            .await
+            .map_err(|e| Xoauth2Error::Transport(e.to_string()))?;
+        let _ = stream.flush().await;
+
+        // Bound the exchange. Without a deadline a server that never sends its tagged
+        // response parks the sync worker forever.
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(30);
+        let mut sent_initial = true;
+        let mut last_detail = String::new();
+
+        loop {
+            if tokio::time::Instant::now() >= deadline {
+                return Err(Xoauth2Error::Transport(
+                    "XOAUTH2 exchange timed out after 30s".into(),
+                ));
+            }
+
+            // Read until the server says something that advances the exchange: a continuation
+            // request or a tagged response. Untagged status lines are skipped.
+            let line = {
+                let stream = self
+                    .stream
+                    .as_mut()
+                    .ok_or_else(|| Xoauth2Error::Transport("stream closed".into()))?;
+                read_sasl_line(stream, &tag, 30)
+                    .await
+                    .map_err(|e| Xoauth2Error::Transport(e.to_string()))?
+            };
+
+            // Tagged success.
+            if line.starts_with(&format!("{tag} OK")) {
+                debug!("XOAUTH2 authentication succeeded");
+                return Ok(());
+            }
+            // Tagged failure: the server finally told us why.
+            if line.starts_with(&format!("{tag} NO")) || line.starts_with(&format!("{tag} BAD")) {
+                let detail = if last_detail.is_empty() {
+                    line.clone()
+                } else {
+                    format!("{last_detail} ({})", line.trim_start_matches(tag.as_str()))
+                };
+                return Err(Self::xoauth2_error(detail));
+            }
+            // Continuation request.
+            if line.starts_with('+') {
+                if !sent_initial {
+                    // Server without SASL-IR: hand it the credential now.
+                    let response = format!("{payload}\r\n");
+                    let stream = self
+                        .stream
+                        .as_mut()
+                        .ok_or_else(|| Xoauth2Error::Transport("stream closed".into()))?;
+                    stream
+                        .write_all(response.as_bytes())
+                        .await
+                        .map_err(|e| Xoauth2Error::Transport(e.to_string()))?;
+                    let _ = stream.flush().await;
+                    sent_initial = true;
+                    continue;
+                }
+                last_detail = Self::decode_xoauth2_challenge(&line);
+                // RFC 7628 §3.2: answer an error challenge with an empty line so the server
+                // emits the tagged NO. Echoing the credential here instead makes Gmail and
+                // Outlook re-issue error challenges until the socket times out.
+                let stream = self
+                    .stream
+                    .as_mut()
+                    .ok_or_else(|| Xoauth2Error::Transport("stream closed".into()))?;
+                stream
+                    .write_all(b"\r\n")
+                    .await
+                    .map_err(|e| Xoauth2Error::Transport(e.to_string()))?;
+                let _ = stream.flush().await;
+                continue;
+            }
+            // Anything else (untagged status) is not progress; keep reading.
+            debug!(line = %line, "unexpected line during XOAUTH2 exchange");
+        }
+    }
+
+    fn xoauth2_error(detail: String) -> Xoauth2Error {
+        let message = format!("IMAP XOAUTH2 rejected: {detail}");
+        match Self::classify_xoauth2_failure(&detail) {
+            Xoauth2Failure::Transient => Xoauth2Error::Transient(message),
+            Xoauth2Failure::NeedsReauth => Xoauth2Error::NeedsReauth(message),
+            Xoauth2Failure::Rejected => Xoauth2Error::Rejected(message),
+        }
+    }
+
     /// Build IMAP commands as strings (to be sent via codec)
     pub fn cmd_enable_qresync(&self) -> String {
         "ENABLE QRESYNC".into()
@@ -1119,6 +1349,178 @@ pub fn parse_vanished_line(line: &str) -> Vec<u32> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn xoauth2_failure_classification_distinguishes_reauth_from_backend_hiccup() {
+        // Exchange Online accepts the identity but fails to attach the mailbox. Reporting this
+        // as an auth failure sends the user to re-consent for a problem a reconnect fixes.
+        assert_eq!(
+            ImapConnection::classify_xoauth2_failure("User is authenticated but not connected"),
+            Xoauth2Failure::Transient
+        );
+        assert_eq!(
+            ImapConnection::classify_xoauth2_failure(
+                "{\"status\":\"4.7.0\",\"schemes\":\"Bearer\",\"scope\":\"mail\"}"
+            ),
+            Xoauth2Failure::NeedsReauth,
+            "a Bearer challenge means the token needs reissuing"
+        );
+        assert_eq!(
+            ImapConnection::classify_xoauth2_failure("invalid_grant"),
+            Xoauth2Failure::NeedsReauth
+        );
+        assert_eq!(
+            ImapConnection::classify_xoauth2_failure("server internal error"),
+            Xoauth2Failure::Rejected
+        );
+    }
+
+    #[test]
+    fn xoauth2_errors_expose_the_action_the_engine_should_take() {
+        let needs = ImapConnection::xoauth2_error("invalid_grant".into());
+        assert!(needs.needs_reauth());
+        assert!(!needs.is_transient());
+
+        let transient =
+            ImapConnection::xoauth2_error("User is authenticated but not connected".into());
+        assert!(transient.is_transient());
+        assert!(!transient.needs_reauth());
+    }
+
+    #[test]
+    fn xoauth2_challenge_decodes_server_json_and_leaves_plain_text_alone() {
+        use base64::Engine;
+        let json = r#"{"status":"4.7.0","schemes":"Bearer","scope":"https://mail.google.com/"}"#;
+        let encoded = base64::engine::general_purpose::STANDARD.encode(json.as_bytes());
+        assert_eq!(
+            ImapConnection::decode_xoauth2_challenge(&format!("+ {encoded}")),
+            json,
+            "the user must see the server's reason, not a base64 blob"
+        );
+
+        // An empty continuation carries no detail.
+        assert_eq!(ImapConnection::decode_xoauth2_challenge("+ "), "");
+        // Undecodable bodies are passed through rather than swallowed.
+        assert_eq!(
+            ImapConnection::decode_xoauth2_challenge("+ not-base64!!"),
+            "not-base64!!"
+        );
+    }
+
+    #[test]
+    fn xoauth2_payload_is_rfc7628_shaped() {
+        let conn = ImapConnection::new(
+            ImapConfig::new("imap.gmail.com", 993, "user@gmail.com", "ya29.token").with_xoauth2(),
+        );
+        use base64::Engine;
+        let decoded = base64::engine::general_purpose::STANDARD
+            .decode(conn.build_xoauth2_payload())
+            .unwrap();
+        assert_eq!(
+            String::from_utf8(decoded).unwrap(),
+            "user=user@gmail.com\x01auth=Bearer ya29.token\x01\x01",
+            "the payload must end with two NULs or the server rejects the exchange"
+        );
+        // The credential must never contain a literal newline, which would split the command.
+        assert!(!conn.build_xoauth2_payload().contains('\n'));
+    }
+
+    #[tokio::test]
+    async fn xoauth2_exchange_succeeds_after_a_continuation_request() {
+        // A server supporting SASL-IR may still emit a bare `+` before its verdict. The old
+        // code read any `+` as rejection and failed here.
+        let (client, server) = tokio::io::duplex(4096);
+        let mut server = tokio::io::BufReader::new(server);
+        let mut conn = ImapConnection::new(
+            ImapConfig::new("imap.gmail.com", 993, "user@gmail.com", "ya29.token").with_xoauth2(),
+        );
+        // Drive the state machine against a scripted server.
+        let server_task = tokio::spawn(async move {
+            use tokio::io::{AsyncBufReadExt as _, AsyncWriteExt as _};
+            let mut request = String::new();
+            server.read_line(&mut request).await.unwrap();
+            // Challenge once, then accept.
+            server.write_all(b"+ \r\n").await.unwrap();
+            let mut ack = String::new();
+            server.read_line(&mut ack).await.unwrap();
+            server
+                .write_all(b"A0001 OK Authenticated\r\n")
+                .await
+                .unwrap();
+            request
+        });
+
+        // Reuse the connection's own I/O by hand-driving the stream.
+        conn.stream = Some(ImapStream::Test(client));
+        // Run the exchange, then assert what the server saw.
+        let result = conn.authenticate_xoauth2().await;
+        let seen = server_task.await.unwrap();
+        assert!(result.is_ok(), "exchange failed: {result:?}");
+        assert!(
+            seen.contains("AUTHENTICATE XOAUTH2"),
+            "server never received the AUTHENTICATE: {seen:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn xoauth2_rejection_answers_error_challenge_with_an_empty_line() {
+        // RFC 7628 §3.2: the client must reply empty so the server can emit the tagged NO.
+        // Echoing the credential again makes Gmail/Outlook re-challenge until timeout.
+        let (client, server) = tokio::io::duplex(4096);
+        let mut server = tokio::io::BufReader::new(server);
+        let mut conn = ImapConnection::new(
+            ImapConfig::new("imap.gmail.com", 993, "user@gmail.com", "expired").with_xoauth2(),
+        );
+
+        let credential_echoed = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let flag = credential_echoed.clone();
+        let server_task = tokio::spawn(async move {
+            use std::sync::atomic::Ordering;
+            use tokio::io::{AsyncBufReadExt as _, AsyncWriteExt as _};
+            let mut request = String::new();
+            server.read_line(&mut request).await.unwrap();
+            // Error challenge carrying base64 JSON.
+            server
+                .write_all(b"+ eyJzdGF0dXMiOiI0LjcuMCJ9\r\n")
+                .await
+                .unwrap();
+            let mut reply = String::new();
+            server.read_line(&mut reply).await.unwrap();
+            // A correct client sends an empty line, not the credential again.
+            if reply.contains("auth=Bearer") {
+                flag.store(true, Ordering::SeqCst);
+            }
+            server
+                .write_all(b"A0001 NO Invalid credentials (Failure)\r\n")
+                .await
+                .unwrap();
+            reply
+        });
+
+        conn.stream = Some(ImapStream::Test(client));
+        let result = conn.authenticate_xoauth2().await;
+        let reply = server_task.await.unwrap();
+
+        let err = result.expect_err("an expired token must fail");
+        assert!(err.needs_reauth(), "expected NeedsReauth, got {err}");
+        assert!(
+            !credential_echoed.load(std::sync::atomic::Ordering::SeqCst),
+            "client echoed the credential after an error challenge: {reply:?}"
+        );
+        assert!(
+            reply.trim().is_empty(),
+            "expected an empty challenge response, got {reply:?}"
+        );
+    }
+
+    #[test]
+    fn xoauth2_marks_stream_loss_as_transport_not_auth() {
+        // A dropped socket must not be reported as "your token expired", which would send the
+        // user through an unnecessary re-consent.
+        let err = Xoauth2Error::Transport("connection reset".into());
+        assert!(!err.needs_reauth());
+        assert!(!err.is_transient());
+    }
 
     #[test]
     fn xoauth2_payload() {

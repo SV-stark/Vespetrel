@@ -8,7 +8,7 @@ pub mod gpui_app {
     use crate::views::{
         calendar::CalendarView,
         contacts::ContactsView,
-        login_wizard::{AuthModeChoice, LoginWizardState, WizardStep},
+        login_wizard::{AuthModeChoice, AutodiscoverStatus, LoginWizardState, WizardStep},
         message_list::{ListFilter, MessageRowDensity},
         message_viewer::{AttachmentInfo, AuthState, BodyKind, MessageViewer, SecurityStatus},
         navigation::NavigationTree,
@@ -365,7 +365,7 @@ pub mod gpui_app {
             let in_host_val = if wizard.incoming_host.is_empty() {
                 match wizard.provider_type {
                     ProviderType::Gmail => "imap.gmail.com".to_string(),
-                    ProviderType::Graph => "graph.microsoft.com".to_string(),
+                    ProviderType::Graph => "outlook.office365.com".to_string(),
                     ProviderType::Jmap => "api.fastmail.com".to_string(),
                     ProviderType::Imap => "".to_string(),
                 }
@@ -376,7 +376,7 @@ pub mod gpui_app {
             let out_host_val = if wizard.outgoing_host.is_empty() {
                 match wizard.provider_type {
                     ProviderType::Gmail => "smtp.gmail.com".to_string(),
-                    ProviderType::Graph => "graph.microsoft.com".to_string(),
+                    ProviderType::Graph => "smtp.office365.com".to_string(),
                     ProviderType::Jmap => "api.fastmail.com".to_string(),
                     ProviderType::Imap => "".to_string(),
                 }
@@ -384,19 +384,10 @@ pub mod gpui_app {
                 wizard.outgoing_host.clone()
             };
             let out_port_val = wizard.outgoing_port.to_string();
-            let client_id_val =
-                wizard
-                    .client_id
-                    .clone()
-                    .unwrap_or_else(|| match wizard.provider_type {
-                        ProviderType::Gmail => {
-                            std::env::var("VESPETREL_GOOGLE_CLIENT_ID").unwrap_or_default()
-                        }
-                        ProviderType::Graph => {
-                            std::env::var("VESPETREL_MICROSOFT_CLIENT_ID").unwrap_or_default()
-                        }
-                        _ => String::new(),
-                    });
+            let client_id_val = wizard
+                .client_id
+                .clone()
+                .unwrap_or_else(|| wizard.effective_client_id());
 
             Self {
                 email: make_text_input(window, cx, "user@example.com", &email_val, false),
@@ -498,6 +489,13 @@ pub mod gpui_app {
         Compose,
         CommandPalette,
         AddAccount,
+        AttachmentPreview {
+            filename: String,
+            mime_type: String,
+            size_bytes: usize,
+            blob_path: Option<String>,
+            data: Option<Vec<u8>>,
+        },
     }
 
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -596,6 +594,11 @@ pub mod gpui_app {
         pub compose_attach_path: String,
         pub compose_reply_to_id: Option<String>,
         pub compose_draft_id: Option<String>,
+        // Alias and Signature State
+        pub aliases: Vec<vespetrel_core::AccountAlias>,
+        pub selected_alias: Option<vespetrel_core::AccountAlias>,
+        pub signatures: Vec<vespetrel_core::Signature>,
+        pub selected_signature: Option<vespetrel_core::Signature>,
         // Command Palette
         pub palette_query: String,
         pub command_palette: crate::command_palette::CommandPalette,
@@ -758,6 +761,73 @@ pub mod gpui_app {
                                 let settings = vespetrel_storage::repo::get_user_settings(c)
                                     .unwrap_or_default();
 
+                                let mut all_aliases = Vec::new();
+                                for acc in &accounts {
+                                    if let Ok(aliases) =
+                                        vespetrel_storage::repo::list_aliases_for_account(
+                                            c, &acc.id,
+                                        )
+                                    {
+                                        all_aliases.extend(aliases);
+                                    }
+                                }
+                                if all_aliases.is_empty() {
+                                    for acc in &accounts {
+                                        let name = if acc.name.is_empty() {
+                                            None
+                                        } else {
+                                            Some(acc.name.clone())
+                                        };
+                                        let alias = vespetrel_core::AccountAlias::new(
+                                            &acc.id, &acc.email, name,
+                                        )
+                                        .with_default(true);
+                                        let _ = vespetrel_storage::repo::upsert_alias(c, &alias);
+                                        all_aliases.push(alias);
+                                    }
+                                }
+
+                                let mut all_sigs = Vec::new();
+                                for acc in &accounts {
+                                    if let Ok(sigs) =
+                                        vespetrel_storage::repo::list_signatures_for_account(
+                                            c, &acc.id,
+                                        )
+                                    {
+                                        all_sigs.extend(sigs);
+                                    }
+                                }
+                                if all_sigs.is_empty() {
+                                    for acc in &accounts {
+                                        let profile = vespetrel_core::SignatureProfile {
+                                            full_name: if acc.name.is_empty() {
+                                                "Vespetrel User".into()
+                                            } else {
+                                                acc.name.clone()
+                                            },
+                                            job_title: Some("Rust Mail Client".into()),
+                                            company: Some("Vespetrel".into()),
+                                            phone: None,
+                                            email: acc.email.clone(),
+                                            website: Some("https://vespetrel.org".into()),
+                                            avatar_url: None,
+                                            pronouns: None,
+                                            disclaimer: None,
+                                            social_links: Vec::new(),
+                                        };
+                                        let sig = vespetrel_core::Signature::from_template(
+                                            &acc.id,
+                                            "Modern Signature",
+                                            &profile,
+                                            vespetrel_core::SignatureTemplate::Modern,
+                                            true,
+                                            true,
+                                        );
+                                        let _ = vespetrel_storage::repo::upsert_signature(c, &sig);
+                                        all_sigs.push(sig);
+                                    }
+                                }
+
                                 (
                                     accounts,
                                     all_folders,
@@ -766,11 +836,13 @@ pub mod gpui_app {
                                     cal_events,
                                     task_items,
                                     settings,
+                                    all_aliases,
+                                    all_sigs,
                                 )
                             })
                             .await;
 
-                        if let Ok((accs, flds, msgs, cnts, cals, tsks, stgs)) = res {
+                        if let Ok((accs, flds, msgs, cnts, cals, tsks, stgs, aliases, sigs)) = res {
                             let _ = this.update(cx, |view, cx| {
                                 view.accounts = accs;
                                 view.folders = flds;
@@ -783,6 +855,20 @@ pub mod gpui_app {
                                 view.calendar_events = cals;
                                 view.tasks = tsks;
                                 view.settings = stgs;
+                                view.aliases = aliases;
+                                view.selected_alias = view
+                                    .aliases
+                                    .iter()
+                                    .find(|a| a.is_default)
+                                    .cloned()
+                                    .or_else(|| view.aliases.first().cloned());
+                                view.signatures = sigs;
+                                view.selected_signature = view
+                                    .signatures
+                                    .iter()
+                                    .find(|s| s.is_default)
+                                    .cloned()
+                                    .or_else(|| view.signatures.first().cloned());
                                 cx.notify();
                             });
                         }
@@ -847,6 +933,10 @@ pub mod gpui_app {
                 compose_attach_path: String::new(),
                 compose_reply_to_id: None,
                 compose_draft_id: None,
+                aliases: Vec::new(),
+                selected_alias: None,
+                signatures: Vec::new(),
+                selected_signature: None,
                 palette_query: String::new(),
                 command_palette: crate::command_palette::CommandPalette::new(),
                 sync_sender: sync_tx,
@@ -2080,6 +2170,85 @@ pub mod gpui_app {
             .detach();
         }
 
+        pub fn open_attachment_preview(
+            &mut self,
+            filename: String,
+            mime_type: String,
+            size_bytes: usize,
+            blob_path: Option<String>,
+            data: Option<Vec<u8>>,
+            cx: &mut Context<Self>,
+        ) {
+            self.active_modal = ActiveModal::AttachmentPreview {
+                filename,
+                mime_type,
+                size_bytes,
+                blob_path,
+                data,
+            };
+            cx.notify();
+        }
+
+        pub fn select_alias(
+            &mut self,
+            alias: Option<vespetrel_core::AccountAlias>,
+            cx: &mut Context<Self>,
+        ) {
+            self.selected_alias = alias;
+            if let Some(ref al) = self.selected_alias
+                && let Some(ref sig_id) = al.signature_id
+                && let Some(sig) = self.signatures.iter().find(|s| &s.id == sig_id).cloned()
+            {
+                self.selected_signature = Some(sig);
+            }
+            cx.notify();
+        }
+
+        pub fn cycle_signature(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+            if self.signatures.is_empty() {
+                return;
+            }
+            let next_sig = match &self.selected_signature {
+                None => self.signatures.first().cloned(),
+                Some(curr) => {
+                    if let Some(idx) = self.signatures.iter().position(|s| s.id == curr.id) {
+                        if idx + 1 < self.signatures.len() {
+                            Some(self.signatures[idx + 1].clone())
+                        } else {
+                            None
+                        }
+                    } else {
+                        None
+                    }
+                }
+            };
+            self.selected_signature = next_sig.clone();
+
+            let mut base_body = self.compose_body.clone();
+            if let Some(idx) = base_body.find("\n-- \n") {
+                base_body.truncate(idx);
+            } else if let Some(idx) = base_body.find("\n\n-- \n") {
+                base_body.truncate(idx);
+            }
+
+            if let Some(sig) = next_sig {
+                if let Some(pt) = &sig.plain_text {
+                    self.compose_body = format!("{base_body}\n\n-- \n{pt}");
+                } else {
+                    self.compose_body = base_body;
+                }
+            } else {
+                self.compose_body = base_body;
+            }
+
+            if let Some(inputs) = &self.compose_inputs {
+                inputs.body.update(cx, |inp, cx| {
+                    inp.set_value(self.compose_body.clone(), window, cx);
+                });
+            }
+            cx.notify();
+        }
+
         pub fn dismiss_toast(&mut self, id: &str, cx: &mut Context<Self>) {
             self.toasts.retain(|t| t.id != id);
             cx.notify();
@@ -2332,18 +2501,34 @@ pub mod gpui_app {
                 .detach();
             }
 
-            let from_email = self
-                .accounts
-                .first()
-                .map(|a| a.email.clone())
-                .unwrap_or_else(|| "me@localhost".into());
-            let from_name = self.accounts.first().and_then(|a| {
-                if a.name.is_empty() {
-                    None
-                } else {
-                    Some(a.name.clone())
-                }
-            });
+            let (from_email, from_name) = if let Some(alias) = &self.selected_alias {
+                (
+                    alias.email.clone(),
+                    alias.name.clone().or_else(|| {
+                        self.accounts.first().and_then(|a| {
+                            if a.name.is_empty() {
+                                None
+                            } else {
+                                Some(a.name.clone())
+                            }
+                        })
+                    }),
+                )
+            } else {
+                (
+                    self.accounts
+                        .first()
+                        .map(|a| a.email.clone())
+                        .unwrap_or_else(|| "me@localhost".into()),
+                    self.accounts.first().and_then(|a| {
+                        if a.name.is_empty() {
+                            None
+                        } else {
+                            Some(a.name.clone())
+                        }
+                    }),
+                )
+            };
 
             // Real Markdown, when Markdown is on.
             //
@@ -3031,8 +3216,39 @@ pub mod gpui_app {
             self.compose_state.is_markdown_mode = false;
             self.compose_to.clear();
             self.compose_subject.clear();
-            self.compose_body.clear();
             self.compose_attachments.clear();
+
+            // Set default alias if available
+            if self.selected_alias.is_none() {
+                self.selected_alias = self
+                    .aliases
+                    .iter()
+                    .find(|a| a.is_default)
+                    .cloned()
+                    .or_else(|| self.aliases.first().cloned());
+            }
+
+            // Link signature for selected alias or default account signature
+            let sig_opt = self
+                .selected_alias
+                .as_ref()
+                .and_then(|a| a.signature_id.as_ref())
+                .and_then(|sig_id| self.signatures.iter().find(|s| &s.id == sig_id).cloned())
+                .or_else(|| self.signatures.iter().find(|s| s.is_default).cloned())
+                .or_else(|| self.signatures.first().cloned());
+
+            if let Some(sig) = sig_opt {
+                self.selected_signature = Some(sig.clone());
+                self.compose_state.apply_signature(&sig);
+                if let Some(pt) = &sig.plain_text {
+                    self.compose_body = format!("\n\n-- \n{pt}");
+                } else {
+                    self.compose_body.clear();
+                }
+            } else {
+                self.compose_body.clear();
+            }
+
             self.active_modal = ActiveModal::Compose;
             cx.notify();
         }
@@ -3057,6 +3273,45 @@ pub mod gpui_app {
             self.compose_body = quote.trim_start_matches('\n').to_string();
             self.compose_state.is_markdown_mode = false;
             self.compose_attachments.clear();
+
+            // Auto-detect alias if message was sent to one of the user's aliases
+            if let Some(matching_alias) = self.aliases.iter().find(|a| {
+                self.message_viewer
+                    .to
+                    .iter()
+                    .chain(self.message_viewer.cc.iter())
+                    .any(|addr| addr.email.eq_ignore_ascii_case(&a.email))
+            }) {
+                self.selected_alias = Some(matching_alias.clone());
+            } else if self.selected_alias.is_none() {
+                self.selected_alias = self
+                    .aliases
+                    .iter()
+                    .find(|a| a.is_default)
+                    .cloned()
+                    .or_else(|| self.aliases.first().cloned());
+            }
+
+            // Look up signature for replies
+            let sig_opt = self
+                .selected_alias
+                .as_ref()
+                .and_then(|a| a.signature_id.as_ref())
+                .and_then(|sig_id| self.signatures.iter().find(|s| &s.id == sig_id).cloned())
+                .or_else(|| {
+                    self.signatures
+                        .iter()
+                        .find(|s| s.is_default && s.include_in_replies)
+                        .cloned()
+                });
+
+            if let Some(sig) = sig_opt {
+                self.selected_signature = Some(sig.clone());
+                if let Some(pt) = &sig.plain_text {
+                    self.compose_body = format!("\n\n-- \n{pt}\n\n{}", self.compose_body);
+                }
+            }
+
             self.active_modal = ActiveModal::Compose;
             cx.notify();
 
@@ -4640,6 +4895,29 @@ pub mod gpui_app {
                                                 .child(div().child(fname.clone()))
                                                 .child(div().text_color(cx.theme().muted_foreground).child(format!("({sz_str})")))
                                                 .child(
+                                                    Button::new(ElementId::Name(format!("prev-att-{}", fname).into()))
+                                                        .ghost()
+                                                        .small()
+                                                        .icon(IconName::FileText)
+                                                        .label("Preview")
+                                                        .on_click(cx.listener({
+                                                            let att_name = fname.clone();
+                                                            let b_path = att.blob_path.clone();
+                                                            let mime = att.content_type.clone();
+                                                            let sz = att.size_bytes;
+                                                            move |this, _, _, cx| {
+                                                                this.open_attachment_preview(
+                                                                    att_name.clone(),
+                                                                    mime.clone(),
+                                                                    sz,
+                                                                    Some(b_path.clone()),
+                                                                    None,
+                                                                    cx,
+                                                                );
+                                                            }
+                                                        })),
+                                                )
+                                                .child(
                                                     Button::new(ElementId::Name(format!("save-att-{}", fname).into()))
                                                         .ghost()
                                                         .small()
@@ -5399,35 +5677,149 @@ pub mod gpui_app {
                 (vespetrel_core::QuoteStyle::TopPost, "Above quote"),
                 (vespetrel_core::QuoteStyle::BottomPost, "Below quote"),
             ];
-            div().flex().flex_col().child(self.settings_section(
-                "Sending",
-                IconName::ArrowRight,
-                cx,
-                vec![
-                            self.settings_choice_row(
-                                    cx,
-                                    "Undo send",
-                                "How long a sent message can be recalled",
-                                &undo_delays,
-                                self.settings.undo_send_seconds,
-                                "settings-undo-choice",
-                                move |this, value, cx| {
-                                    this.set_settings_undo_seconds(value, cx);
-                                },
-                            )
-                            .into_any_element(),
-                            self.settings_choice_row(
-                                    cx,
-                                    "Reply style",
-                                "Where the quoted original sits in a reply",
-                                &quotes,
-                                self.settings.reply_quote_style,
-                                "settings-quote-choice",
-                                move |_this, _value, _cx| {},
-                            )
-                            .into_any_element(),
-                        ],
-            ))
+
+            let alias_elements: Vec<gpui_kit::gpui::AnyElement> = self
+                .aliases
+                .iter()
+                .map(|alias| {
+                    div()
+                        .flex()
+                        .flex_row()
+                        .items_center()
+                        .justify_between()
+                        .py(px(6.0))
+                        .px(px(8.0))
+                        .rounded_md()
+                        .bg(cx.theme().input)
+                        .child(
+                            div()
+                                .flex()
+                                .flex_col()
+                                .child(
+                                    div()
+                                        .text_xs()
+                                        .font_weight(FontWeight::SEMIBOLD)
+                                        .text_color(cx.theme().foreground)
+                                        .child(format!(
+                                            "{} <{}>",
+                                            alias.name.as_deref().unwrap_or("No Name"),
+                                            alias.email
+                                        )),
+                                )
+                                .child(
+                                    div()
+                                        .text_xs()
+                                        .text_color(cx.theme().muted_foreground)
+                                        .child(format!(
+                                            "Reply-To: {} · Default: {}",
+                                            alias.reply_to.as_deref().unwrap_or("Same"),
+                                            if alias.is_default { "Yes" } else { "No" }
+                                        )),
+                                ),
+                        )
+                        .into_any_element()
+                })
+                .collect();
+
+            let sig_elements: Vec<gpui_kit::gpui::AnyElement> = self
+                .signatures
+                .iter()
+                .map(|sig| {
+                    div()
+                        .flex()
+                        .flex_row()
+                        .items_center()
+                        .justify_between()
+                        .py(px(6.0))
+                        .px(px(8.0))
+                        .rounded_md()
+                        .bg(cx.theme().input)
+                        .child(
+                            div()
+                                .flex()
+                                .flex_col()
+                                .child(
+                                    div()
+                                        .text_xs()
+                                        .font_weight(FontWeight::SEMIBOLD)
+                                        .text_color(cx.theme().foreground)
+                                        .child(sig.name.clone()),
+                                )
+                                .child(
+                                    div()
+                                        .text_xs()
+                                        .text_color(cx.theme().muted_foreground)
+                                        .child(format!(
+                                            "Default: {} · Include in replies: {}",
+                                            if sig.is_default { "Yes" } else { "No" },
+                                            if sig.include_in_replies { "Yes" } else { "No" }
+                                        )),
+                                ),
+                        )
+                        .into_any_element()
+                })
+                .collect();
+
+            div()
+                .flex()
+                .flex_col()
+                .child(self.settings_section(
+                    "Sending",
+                    IconName::ArrowRight,
+                    cx,
+                    vec![
+                        self.settings_choice_row(
+                            cx,
+                            "Undo send",
+                            "How long a sent message can be recalled",
+                            &undo_delays,
+                            self.settings.undo_send_seconds,
+                            "settings-undo-choice",
+                            move |this, value, cx| {
+                                this.set_settings_undo_seconds(value, cx);
+                            },
+                        )
+                        .into_any_element(),
+                        self.settings_choice_row(
+                            cx,
+                            "Reply style",
+                            "Where the quoted original sits in a reply",
+                            &quotes,
+                            self.settings.reply_quote_style,
+                            "settings-quote-choice",
+                            move |_this, _value, _cx| {},
+                        )
+                        .into_any_element(),
+                    ],
+                ))
+                .child(self.settings_section(
+                    "Sender Identities & Aliases",
+                    IconName::User,
+                    cx,
+                    if alias_elements.is_empty() {
+                        vec![div()
+                            .text_xs()
+                            .text_color(cx.theme().muted_foreground)
+                            .child("No alternate identities configured. Default account identity will be used.")
+                            .into_any_element()]
+                    } else {
+                        alias_elements
+                    },
+                ))
+                .child(self.settings_section(
+                    "Custom Signatures",
+                    IconName::FileText,
+                    cx,
+                    if sig_elements.is_empty() {
+                        vec![div()
+                            .text_xs()
+                            .text_color(cx.theme().muted_foreground)
+                            .child("No signatures configured. Signatures will be generated automatically.")
+                            .into_any_element()]
+                    } else {
+                        sig_elements
+                    },
+                ))
         }
 
         /// The shortcut table, built from the same keymap the window binds.
@@ -5672,7 +6064,7 @@ pub mod gpui_app {
             window: &mut Window,
             cx: &mut Context<Self>,
         ) -> impl IntoElement {
-            match self.active_modal {
+            match &self.active_modal {
                 ActiveModal::None => div().into_any_element(),
                 ActiveModal::Compose => self.render_compose_modal(window, cx).into_any_element(),
                 ActiveModal::CommandPalette => {
@@ -5681,7 +6073,266 @@ pub mod gpui_app {
                 ActiveModal::AddAccount => {
                     self.render_add_account_modal(window, cx).into_any_element()
                 }
+                ActiveModal::AttachmentPreview {
+                    filename,
+                    mime_type,
+                    size_bytes,
+                    blob_path,
+                    data,
+                } => self
+                    .render_attachment_preview_modal(
+                        window,
+                        cx,
+                        filename,
+                        mime_type,
+                        *size_bytes,
+                        blob_path.as_deref(),
+                        data.as_deref(),
+                    )
+                    .into_any_element(),
             }
+        }
+
+        #[allow(clippy::too_many_arguments)]
+        fn render_attachment_preview_modal(
+            &self,
+            window: &mut Window,
+            cx: &mut Context<Self>,
+            filename: &str,
+            mime_type: &str,
+            size_bytes: usize,
+            blob_path: Option<&str>,
+            data: Option<&[u8]>,
+        ) -> impl IntoElement {
+            let file_data = if let Some(d) = data {
+                d.to_vec()
+            } else if let Some(bp) = blob_path {
+                std::fs::read(bp).unwrap_or_default()
+            } else {
+                Vec::new()
+            };
+
+            let preview =
+                vespetrel_render::preview::generate_preview(filename, mime_type, &file_data);
+
+            let preview_icon = match &preview.kind {
+                vespetrel_render::preview::AttachmentKind::Image { .. } => IconName::Frame,
+                vespetrel_render::preview::AttachmentKind::Text { .. } => IconName::FileText,
+                vespetrel_render::preview::AttachmentKind::Pdf { .. } => IconName::FileText,
+                vespetrel_render::preview::AttachmentKind::Audio { .. } => IconName::Bell,
+                vespetrel_render::preview::AttachmentKind::Video { .. } => IconName::Frame,
+                vespetrel_render::preview::AttachmentKind::Archive { .. } => IconName::HardDrive,
+                vespetrel_render::preview::AttachmentKind::Binary => IconName::Cpu,
+            };
+
+            let fn_clone = filename.to_string();
+            let bp_clone = blob_path.map(|s| s.to_string());
+
+            Sheet::new(window, cx).child(
+                div()
+                    .id("modal-attachment-preview-overlay")
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .size_full()
+                    .bg(gpui_kit::gpui::transparent_black())
+                    .child(
+                        div()
+                            .id("modal-attachment-preview-box")
+                            .flex()
+                            .flex_col()
+                            .w(px(720.0))
+                            .max_h(px(580.0))
+                            .rounded_xl()
+                            .bg(cx.theme().input)
+                            .border_1()
+                            .border_color(cx.theme().border)
+                            .p(px(20.0))
+                            .gap(px(12.0))
+                            // Modal Header
+                            .child(
+                                div()
+                                    .flex()
+                                    .flex_row()
+                                    .items_center()
+                                    .justify_between()
+                                    .child(
+                                        div()
+                                            .flex()
+                                            .flex_row()
+                                            .items_center()
+                                            .gap(px(10.0))
+                                            .child(Icon::new(preview_icon).text_color(cx.theme().primary))
+                                            .child(
+                                                div()
+                                                    .flex()
+                                                    .flex_col()
+                                                    .child(
+                                                        div()
+                                                            .text_base()
+                                                            .font_weight(FontWeight::BOLD)
+                                                            .text_color(cx.theme().foreground)
+                                                            .child(filename.to_string()),
+                                                    )
+                                                    .child(
+                                                        div()
+                                                            .text_xs()
+                                                            .text_color(cx.theme().muted_foreground)
+                                                            .child(format!(
+                                                                "{} · {}",
+                                                                mime_type,
+                                                                preview.formatted_size
+                                                            )),
+                                                    ),
+                                            ),
+                                    )
+                                    .child(
+                                        Button::new("btn-close-attachment-preview")
+                                            .icon(IconName::Close)
+                                            .ghost()
+                                            .xsmall()
+                                            .on_click(cx.listener(|this, _, _, cx| {
+                                                this.active_modal = ActiveModal::None;
+                                                cx.notify();
+                                            })),
+                                    ),
+                            )
+                            // Summary badge
+                            .child(
+                                div()
+                                    .flex()
+                                    .flex_row()
+                                    .items_center()
+                                    .justify_between()
+                                    .px(px(10.0))
+                                    .py(px(6.0))
+                                    .rounded_md()
+                                    .bg(cx.theme().muted)
+                                    .child(
+                                        div()
+                                            .text_xs()
+                                            .font_weight(FontWeight::SEMIBOLD)
+                                            .text_color(cx.theme().foreground)
+                                            .child(preview.summary.clone()),
+                                    )
+                                    .child(
+                                        div()
+                                            .text_xs()
+                                            .text_color(cx.theme().muted_foreground)
+                                            .child(if let Some(lines) = preview.line_count {
+                                                format!("{lines} lines")
+                                            } else {
+                                                format!("{} bytes", size_bytes)
+                                            }),
+                                    ),
+                            )
+                            // Content Viewer
+                            .child(
+                                div()
+                                    .flex()
+                                    .flex_col()
+                                    .flex_1()
+                                    .rounded_md()
+                                    .bg(cx.theme().popover)
+                                    .border_1()
+                                    .border_color(cx.theme().border)
+                                    .p(px(12.0))
+                                    .child(
+                                        if let Some(ref snippet) = preview.text_snippet {
+                                            div()
+                                                .id("preview-content-snippet")
+                                                .overflow_y_scroll()
+                                                .max_h(px(320.0))
+                                                .text_xs()
+                                                .font_weight(FontWeight::NORMAL)
+                                                .text_color(cx.theme().foreground)
+                                                .child(snippet.clone())
+                                                .into_any_element()
+                                        } else if matches!(
+                                            preview.kind,
+                                            vespetrel_render::preview::AttachmentKind::Image { .. }
+                                        ) {
+                                            div()
+                                                .flex()
+                                                .flex_col()
+                                                .items_center()
+                                                .justify_center()
+                                                .h(px(220.0))
+                                                .gap(px(10.0))
+                                                .child(Icon::new(IconName::Frame).text_color(cx.theme().primary))
+                                                .child(
+                                                    div()
+                                                        .text_sm()
+                                                        .font_weight(FontWeight::SEMIBOLD)
+                                                        .text_color(cx.theme().foreground)
+                                                        .child(format!("Image Preview: {filename}")),
+                                                )
+                                                .child(
+                                                    div()
+                                                        .text_xs()
+                                                        .text_color(cx.theme().muted_foreground)
+                                                        .child(format!("Format: {mime_type}")),
+                                                )
+                                                .into_any_element()
+                                        } else if let Some(ref hex) = preview.hex_dump {
+                                            div()
+                                                .id("preview-content-hex")
+                                                .overflow_y_scroll()
+                                                .max_h(px(320.0))
+                                                .text_xs()
+                                                .text_color(cx.theme().muted_foreground)
+                                                .child(hex.clone())
+                                                .into_any_element()
+                                        } else {
+                                            div()
+                                                .flex()
+                                                .flex_col()
+                                                .items_center()
+                                                .justify_center()
+                                                .h(px(200.0))
+                                                .gap(px(8.0))
+                                                .child(Icon::new(IconName::File).text_color(cx.theme().muted_foreground))
+                                                .child(
+                                                    div()
+                                                        .text_sm()
+                                                        .text_color(cx.theme().foreground)
+                                                        .child("No inline preview available for this format"),
+                                                )
+                                                .into_any_element()
+                                        },
+                                    ),
+                            )
+                            // Action Footer
+                            .child(
+                                div()
+                                    .flex()
+                                    .flex_row()
+                                    .items_center()
+                                    .justify_between()
+                                    .child(
+                                        Button::new("btn-save-attachment-preview")
+                                            .icon(IconName::HardDrive)
+                                            .label("Save to Downloads")
+                                            .on_click(cx.listener(move |this, _, _, cx| {
+                                                this.save_attachment_to_downloads(
+                                                    &fn_clone,
+                                                    bp_clone.as_deref(),
+                                                    cx,
+                                                );
+                                            })),
+                                    )
+                                    .child(
+                                        Button::new("btn-done-attachment-preview")
+                                            .label("Close")
+                                            .primary()
+                                            .on_click(cx.listener(|this, _, _, cx| {
+                                                this.active_modal = ActiveModal::None;
+                                                cx.notify();
+                                            })),
+                                    ),
+                            ),
+                    ),
+            )
         }
 
         fn render_compose_modal(
@@ -5705,11 +6356,18 @@ pub mod gpui_app {
                 self.compose_body.clone()
             };
 
-            let from_label = self
-                .accounts
-                .first()
-                .map(|a| a.email.clone())
-                .unwrap_or_else(|| "no account configured".to_string());
+            let from_label = if let Some(alias) = &self.selected_alias {
+                if let Some(ref name) = alias.name {
+                    format!("{name} <{}>", alias.email)
+                } else {
+                    alias.email.clone()
+                }
+            } else {
+                self.accounts
+                    .first()
+                    .map(|a| a.email.clone())
+                    .unwrap_or_else(|| "no account configured".to_string())
+            };
             let composer_status = format!(
                 "From {from_label} · {} · no encryption",
                 if self.compose_state.is_markdown_mode {
@@ -5796,6 +6454,62 @@ pub mod gpui_app {
                                                 cx.notify();
                                             })),
                                     ),
+                            )
+                            // Sender "From:" Identity Row with Alias Switching
+                            .child(
+                                div()
+                                    .flex()
+                                    .flex_row()
+                                    .items_center()
+                                    .justify_between()
+                                    .p(px(6.0))
+                                    .rounded_md()
+                                    .bg(cx.theme().muted)
+                                    .child(
+                                        div()
+                                            .flex()
+                                            .flex_row()
+                                            .items_center()
+                                            .gap(px(8.0))
+                                            .child(
+                                                div()
+                                                    .text_xs()
+                                                    .font_weight(FontWeight::SEMIBOLD)
+                                                    .text_color(cx.theme().muted_foreground)
+                                                    .child("From:"),
+                                            )
+                                            .child(
+                                                div()
+                                                    .text_xs()
+                                                    .font_weight(FontWeight::BOLD)
+                                                    .text_color(cx.theme().foreground)
+                                                    .child(from_label.clone()),
+                                            ),
+                                    )
+                                    .child(if !self.aliases.is_empty() {
+                                        div()
+                                            .flex()
+                                            .flex_row()
+                                            .gap(px(4.0))
+                                            .children(self.aliases.iter().enumerate().map(|(idx, alias)| {
+                                                let is_current = self
+                                                    .selected_alias
+                                                    .as_ref()
+                                                    .map(|a| a.id == alias.id)
+                                                    .unwrap_or(false);
+                                                let alias_clone = alias.clone();
+                                                Button::new(ElementId::Name(format!("select-alias-{}", idx).into()))
+                                                    .ghost()
+                                                    .xsmall()
+                                                    .label(alias.name.as_deref().unwrap_or(&alias.email))
+                                                    .when(is_current, |b| b.primary())
+                                                    .on_click(cx.listener(move |this, _, _, cx| {
+                                                        this.select_alias(Some(alias_clone.clone()), cx);
+                                                    }))
+                                            }))
+                                    } else {
+                                        div()
+                                    }),
                             )
                             // Recipient "To:" Input + Autocomplete Chips via Form & Field
                             .child(
@@ -5960,6 +6674,19 @@ pub mod gpui_app {
                                                     cx.notify();
                                                 })),
                                         )
+                                        .child(
+                                            Button::new("btn-cycle-signature")
+                                                .icon(IconName::FileText)
+                                                .label(if let Some(sig) = &self.selected_signature {
+                                                    format!("Sig: {}", sig.name)
+                                                } else {
+                                                    "Sig: None".to_string()
+                                                })
+                                                .tooltip("Switch or remove signature")
+                                                .on_click(cx.listener(|this, _, window, cx| {
+                                                    this.cycle_signature(window, cx);
+                                                })),
+                                        )
                                         // Attach by path.
                                             //
                                             // This used to invent a
@@ -6082,6 +6809,37 @@ pub mod gpui_app {
                                                     div()
                                                         .text_color(cx.theme().muted_foreground)
                                                         .child(format!("({sz_str})")),
+                                                )
+                                                .child(
+                                                    Button::new(ElementId::Name(
+                                                        format!("prev-compose-att-{}", idx)
+                                                            .into(),
+                                                    ))
+                                                    .icon(IconName::FileText)
+                                                    .ghost()
+                                                    .xsmall()
+                                                    .label("Preview")
+                                                    .on_click(cx.listener(
+                                                        move |this, _, _, cx| {
+                                                            if let Some(att) = this
+                                                                .compose_attachments
+                                                                .get(idx)
+                                                            {
+                                                                let fname = att.filename.clone();
+                                                                let mime = att.content_type.clone();
+                                                                let data = att.data.clone();
+                                                                let sz = data.len();
+                                                                this.open_attachment_preview(
+                                                                    fname,
+                                                                    mime,
+                                                                    sz,
+                                                                    None,
+                                                                    Some(data),
+                                                                    cx,
+                                                                );
+                                                            }
+                                                        },
+                                                    )),
                                                 )
                                                 .child(
                                                     Button::new(ElementId::Name(
@@ -6391,6 +7149,7 @@ pub mod gpui_app {
             };
 
             let inputs_opt = self.wizard_inputs.as_ref();
+            let is_manual = self.login_wizard.is_manual_expanded;
 
             Dialog::new(cx).child(
                 div()
@@ -6414,7 +7173,7 @@ pub mod gpui_app {
                         .border_color(cx.theme().border)
                         .p(px(24.0))
                         .gap(px(14.0))
-                        // Wizard Header
+                        // Thunderbird Header
                         .child(
                             div()
                                 .flex()
@@ -6441,14 +7200,14 @@ pub mod gpui_app {
                                                         .text_base()
                                                         .font_weight(FontWeight::BOLD)
                                                         .text_color(cx.theme().foreground)
-                                                        .child("Add account"),
+                                                        .child("Set Up Your Existing Email Address"),
                                                 ),
                                         )
                                         .child(
                                             div()
                                                 .text_xs()
                                                 .text_color(cx.theme().muted_foreground)
-                                                .child("Connect your email inbox to Vespetrel with local SQLite WAL & FTS5"),
+                                                .child("Enter your credentials. Vespetrel automatically determines server settings and OAuth2 protocol."),
                                         ),
                                 )
                                 .child(
@@ -6463,447 +7222,39 @@ pub mod gpui_app {
                                         })),
                                 ),
                         )
-                        // Step 1: Provider Selection Grid
+                        // Thunderbird 3-field credentials form (Name, Email, Password)
                         .child(
-                            div()
-                                .flex()
-                                .flex_col()
+                            Form::vertical()
                                 .gap(px(8.0))
                                 .child(
-                                    div()
-                                        .text_xs()
-                                        .font_weight(FontWeight::SEMIBOLD)
-                                        .text_color(cx.theme().foreground)
-                                        .child("1. Choose Provider"),
+                                    Field::new()
+                                        .label("Your name:")
+                                        .child(if let Some(inputs) = inputs_opt {
+                                            component::input::Input::new(&inputs.name).cleanable(true).into_any_element()
+                                        } else {
+                                            div().text_xs().text_color(cx.theme().foreground).child(display_name.to_string()).into_any_element()
+                                        }),
                                 )
                                 .child(
-                                    div()
-                                        .flex()
-                                        .flex_row()
-                                        .flex_wrap()
-                                        .gap(px(8.0))
-                                        .children(providers.into_iter().map(|(p, title, desc, icon)| {
-                                            let is_sel = selected_p == p;
-                                            let p_choice = p.clone();
-                                            div()
-                                                .id(ElementId::Name(format!("prov-choice-{:?}", p).into()))
-                                                .flex()
-                                                .flex_col()
-                                                .w(px(258.0))
-                                                .p(px(10.0))
-                                                .rounded_lg()
-                                                .bg(if is_sel { cx.theme().accent } else { cx.theme().muted })
-                                                .border_1()
-                                                .border_color(if is_sel { cx.theme().primary } else { cx.theme().ring })
-                                                .hover(|s| s.bg(cx.theme().ring))
-                                                .on_click(cx.listener(move |this, _, window, cx| {
-                                                    this.login_wizard.select_provider(p_choice.clone());
-                                                    if let Some(inputs) = &this.wizard_inputs {
-                                                        inputs.incoming_host.update(cx, |inp, cx| inp.set_value(this.login_wizard.incoming_host.clone(), window, cx));
-                                                        inputs.incoming_port.update(cx, |inp, cx| inp.set_value(this.login_wizard.incoming_port.to_string(), window, cx));
-                                                        inputs.outgoing_host.update(cx, |inp, cx| inp.set_value(this.login_wizard.outgoing_host.clone(), window, cx));
-                                                        inputs.outgoing_port.update(cx, |inp, cx| inp.set_value(this.login_wizard.outgoing_port.to_string(), window, cx));
-                                                    }
-                                                    cx.notify();
-                                                }))
-                                                .child(
-                                                    div()
-                                                        .flex()
-                                                        .flex_row()
-                                                        .items_center()
-                                                        .gap(px(6.0))
-                                                        .child(Icon::new(icon).small().text_color(if is_sel { cx.theme().primary } else { cx.theme().muted_foreground }))
-                                                        .child(
-                                                            div()
-                                                                .text_xs()
-                                                                .font_weight(FontWeight::BOLD)
-                                                                .text_color(if is_sel { cx.theme().primary } else { cx.theme().foreground })
-                                                                .child(title),
-                                                        ),
-                                                )
-                                                .child(
-                                                    div()
-                                                        .text_xs()
-                                                        .text_color(cx.theme().muted_foreground)
-                                                        .child(desc),
-                                                )
-                                        })),
-                                ),
-                        )
-                        // Step 2: Authentication & Account Configuration
-                        .child(
-                            div()
-                                .flex()
-                                .flex_col()
-                                .gap(px(8.0))
+                                    Field::new()
+                                        .label("Email address:")
+                                        .child(if let Some(inputs) = inputs_opt {
+                                            component::input::Input::new(&inputs.email).cleanable(true).into_any_element()
+                                        } else {
+                                            div().text_xs().text_color(cx.theme().foreground).child(display_email.to_string()).into_any_element()
+                                        }),
+                                )
                                 .child(
-                                    div()
-                                        .flex()
-                                        .flex_row()
-                                        .items_center()
-                                        .justify_between()
-                                        .child(
-                                            div()
-                                                .text_xs()
-                                                .font_weight(FontWeight::SEMIBOLD)
-                                                .text_color(cx.theme().foreground)
-                                                .child("2. Account Configuration"),
-                                        )
-                                        .child(
-                                            if selected_p == ProviderType::Gmail || selected_p == ProviderType::Graph {
-                                                let is_oauth_active = self.login_wizard.auth_mode == AuthModeChoice::OAuth2;
-                                                div()
-                                                    .flex()
-                                                    .flex_row()
-                                                    .gap(px(4.0))
-                                                    .bg(cx.theme().muted)
-                                                    .p(px(2.0))
-                                                    .rounded_md()
-                                                    .child({
-                                                        let mut btn = Button::new("auth-mode-oauth2")
-                                                            .icon(IconName::Globe)
-                                                            .label("Browser OAuth2")
-                                                            .on_click(cx.listener(|this, _, _, cx| {
-                                                                this.login_wizard.auth_mode = AuthModeChoice::OAuth2;
-                                                                cx.notify();
-                                                            }));
-                                                        if is_oauth_active {
-                                                            btn = btn.primary();
-                                                        }
-                                                        btn
-                                                    })
-                                                    .child({
-                                                        let label = if selected_p == ProviderType::Gmail { "App Password (IMAP)" } else { "Password / IMAP" };
-                                                        let mut btn = Button::new("auth-mode-password")
-                                                            .icon(IconName::FolderClosed)
-                                                            .label(label)
-                                                            .on_click(cx.listener(|this, _, _, cx| {
-                                                                this.login_wizard.auth_mode = AuthModeChoice::Password;
-                                                                cx.notify();
-                                                            }));
-                                                        if !is_oauth_active {
-                                                            btn = btn.primary();
-                                                        }
-                                                        btn
-                                                    })
-                                            } else {
-                                                div()
-                                            }
-                                        ),
-                                 )
-                                .child(
-                                    // Conditional form body based on provider and auth_mode
-                                    if is_oauth {
-                                        // OAuth2 Flow Card
-                                        div()
-                                            .flex()
-                                            .flex_col()
-                                            .gap(px(10.0))
-                                            .p(px(12.0))
-                                            .rounded_lg()
-                                            .bg(cx.theme().muted)
-                                            .border_1()
-                                            .border_color(cx.theme().muted)
-                                            .child(
-                                                div()
-                                                    .flex()
-                                                    .flex_row()
-                                                    .items_center()
-                                                    .gap(px(10.0))
-                                                    .child(Icon::new(if selected_p == ProviderType::Gmail { IconName::Globe } else { IconName::Building2 }).text_color(cx.theme().primary))
-                                                    .child(
-                                                        div()
-                                                            .flex()
-                                                            .flex_col()
-                                                            .gap(px(2.0))
-                                                            .child(
-                                                                div()
-                                                                    .text_xs()
-                                                                    .font_weight(FontWeight::BOLD)
-                                                                    .text_color(cx.theme().foreground)
-                                                                    .child(if selected_p == ProviderType::Gmail { "Google Browser OAuth2 (PKCE)" } else { "Microsoft 365 OAuth2" }),
-                                                            )
-                                                            .child(
-                                                                div()
-                                                                    .text_xs()
-                                                                    .text_color(cx.theme().muted_foreground)
-                                                                    .child("Vespetrel will launch your web browser to securely authenticate. No passwords are stored; tokens are kept in the OS keyring."),
-                                                            ),
-                                                    ),
-                                            )
-                                            .child(
-                                                Form::vertical()
-                                                    .gap(px(8.0))
-                                                    .child(
-                                                        Field::new()
-                                                            .label("OAuth Client ID (Optional):")
-                                                            .child(if let Some(inputs) = inputs_opt {
-                                                                component::input::Input::new(&inputs.client_id).cleanable(true).into_any_element()
-                                                            } else {
-                                                                div().text_xs().text_color(cx.theme().muted_foreground).child("OAuth Client ID").into_any_element()
-                                                            }),
-                                                    )
-                                                    .child(
-                                                        Field::new()
-                                                            .label("Email Address (Optional hint):")
-                                                            .child(if let Some(inputs) = inputs_opt {
-                                                                component::input::Input::new(&inputs.email).cleanable(true).into_any_element()
-                                                            } else {
-                                                                div().text_xs().text_color(cx.theme().muted_foreground).child("user@gmail.com").into_any_element()
-                                                            }),
-                                                    ),
-                                            )
-                                            .child(
-                                                if let Some(status_str) = &self.login_wizard.oauth_status {
-                                                    div()
-                                                        .flex()
-                                                        .flex_row()
-                                                        .items_center()
-                                                        .gap(px(6.0))
-                                                        .p(px(8.0))
-                                                        .rounded_md()
-                                                        .bg(cx.theme().primary)
-                                                        .border_1()
-                                                        .border_color(cx.theme().primary)
-                                                        .text_xs()
-                                                        .text_color(cx.theme().primary_hover)
-                                                        .child(Icon::new(IconName::LoaderCircle).small())
-                                                        .child(status_str.clone())
-                                                } else {
-                                                    div()
-                                                },
-                                            )
-                                    } else if selected_p == ProviderType::Gmail {
-                                        // Gmail with App Password (IMAP) Form
-                                        div()
-                                            .flex()
-                                            .flex_col()
-                                            .gap(px(8.0))
-                                            .p(px(12.0))
-                                            .rounded_lg()
-                                            .bg(cx.theme().muted)
-                                            .border_1()
-                                            .border_color(cx.theme().muted)
-                                            .child(
-                                                div()
-                                                    .flex()
-                                                    .flex_row()
-                                                    .items_center()
-                                                    .gap(px(8.0))
-                                                    .p(px(8.0))
-                                                    .rounded_md()
-                                                    .bg(cx.theme().accent)
-                                                    .border_1()
-                                                    .border_color(cx.theme().border)
-                                                    .child(Icon::new(IconName::Info).small().text_color(cx.theme().info))
-                                                    .child(
-                                                        div()
-                                                            .text_xs()
-                                                            .text_color(cx.theme().info)
-                                                            .child("Google App Password: In your Google Account, go to Security → 2-Step Verification → App passwords. Generate a 16-character password and enter it below."),
-                                                    ),
-                                            )
-                                            .child(
-                                                Form::vertical()
-                                                    .gap(px(8.0))
-                                                    .child(
-                                                        Field::new()
-                                                            .label("Gmail address")
-                                                            .child(if let Some(inputs) = inputs_opt {
-                                                                component::input::Input::new(&inputs.email).cleanable(true).into_any_element()
-                                                            } else {
-                                                                div().text_xs().text_color(cx.theme().foreground).child(display_email.to_string()).into_any_element()
-                                                            }),
-                                                    )
-                                                    .child(
-                                                        Field::new()
-                                                            .label("App password")
-                                                            .child(if let Some(inputs) = inputs_opt {
-                                                                component::input::Input::new(&inputs.password).mask_toggle().cleanable(true).into_any_element()
-                                                            } else {
-                                                                div().text_xs().text_color(cx.theme().muted_foreground).child("••••••••••••••••").into_any_element()
-                                                            }),
-                                                    )
-                                                    .child(
-                                                        Field::new()
-                                                            .label("Display name (optional)")
-                                                            .child(if let Some(inputs) = inputs_opt {
-                                                                component::input::Input::new(&inputs.name).cleanable(true).into_any_element()
-                                                            } else {
-                                                                div().text_xs().text_color(cx.theme().foreground).child(display_name.to_string()).into_any_element()
-                                                            }),
-                                                    ),
-                                            )
-                                            .child(
-                                                div()
-                                                    .flex()
-                                                    .flex_row()
-                                                    .items_center()
-                                                    .justify_between()
-                                                    .text_xs()
-                                                    .text_color(cx.theme().muted_foreground)
-                                                    .child("Incoming: imap.gmail.com:993 (SSL/TLS)")
-                                                    .child("Outgoing: smtp.gmail.com:587 (STARTTLS)"),
-                                            )
-                                    } else if selected_p == ProviderType::Imap {
-                                        // Custom IMAP Form
-                                        div()
-                                            .flex()
-                                            .flex_col()
-                                            .gap(px(8.0))
-                                            .p(px(12.0))
-                                            .rounded_lg()
-                                            .bg(cx.theme().muted)
-                                            .border_1()
-                                            .border_color(cx.theme().muted)
-                                            .child(
-                                                Form::vertical()
-                                                    .gap(px(8.0))
-                                                    .child(
-                                                        Field::new()
-                                                            .label("Email Address:")
-                                                            .child(if let Some(inputs) = inputs_opt {
-                                                                component::input::Input::new(&inputs.email).cleanable(true).into_any_element()
-                                                            } else {
-                                                                div().text_xs().text_color(cx.theme().foreground).child(display_email.to_string()).into_any_element()
-                                                            }),
-                                                    )
-                                                    .child(
-                                                        Field::new()
-                                                            .label("Password / Token:")
-                                                            .child(if let Some(inputs) = inputs_opt {
-                                                                component::input::Input::new(&inputs.password).mask_toggle().cleanable(true).into_any_element()
-                                                            } else {
-                                                                div().text_xs().text_color(cx.theme().muted_foreground).child("••••••••••••••••").into_any_element()
-                                                            }),
-                                                    )
-                                                    .child(
-                                                        Field::new()
-                                                            .label("Display name (optional)")
-                                                            .child(if let Some(inputs) = inputs_opt {
-                                                                component::input::Input::new(&inputs.name).cleanable(true).into_any_element()
-                                                            } else {
-                                                                div().text_xs().text_color(cx.theme().foreground).child(display_name.to_string()).into_any_element()
-                                                            }),
-                                                    ),
-                                            )
-                                            .child(
-                                                div()
-                                                    .flex()
-                                                    .flex_row()
-                                                    .gap(px(8.0))
-                                                    .child(
-                                                        div()
-                                                            .flex()
-                                                            .flex_col()
-                                                            .flex_1()
-                                                            .gap(px(4.0))
-                                                            .child(div().text_xs().font_weight(FontWeight::SEMIBOLD).text_color(cx.theme().muted_foreground).child("Incoming IMAP host"))
-                                                            .child(if let Some(inputs) = inputs_opt {
-                                                                component::input::Input::new(&inputs.incoming_host).cleanable(true).into_any_element()
-                                                            } else {
-                                                                div().text_xs().text_color(cx.theme().muted_foreground).child("imap.example.com").into_any_element()
-                                                            }),
-                                                    )
-                                                    .child(
-                                                        div()
-                                                            .flex()
-                                                            .flex_col()
-                                                            .w(px(80.0))
-                                                            .gap(px(4.0))
-                                                            .child(div().text_xs().font_weight(FontWeight::SEMIBOLD).text_color(cx.theme().muted_foreground).child("Port"))
-                                                            .child(if let Some(inputs) = inputs_opt {
-                                                                component::input::Input::new(&inputs.incoming_port).into_any_element()
-                                                            } else {
-                                                                div().text_xs().text_color(cx.theme().muted_foreground).child("993").into_any_element()
-                                                            }),
-                                                    ),
-                                            )
-                                            .child(
-                                                div()
-                                                    .flex()
-                                                    .flex_row()
-                                                    .gap(px(8.0))
-                                                    .child(
-                                                        div()
-                                                            .flex()
-                                                            .flex_col()
-                                                            .flex_1()
-                                                            .gap(px(4.0))
-                                                            .child(div().text_xs().font_weight(FontWeight::SEMIBOLD).text_color(cx.theme().muted_foreground).child("Outgoing SMTP host"))
-                                                            .child(if let Some(inputs) = inputs_opt {
-                                                                component::input::Input::new(&inputs.outgoing_host).cleanable(true).into_any_element()
-                                                            } else {
-                                                                div().text_xs().text_color(cx.theme().muted_foreground).child("smtp.example.com").into_any_element()
-                                                            }),
-                                                    )
-                                                    .child(
-                                                        div()
-                                                            .flex()
-                                                            .flex_col()
-                                                            .w(px(80.0))
-                                                            .gap(px(4.0))
-                                                            // Real hairline, not a text run of
-                                                            // box-drawing characters. The old
-                                                            // rule broke apart at any font or
-                                                            // zoom level where the glyph was
-                                                            // not exactly one cell wide, and it
-                                                            // read as content to a screen
-                                                            // reader.
-                                                            .child(
-                                                                div()
-                                                                    .mt(px(4.0))
-                                                                    .border_t_1()
-                                                                    .border_color(cx.theme().border),
-                                                            )
-                                                    ),
-                                            )
-                                    } else {
-                                        // Fastmail JMAP / Graph Password Form
-                                        div()
-                                            .flex()
-                                            .flex_col()
-                                            .gap(px(8.0))
-                                            .p(px(12.0))
-                                            .rounded_lg()
-                                            .bg(cx.theme().muted)
-                                            .border_1()
-                                            .border_color(cx.theme().muted)
-                                            .child(
-                                                Form::vertical()
-                                                    .gap(px(8.0))
-                                                    .child(
-                                                        Field::new()
-                                                            .label("Email Address:")
-                                                            .child(if let Some(inputs) = inputs_opt {
-                                                                component::input::Input::new(&inputs.email).cleanable(true).into_any_element()
-                                                            } else {
-                                                                div().text_xs().text_color(cx.theme().foreground).child(display_email.to_string()).into_any_element()
-                                                            }),
-                                                    )
-                                                    .child(
-                                                        Field::new()
-                                                            .label("Password / API Token:")
-                                                            .child(if let Some(inputs) = inputs_opt {
-                                                                component::input::Input::new(&inputs.password).mask_toggle().cleanable(true).into_any_element()
-                                                            } else {
-                                                                div().text_xs().text_color(cx.theme().muted_foreground).child("••••••••••••••••").into_any_element()
-                                                            }),
-                                                    )
-                                                    .child(
-                                                        Field::new()
-                                                            .label("Server Host:")
-                                                            .child(if let Some(inputs) = inputs_opt {
-                                                                component::input::Input::new(&inputs.incoming_host).cleanable(true).into_any_element()
-                                                            } else {
-                                                                div().text_xs().text_color(cx.theme().muted_foreground).child("api.fastmail.com").into_any_element()
-                                                            }),
-                                                    ),
-                                            )
-                                    }
-                                ),
+                                    Field::new()
+                                        .label(if is_oauth { "Password (Optional for OAuth2):" } else { "Password or App Password:" })
+                                        .child(if let Some(inputs) = inputs_opt {
+                                            component::input::Input::new(&inputs.password).mask_toggle().cleanable(true).into_any_element()
+                                        } else {
+                                            div().text_xs().text_color(cx.theme().muted_foreground).child("••••••••••••••••").into_any_element()
+                                        }),
+                                )
                         )
-                        // Preset Quick-Select Chips
+                        // Quick Presets Row
                         .child(
                             div()
                                 .flex()
@@ -6917,17 +7268,11 @@ pub mod gpui_app {
                                         .gap(px(6.0))
                                         .child(
                                             Button::new("chip-personal")
-                                                .label("Personal")
+                                                .label("Gmail (OAuth2)")
                                                 .ghost()
                                                 .small()
                                                 .on_click(cx.listener(move |this, _, window, cx| {
-                                                    let suffix = match this.login_wizard.provider_type {
-                                                        ProviderType::Gmail => "gmail.com",
-                                                        ProviderType::Graph => "outlook.com",
-                                                        ProviderType::Jmap => "fastmail.com",
-                                                        ProviderType::Imap => "example.com",
-                                                    };
-                                                    let em = format!("personal@{}", suffix);
+                                                    let em = "personal@gmail.com".to_string();
                                                     let nm = "Personal Account".to_string();
                                                     this.login_wizard.email = em.clone();
                                                     this.login_wizard.name = nm.clone();
@@ -6941,24 +7286,44 @@ pub mod gpui_app {
                                                         inputs.incoming_port.update(cx, |inp, cx| inp.set_value(this.login_wizard.incoming_port.to_string(), window, cx));
                                                         inputs.outgoing_host.update(cx, |inp, cx| inp.set_value(this.login_wizard.outgoing_host.clone(), window, cx));
                                                         inputs.outgoing_port.update(cx, |inp, cx| inp.set_value(this.login_wizard.outgoing_port.to_string(), window, cx));
+                                                        inputs.client_id.update(cx, |inp, cx| inp.set_value(this.login_wizard.effective_client_id(), window, cx));
                                                     }
                                                     cx.notify();
                                                 })),
                                         )
                                         .child(
                                             Button::new("chip-work")
-                                                .label("Work")
+                                                .label("Microsoft 365")
                                                 .ghost()
                                                 .small()
                                                 .on_click(cx.listener(move |this, _, window, cx| {
-                                                    let suffix = match this.login_wizard.provider_type {
-                                                        ProviderType::Gmail => "gmail.com",
-                                                        ProviderType::Graph => "company.onmicrosoft.com",
-                                                        ProviderType::Jmap => "fastmail.fm",
-                                                        ProviderType::Imap => "corp.example.com",
-                                                    };
-                                                    let em = format!("work@{}", suffix);
+                                                    let em = "work@company.onmicrosoft.com".to_string();
                                                     let nm = "Work Mailbox".to_string();
+                                                    this.login_wizard.email = em.clone();
+                                                    this.login_wizard.name = nm.clone();
+                                                    this.login_wizard.password_or_token = String::new();
+                                                    this.login_wizard.apply_autodiscover_for_email(&em);
+                                                    if let Some(inputs) = &this.wizard_inputs {
+                                                        inputs.email.update(cx, |inp, cx| inp.set_value(em, window, cx));
+                                                        inputs.name.update(cx, |inp, cx| inp.set_value(nm, window, cx));
+                                                        inputs.password.update(cx, |inp, cx| inp.set_value(String::new(), window, cx));
+                                                        inputs.incoming_host.update(cx, |inp, cx| inp.set_value(this.login_wizard.incoming_host.clone(), window, cx));
+                                                        inputs.incoming_port.update(cx, |inp, cx| inp.set_value(this.login_wizard.incoming_port.to_string(), window, cx));
+                                                        inputs.outgoing_host.update(cx, |inp, cx| inp.set_value(this.login_wizard.outgoing_host.clone(), window, cx));
+                                                        inputs.outgoing_port.update(cx, |inp, cx| inp.set_value(this.login_wizard.outgoing_port.to_string(), window, cx));
+                                                        inputs.client_id.update(cx, |inp, cx| inp.set_value(this.login_wizard.effective_client_id(), window, cx));
+                                                    }
+                                                    cx.notify();
+                                                })),
+                                        )
+                                        .child(
+                                            Button::new("chip-fastmail")
+                                                .label("Fastmail (JMAP)")
+                                                .ghost()
+                                                .small()
+                                                .on_click(cx.listener(move |this, _, window, cx| {
+                                                    let em = "user@fastmail.com".to_string();
+                                                    let nm = "Fastmail User".to_string();
                                                     this.login_wizard.email = em.clone();
                                                     this.login_wizard.name = nm.clone();
                                                     this.login_wizard.password_or_token = String::new();
@@ -6976,18 +7341,12 @@ pub mod gpui_app {
                                                 })),
                                         )
                                         .child(
-                                            Button::new("chip-support")
-                                                .label("Team / Support")
+                                            Button::new("chip-custom-imap")
+                                                .label("Custom IMAP")
                                                 .ghost()
                                                 .small()
                                                 .on_click(cx.listener(move |this, _, window, cx| {
-                                                    let suffix = match this.login_wizard.provider_type {
-                                                        ProviderType::Gmail => "gmail.com",
-                                                        ProviderType::Graph => "outlook.com",
-                                                        ProviderType::Jmap => "fastmail.com",
-                                                        ProviderType::Imap => "vespetrel.org",
-                                                    };
-                                                    let em = format!("team@{}", suffix);
+                                                    let em = "team@vespetrel.org".to_string();
                                                     let nm = "Vespetrel Team".to_string();
                                                     this.login_wizard.email = em.clone();
                                                     this.login_wizard.name = nm.clone();
@@ -7007,59 +7366,363 @@ pub mod gpui_app {
                                         ),
                                 ),
                         )
-                        // Error message if any
-                        .child(if let WizardStep::Failed(err) = &self.login_wizard.step {
-                            div()
-                                .flex()
-                                .flex_row()
-                                .items_center()
-                                .gap(px(6.0))
-                                .p(px(8.0))
-                                .rounded_md()
-                                .bg(cx.theme().danger)
-                                .border_1()
-                                .border_color(cx.theme().danger)
-                                .text_xs()
-                                .text_color(cx.theme().danger_foreground)
-                                .child(Icon::new(IconName::TriangleAlert).small().text_color(cx.theme().danger))
-                                .child(err.clone())
-                        } else {
-                            div()
-                        })
-                        // Modal Actions Footer
+                        // Thunderbird Autodiscover Summary Card
+                        .child(
+                            match &self.login_wizard.autodiscover_status {
+                                AutodiscoverStatus::Found { source, details } => {
+                                    div()
+                                        .flex()
+                                        .flex_col()
+                                        .gap(px(6.0))
+                                        .p(px(10.0))
+                                        .rounded_lg()
+                                        .bg(cx.theme().accent)
+                                        .border_1()
+                                        .border_color(cx.theme().border)
+                                        .child(
+                                            div()
+                                                .flex()
+                                                .flex_row()
+                                                .items_center()
+                                                .justify_between()
+                                                .child(
+                                                    div()
+                                                        .flex()
+                                                        .flex_row()
+                                                        .items_center()
+                                                        .gap(px(6.0))
+                                                        .child(Icon::new(IconName::CircleCheck).small().text_color(cx.theme().primary))
+                                                        .child(
+                                                            div()
+                                                                .text_xs()
+                                                                .font_weight(FontWeight::BOLD)
+                                                                .text_color(cx.theme().foreground)
+                                                                .child(format!("Configuration found: {source}")),
+                                                        ),
+                                                )
+                                                .child(
+                                                    div()
+                                                        .text_xs()
+                                                        .font_weight(FontWeight::SEMIBOLD)
+                                                        .text_color(cx.theme().primary)
+                                                        .child(if is_oauth { "OAuth2" } else { "Password" }),
+                                                ),
+                                        )
+                                        .child(
+                                            div()
+                                                .text_xs()
+                                                .text_color(cx.theme().muted_foreground)
+                                                .child(details.clone()),
+                                        )
+                                }
+                                _ => div(),
+                            }
+                        )
+                        // OAuth2 Info note
+                        .child(
+                            if is_oauth {
+                                div()
+                                    .flex()
+                                    .flex_row()
+                                    .items_center()
+                                    .gap(px(8.0))
+                                    .p(px(8.0))
+                                    .rounded_md()
+                                    .bg(cx.theme().muted)
+                                    .border_1()
+                                    .border_color(cx.theme().border)
+                                    .child(Icon::new(IconName::Info).small().text_color(cx.theme().primary))
+                                    .child(
+                                        div()
+                                            .text_xs()
+                                            .text_color(cx.theme().muted_foreground)
+                                            .child("Browser OAuth2 sign-in: Vespetrel will securely authenticate with your provider via browser PKCE loopback. No passwords are stored."),
+                                    )
+                            } else {
+                                div()
+                            }
+                        )
+                        // OAuth status indicator if active
+                        .child(
+                            if let Some(status_str) = &self.login_wizard.oauth_status {
+                                div()
+                                    .flex()
+                                    .flex_row()
+                                    .items_center()
+                                    .gap(px(6.0))
+                                    .p(px(8.0))
+                                    .rounded_md()
+                                    .bg(cx.theme().primary)
+                                    .border_1()
+                                    .border_color(cx.theme().primary)
+                                    .text_xs()
+                                    .text_color(cx.theme().primary_hover)
+                                    .child(Icon::new(IconName::LoaderCircle).small())
+                                    .child(status_str.clone())
+                            } else {
+                                div()
+                            }
+                        )
+                        // Expandable "Configure manually" Section
                         .child(
                             div()
                                 .flex()
-                                .flex_row()
-                                .justify_end()
-                                .gap(px(10.0))
-                                .pt(px(8.0))
-                                .border_t_1()
-                                .border_color(cx.theme().border)
+                                .flex_col()
+                                .gap(px(8.0))
                                 .child(
-                                    Button::new("wizard-btn-cancel")
-                                        .label("Cancel")
-                                        .on_click(cx.listener(|this, _, _, cx| {
-                                            this.active_modal = ActiveModal::None;
-                                            this.wizard_inputs = None;
-                                            cx.notify();
-                                        })),
+                                    div()
+                                        .flex()
+                                        .flex_row()
+                                        .items_center()
+                                        .justify_between()
+                                        .child(
+                                            Button::new("btn-toggle-manual")
+                                                .label(if is_manual { "Hide manual configuration ⌃" } else { "Configure manually ⌄" })
+                                                .ghost()
+                                                .xsmall()
+                                                .on_click(cx.listener(|this, _, _, cx| {
+                                                    this.login_wizard.toggle_manual_config();
+                                                    cx.notify();
+                                                })),
+                                        )
+                                        .child(
+                                            if is_manual {
+                                                Button::new("btn-retest-config")
+                                                    .label("Re-test / Detect")
+                                                    .ghost()
+                                                    .xsmall()
+                                                    .on_click(cx.listener(|this, _, window, cx| {
+                                                        let em = if let Some(inputs) = &this.wizard_inputs {
+                                                            inputs.email.read(cx).value().trim().to_string()
+                                                        } else {
+                                                            this.login_wizard.email.clone()
+                                                        };
+                                                        if !em.is_empty() {
+                                                            this.login_wizard.apply_autodiscover_for_email(&em);
+                                                            if let Some(inputs) = &this.wizard_inputs {
+                                                                inputs.incoming_host.update(cx, |inp, cx| inp.set_value(this.login_wizard.incoming_host.clone(), window, cx));
+                                                                inputs.incoming_port.update(cx, |inp, cx| inp.set_value(this.login_wizard.incoming_port.to_string(), window, cx));
+                                                                inputs.outgoing_host.update(cx, |inp, cx| inp.set_value(this.login_wizard.outgoing_host.clone(), window, cx));
+                                                                inputs.outgoing_port.update(cx, |inp, cx| inp.set_value(this.login_wizard.outgoing_port.to_string(), window, cx));
+                                                            }
+                                                        }
+                                                        cx.notify();
+                                                    }))
+                                            } else {
+                                                Button::new("btn-placeholder-space").ghost().xsmall()
+                                            }
+                                        ),
                                 )
                                 .child(
-                                    if is_oauth {
-                                        let (btn_label, btn_icon) = match selected_p {
-                                            ProviderType::Gmail => ("Sign in with Google (Browser)", IconName::Globe),
-                                            ProviderType::Graph => ("Sign in with Microsoft (Browser)", IconName::Building2),
-                                            _ => ("Sign in with Browser", IconName::Globe),
-                                        };
-                                        Button::new("wizard-btn-oauth")
-                                            .icon(btn_icon)
-                                            .label(btn_label)
-                                            .primary()
-                                            .on_click(cx.listener(|this, _, window, cx| {
-                                                this.start_oauth2_flow(window, cx);
-                                            }))
-                                            .into_any_element()
+                                    if is_manual {
+                                        div()
+                                            .flex()
+                                            .flex_col()
+                                            .gap(px(10.0))
+                                            .p(px(12.0))
+                                            .rounded_lg()
+                                            .bg(cx.theme().muted)
+                                            .border_1()
+                                            .border_color(cx.theme().border)
+                                            // Protocol choice buttons
+                                            .child(
+                                                div()
+                                                    .flex()
+                                                    .flex_row()
+                                                    .flex_wrap()
+                                                    .gap(px(6.0))
+                                                    .children(providers.into_iter().map(|(p, title, _desc, icon)| {
+                                                        let is_sel = selected_p == p;
+                                                        let p_choice = p.clone();
+                                                        let mut btn = Button::new(ElementId::Name(format!("prov-choice-{:?}", p).into()))
+                                                            .icon(icon)
+                                                            .label(title)
+                                                            .small();
+                                                        if is_sel {
+                                                            btn = btn.primary();
+                                                        }
+                                                        btn.on_click(cx.listener(move |this, _, window, cx| {
+                                                            this.login_wizard.select_provider(p_choice.clone());
+                                                            if let Some(inputs) = &this.wizard_inputs {
+                                                                inputs.incoming_host.update(cx, |inp, cx| inp.set_value(this.login_wizard.incoming_host.clone(), window, cx));
+                                                                inputs.incoming_port.update(cx, |inp, cx| inp.set_value(this.login_wizard.incoming_port.to_string(), window, cx));
+                                                                inputs.outgoing_host.update(cx, |inp, cx| inp.set_value(this.login_wizard.outgoing_host.clone(), window, cx));
+                                                                inputs.outgoing_port.update(cx, |inp, cx| inp.set_value(this.login_wizard.outgoing_port.to_string(), window, cx));
+                                                            }
+                                                            cx.notify();
+                                                        }))
+                                                    }))
+                                            )
+                                            // Auth mode switcher
+                                            .child(
+                                                if selected_p == ProviderType::Gmail || selected_p == ProviderType::Graph {
+                                                    let is_oauth_active = self.login_wizard.auth_mode == AuthModeChoice::OAuth2;
+                                                    div()
+                                                        .flex()
+                                                        .flex_row()
+                                                        .gap(px(4.0))
+                                                        .child({
+                                                            let mut btn = Button::new("auth-mode-oauth2")
+                                                                .icon(IconName::Globe)
+                                                                .label("Browser OAuth2")
+                                                                .on_click(cx.listener(|this, _, _, cx| {
+                                                                    this.login_wizard.auth_mode = AuthModeChoice::OAuth2;
+                                                                    cx.notify();
+                                                                }));
+                                                            if is_oauth_active {
+                                                                    btn = btn.primary();
+                                                                }
+                                                                btn
+                                                            })
+                                                            .child({
+                                                                let mut btn = Button::new("auth-mode-password")
+                                                                    .icon(IconName::FolderClosed)
+                                                                    .label("App Password / IMAP")
+                                                                    .on_click(cx.listener(|this, _, _, cx| {
+                                                                        this.login_wizard.auth_mode = AuthModeChoice::Password;
+                                                                        cx.notify();
+                                                                    }));
+                                                                if !is_oauth_active {
+                                                                    btn = btn.primary();
+                                                                }
+                                                                btn
+                                                            })
+                                                    } else {
+                                                        div()
+                                                    }
+                                                )
+                                                // Server hostnames and ports
+                                                .child(
+                                                    div()
+                                                        .flex()
+                                                        .flex_row()
+                                                        .gap(px(8.0))
+                                                        .child(
+                                                            div()
+                                                                .flex()
+                                                                .flex_col()
+                                                                .flex_1()
+                                                                .gap(px(4.0))
+                                                                .child(div().text_xs().font_weight(FontWeight::SEMIBOLD).text_color(cx.theme().muted_foreground).child("Incoming host"))
+                                                                .child(if let Some(inputs) = inputs_opt {
+                                                                    component::input::Input::new(&inputs.incoming_host).cleanable(true).into_any_element()
+                                                                } else {
+                                                                    div().text_xs().text_color(cx.theme().muted_foreground).child("imap.example.com").into_any_element()
+                                                                }),
+                                                        )
+                                                        .child(
+                                                            div()
+                                                                .flex()
+                                                                .flex_col()
+                                                                .w(px(80.0))
+                                                                .gap(px(4.0))
+                                                                .child(div().text_xs().font_weight(FontWeight::SEMIBOLD).text_color(cx.theme().muted_foreground).child("Port"))
+                                                                .child(if let Some(inputs) = inputs_opt {
+                                                                    component::input::Input::new(&inputs.incoming_port).into_any_element()
+                                                                } else {
+                                                                    div().text_xs().text_color(cx.theme().muted_foreground).child("993").into_any_element()
+                                                                }),
+                                                        )
+                                                )
+                                                .child(
+                                                    div()
+                                                        .flex()
+                                                        .flex_row()
+                                                        .gap(px(8.0))
+                                                        .child(
+                                                            div()
+                                                                .flex()
+                                                                .flex_col()
+                                                                .flex_1()
+                                                                .gap(px(4.0))
+                                                                .child(div().text_xs().font_weight(FontWeight::SEMIBOLD).text_color(cx.theme().muted_foreground).child("Outgoing SMTP host"))
+                                                                .child(if let Some(inputs) = inputs_opt {
+                                                                    component::input::Input::new(&inputs.outgoing_host).cleanable(true).into_any_element()
+                                                                } else {
+                                                                    div().text_xs().text_color(cx.theme().muted_foreground).child("smtp.example.com").into_any_element()
+                                                                }),
+                                                        )
+                                                        .child(
+                                                            div()
+                                                                .flex()
+                                                                .flex_col()
+                                                                .w(px(80.0))
+                                                                .gap(px(4.0))
+                                                                .child(div().text_xs().font_weight(FontWeight::SEMIBOLD).text_color(cx.theme().muted_foreground).child("Port"))
+                                                                .child(if let Some(inputs) = inputs_opt {
+                                                                    component::input::Input::new(&inputs.outgoing_port).into_any_element()
+                                                                } else {
+                                                                    div().text_xs().text_color(cx.theme().muted_foreground).child("587").into_any_element()
+                                                                }),
+                                                        )
+                                                )
+                                                .child(
+                                                    Field::new()
+                                                        .label("OAuth Client ID (Optional override):")
+                                                        .child(if let Some(inputs) = inputs_opt {
+                                                            component::input::Input::new(&inputs.client_id).cleanable(true).into_any_element()
+                                                        } else {
+                                                            div().text_xs().text_color(cx.theme().muted_foreground).child("Client ID").into_any_element()
+                                                        }),
+                                                )
+                                        } else {
+                                            div()
+                                        }
+                                    ),
+                            )
+                            // Error message if any
+                            .child(if let WizardStep::Failed(err) = &self.login_wizard.step {
+                                div()
+                                    .flex()
+                                    .flex_row()
+                                    .items_center()
+                                    .gap(px(6.0))
+                                    .p(px(8.0))
+                                    .rounded_md()
+                                    .bg(cx.theme().danger)
+                                    .border_1()
+                                    .border_color(cx.theme().danger)
+                                    .text_xs()
+                                    .text_color(cx.theme().danger_foreground)
+                                    .child(Icon::new(IconName::TriangleAlert).small().text_color(cx.theme().danger))
+                                    .child(err.clone())
+                            } else {
+                                div()
+                            })
+                            // Modal Actions Footer
+                            .child(
+                                div()
+                                    .flex()
+                                    .flex_row()
+                                    .justify_end()
+                                    .gap(px(10.0))
+                                    .pt(px(8.0))
+                                    .border_t_1()
+                                    .border_color(cx.theme().border)
+                                    .child(
+                                        Button::new("wizard-btn-cancel")
+                                            .label("Cancel")
+                                            .on_click(cx.listener(|this, _, _, cx| {
+                                                this.active_modal = ActiveModal::None;
+                                                this.wizard_inputs = None;
+                                                cx.notify();
+                                            })),
+                                    )
+                                    .child(
+                                        if is_oauth {
+                                            let (btn_label, btn_icon) = match selected_p {
+                                                ProviderType::Gmail => ("Sign in with Google (Browser)", IconName::Globe),
+                                                ProviderType::Graph => ("Sign in with Microsoft (Browser)", IconName::Building2),
+                                                _ => ("Sign in with Browser", IconName::Globe),
+                                            };
+                                            Button::new("wizard-btn-oauth")
+                                                .icon(btn_icon)
+                                                .label(btn_label)
+                                                .primary()
+                                                .on_click(cx.listener(|this, _, window, cx| {
+                                                    this.start_oauth2_flow(window, cx);
+                                                }))
+                                                .into_any_element()
                                     } else {
                                         Button::new("wizard-btn-connect")
                                             .label("Connect account")
@@ -7230,15 +7893,7 @@ pub mod gpui_app {
                 String::new()
             };
             if client_id.is_empty() {
-                client_id = match provider_type {
-                    ProviderType::Gmail => {
-                        std::env::var("VESPETREL_GOOGLE_CLIENT_ID").unwrap_or_default()
-                    }
-                    ProviderType::Graph => {
-                        std::env::var("VESPETREL_MICROSOFT_CLIENT_ID").unwrap_or_default()
-                    }
-                    _ => String::new(),
-                };
+                client_id = self.login_wizard.effective_client_id();
             }
 
             if client_id.is_empty() {
@@ -7257,14 +7912,24 @@ pub mod gpui_app {
             }
 
             let user_email = if let Some(inputs) = &self.wizard_inputs {
-                inputs.email.read(cx).value().trim().to_string()
+                let val = inputs.email.read(cx).value().trim().to_string();
+                if val.is_empty() {
+                    self.login_wizard.email.clone()
+                } else {
+                    val
+                }
             } else {
-                String::new()
+                self.login_wizard.email.clone()
             };
             let user_name = if let Some(inputs) = &self.wizard_inputs {
-                inputs.name.read(cx).value().trim().to_string()
+                let val = inputs.name.read(cx).value().trim().to_string();
+                if val.is_empty() {
+                    self.login_wizard.name.clone()
+                } else {
+                    val
+                }
             } else {
-                String::new()
+                self.login_wizard.name.clone()
             };
 
             self.login_wizard.step = WizardStep::OAuth2Waiting;
@@ -7567,7 +8232,7 @@ Revoke Vespetrel's access at https://myaccount.google.com/permissions and connec
     /// dispatch the same value and the logic stays in one handler. An action the
     /// window does not implement returns `None` and is left unbound rather than bound
     /// to a handler that silently does nothing.
-    pub fn binding_for(keystroke: &str, key: KeyAction) -> Option<KeyBinding> {
+    pub fn binding_for(keystroke: &'static str, key: KeyAction) -> Option<KeyBinding> {
         let context = Some(BINDING_CONTEXT);
         Some(match key {
             KeyAction::NextMessage => KeyBinding::new(keystroke, SelectNextMessage, context),
@@ -7610,7 +8275,8 @@ Revoke Vespetrel's access at https://myaccount.google.com/permissions and connec
                 rejected.push(token);
                 continue;
             };
-            match binding_for(&keystroke, key_action) {
+            let keystroke_static: &'static str = Box::leak(keystroke.into_boxed_str());
+            match binding_for(keystroke_static, key_action) {
                 Some(binding) => bindings.push(binding),
                 None => rejected.push(token),
             }
@@ -7746,5 +8412,87 @@ mod design_tests {
         assert_eq!(stroke.modifiers.control, !is_macos);
         assert_eq!(stroke.key, "k");
         assert!(command_palette_shortcut_label().ends_with(" K"));
+    }
+
+    #[test]
+    fn test_active_modal_attachment_preview() {
+        let modal = super::gpui_app::ActiveModal::AttachmentPreview {
+            filename: "invoice.pdf".to_string(),
+            mime_type: "application/pdf".to_string(),
+            size_bytes: 4096,
+            blob_path: Some("/tmp/invoice.pdf".to_string()),
+            data: Some(b"%PDF-1.7\n".to_vec()),
+        };
+        match modal {
+            super::gpui_app::ActiveModal::AttachmentPreview {
+                ref filename,
+                ref mime_type,
+                size_bytes,
+                ..
+            } => {
+                assert_eq!(filename, "invoice.pdf");
+                assert_eq!(mime_type, "application/pdf");
+                assert_eq!(size_bytes, 4096);
+            }
+            _ => panic!("Expected AttachmentPreview variant"),
+        }
+    }
+
+    #[test]
+    fn test_account_alias_selection_and_matching() {
+        let alias1 = vespetrel_core::AccountAlias::new(
+            "acc-1",
+            "suyash@vespetrel.org",
+            Some("Suyash".into()),
+        )
+        .with_default(true);
+        let alias2 = vespetrel_core::AccountAlias::new(
+            "acc-1",
+            "support@vespetrel.org",
+            Some("Support Team".into()),
+        )
+        .with_reply_to("contact@vespetrel.org");
+
+        assert_eq!(alias1.email, "suyash@vespetrel.org");
+        assert!(alias1.is_default);
+        assert_eq!(alias2.reply_to.as_deref(), Some("contact@vespetrel.org"));
+
+        let aliases = vec![alias1.clone(), alias2.clone()];
+        let query_addr = "support@vespetrel.org";
+        let matched = aliases
+            .iter()
+            .find(|a| a.email.eq_ignore_ascii_case(query_addr));
+        assert!(matched.is_some());
+        assert_eq!(matched.unwrap().name.as_deref(), Some("Support Team"));
+    }
+
+    #[test]
+    fn test_signature_template_generation_and_text() {
+        let profile = vespetrel_core::SignatureProfile {
+            full_name: "Suyash Stark".into(),
+            job_title: Some("Lead Architect".into()),
+            company: Some("Vespetrel".into()),
+            phone: Some("+1-555-0199".into()),
+            email: "suyash@vespetrel.org".into(),
+            website: Some("https://vespetrel.org".into()),
+            avatar_url: None,
+            pronouns: Some("he/him".into()),
+            disclaimer: None,
+            social_links: vec![],
+        };
+        let sig = vespetrel_core::Signature::from_template(
+            "acc-1",
+            "Modern Sig",
+            &profile,
+            vespetrel_core::SignatureTemplate::Modern,
+            true,
+            true,
+        );
+        assert!(sig.raw_html.contains("Suyash Stark"));
+        assert!(sig.raw_html.contains("Lead Architect"));
+        assert!(sig.plain_text.is_some());
+        let pt = sig.plain_text.unwrap();
+        assert!(pt.contains("Suyash Stark"));
+        assert!(pt.contains("suyash@vespetrel.org"));
     }
 }

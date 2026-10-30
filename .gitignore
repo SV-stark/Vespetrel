@@ -5,6 +5,7 @@
 # Rust / Cargo Build Artifacts
 /target/
 **/target/
+.cargo/config.toml
 **/*.rs.bk
 *.bk
 
