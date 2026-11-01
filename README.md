@@ -2,11 +2,11 @@
 
 # 🕊️ Vespetrel
 
-### The 120 FPS Pure Rust Desktop Mail Client
-**Thunderbird Feature Parity • Sub-15ms Search • Sub-50MB Memory • GPU-Native UI**
+### A Pure Rust, GPU-Rendered Desktop Mail Client
+**Pre-1.0 • Multi-protocol (IMAP / JMAP / Graph) • Local FTS5 search • Native GPU UI**
 
 [![Rust](https://img.shields.io/badge/rust-stable-brightgreen.svg?style=flat-square&logo=rust)](https://www.rust-lang.org)
-[![GPUI](https://img.shields.io/badge/GUI-gpui--kit%200.6.0-blueviolet.svg?style=flat-square)](https://crates.io/crates/gpui-kit)
+[![GPUI](https://img.shields.io/badge/GUI-gpui--kit%200.8.1-blueviolet.svg?style=flat-square)](https://crates.io/crates/gpui-kit)
 [![License: MIT OR Apache-2.0](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg?style=flat-square)](LICENSE)
 [![Nightly](https://img.shields.io/github/v/release/SV-stark/Vespetrel?include_prereleases&label=Windows%20Nightly&logo=windows&color=blue)](https://github.com/SV-stark/Vespetrel/releases/tag/nightly)
 [![Search](https://img.shields.io/badge/search-SQLite%20FTS5%20(BM25)-orange.svg?style=flat-square)](https://www.sqlite.org/fts5.html)
@@ -23,25 +23,25 @@
 
 Modern desktop email clients are almost universally trapped in web runtimes (Electron, Gecko, Chromium) that consume gigabytes of memory, introduce sluggish typing latency, and struggle when searching 50k+ local mailboxes.
 
-**Vespetrel** is built from the ground up in **100% memory-safe Rust** utilizing **`gpui-kit 0.6.0`** (standard `Root` / `init` / `component::input` layers). It directly renders UI elements on the GPU via Metal, Vulkan, and Direct3D at silky **120+ FPS**, maintaining an idle footprint under **50MB** while matching Thunderbird's complete feature suite: **Email + Calendars (CalDAV) + Contacts (CardDAV) + OpenPGP/S-MIME encryption + Instant Global Search**.
+**Vespetrel** is a from-scratch desktop mail client written in Rust, using **`gpui-kit 0.8.1`** for a GPU-rendered native UI (no Electron, no embedded browser). It is pre-1.0: it already covers multi-protocol mail (IMAP, JMAP, Microsoft Graph, Gmail), OAuth2 sign-in, local SQLite FTS5 search, CalDAV/CardDAV and OpenPGP/S/MIME, but it is **not yet a Thunderbird replacement**. See the [honest comparison](#-vespetrel-vs-thunderbird-honest-comparison) and the [roadmap](#-roadmap--status) for what is and isn't done. Performance figures have not been benchmarked and are intentionally not claimed.
 
 ```
 ┌────────────────────────────────────────────────────────────────────────────────────────────┐
 │                                   VESPETREL ARCHITECTURE                                   │
 │                                                                                            │
 │  ┌──────────────────────────────────────────────────────────────────────────────────────┐  │
-│  │ GPUI-KIT 0.6.0 FRONTEND (GPU Metal / Vulkan / DirectX @ 120 FPS)                  │  │
+│  │ GPUI-KIT 0.8.1 FRONTEND (GPU Metal / Vulkan / DirectX)                  │  │
 │  │ • 3-Pane Dock Layout (Folders, Virtual Thread List, Message Viewer)                  │  │
 │  │ • Interactive Setup Wizard (Input/InputState, masked password + eye toggle)         │  │
-│  │ • Tree-sitter Rich Markdown/Plaintext Editor (<2ms keypress latency)                 │  │
-│  │ • Virtualized scrolling capable of fluidly displaying 200,000+ emails               │  │
+│  │ • Tree-sitter Rich Markdown/Plaintext Editor                 │  │
+│  │ • Virtualized message list               │  │
 │  └───────────────────────────────────────────┬──────────────────────────────────────────┘  │
 │                                              │ Async Event Bus (flume bridge Tokio → GPUI)   │
 │                                              ▼                                             │
 │  ┌──────────────────────────────────────────────────────────────────────────────────────┐  │
 │  │ TOKIO ASYNC SYNC CORE                                                                │  │
 │  │ • Isolated Account Actors (IMAP IDLE, QRESYNC, CONDSTORE, JMAP RFC 8620/8621)        │  │
-│  │ • Microsoft Graph REST Engine (Corporate Exchange Online Parity)                     │  │
+│  │ • Microsoft Graph REST Engine (Exchange Online)                     │  │
 │  │ • Persistent SQLite Outbox (retry backoff + scheduled send + graceful shutdown)      │  │
 │  │ • OAuth2 PKCE Browser Flow (127.0.0.1:0 loopback, CSRF + Host validation)           │  │
 │  │ • PIM Engine (in-crate WebDAV + icalendar + vcard4 CalDAV/CardDAV)                   │  │
@@ -52,8 +52,8 @@ Modern desktop email clients are almost universally trapped in web runtimes (Ele
 │  ┌──────────────────────────────────────────────────────────────────────────────────────┐  │
 │  │ LOCAL STORAGE & BM25 SEARCH                                                          │  │
 │  │ • Rusqlite in WAL Mode + Memory-Mapped I/O (quick_check verified)                   │  │
-│  │ • SQLite FTS5 (unicode61 remove_diacritics) for sub-15ms search across 200k mails    │  │
-│  │ • Moka TinyLFU Cache + ArcSwap lock-free UI state for 120 FPS rendering             │  │
+│  │ • SQLite FTS5 (unicode61 remove_diacritics) for local full-text search    │  │
+│  │ • Moka TinyLFU Cache + ArcSwap lock-free UI state for lock-free UI state reads             │  │
 │  │ • Compressed Raw RFC822 Blob Store (lz4 / zstd) for offline resilience               │  │
 │  └──────────────────────────────────────────────────────────────────────────────────────┘  │
 └────────────────────────────────────────────────────────────────────────────────────────────┘
@@ -61,21 +61,25 @@ Modern desktop email clients are almost universally trapped in web runtimes (Ele
 
 ---
 
-## 🚀 Head-to-Head vs. Thunderbird
+## 🚀 Vespetrel vs. Thunderbird (Honest Comparison)
 
-| Feature / Metric | Mozilla Thunderbird | Electron Clients (Superhuman, Mailspring) | **Vespetrel** |
-|---|---|---|---|
-| **Cold Startup Time** | ~2.5s – 5.0s | ~3.0s – 6.0s | **< 200ms** |
-| **Idle Memory (RAM)** | 500MB – 1.2GB | 600MB – 1.5GB | **~35MB – 65MB (`mimalloc`)** |
-| **Rendering Framework** | Gecko (HTML/XUL/JS) | Chromium / DOM | **gpui-kit 0.6.0 (Direct GPU Shader Pipeline @ 120 FPS)** |
-| **Typing Latency** | 20ms – 40ms | 15ms – 30ms | **< 2ms (Tree-sitter GPU quads)** |
-| **Search (100k Emails)** | 2.5s – 8.0s (Gloda) | Cloud-dependent | **< 15ms (Local SQLite FTS5 BM25 + SIMD)** |
-| **Large Mailbox List** | Micro-stutters on large folders | DOM virtualization jitter | **GPU-accelerated native list (Direct GPU shader pipeline)** |
-| **Memory Safety** | C++ / JS | JS / Node.js | **100% Safe Rust 2024 Edition** |
-| **Modern Protocols** | IMAP/POP only (No JMAP/Graph) | Proprietary cloud sync | **IMAP + JMAP + MS Graph REST + CalDAV + CardDAV** |
-| **Tracker & Pixel Shield** | Add-on required | Cloud proxy | **Built-in `lol_html` streaming pixel stripper** |
-| **End-to-End Encryption** | OpenPGP + S/MIME | Add-on or cloud | **Native `rPGP` (RFC 9580 v6) + Autocrypt 1.1 + S/MIME** |
-| **Global Memory Allocator** | System malloc (fragmentation) | V8 Heap Manager | **`mimalloc` (-40% RAM fragmentation)** |
+Vespetrel is **not** a drop-in Thunderbird replacement yet. It is a young, fast-moving client with a different design focus.
+
+| Area | Thunderbird | Vespetrel (v0.2) |
+|---|---|---|
+| **Maturity** | 20+ years, large user base | Pre-1.0, single maintainer |
+| **UI technology** | Gecko (HTML/XUL/JS) | Native Rust, GPU-rendered via `gpui-kit` |
+| **Protocols** | IMAP, POP3, SMTP, NNTP, Exchange (EWS) | IMAP, SMTP, JMAP, Microsoft Graph, Gmail API (POP3 not yet) |
+| **HTML email rendering** | Full web engine | Sanitize-only today; layout engine planned |
+| **Filters / rules** | Mature | Planned |
+| **Import / migration** | Broad | Planned |
+| **Calendar & contacts** | Built in | CalDAV/CardDAV (no `RRULE` expansion) |
+| **Encryption** | OpenPGP + S/MIME | OpenPGP (`rPGP`) + S/MIME validation |
+| **Tracker blocking** | Remote content blocking | Built-in pixel stripping and remote-content block |
+| **Extensions** | Large add-on ecosystem | None (plugin runtime planned) |
+| **Accessibility, spell-check, printing** | Yes | Not yet |
+| **Memory safety of core code** | C++ / JS | Rust |
+| **Performance** | Mature, heavier footprint | Design goal is a lighter, faster client. **Not yet benchmarked**; no published numbers |
 
 ---
 
@@ -85,7 +89,7 @@ Modern desktop email clients are almost universally trapped in web runtimes (Ele
 sequenceDiagram
     autonumber
     actor User as User / OS
-    participant GPUI as GPUI Frontend (120 FPS)
+    participant GPUI as GPUI Frontend
     participant Bus as Async Event Bus (flume / mpsc)
     participant Worker as Tokio Account Actor
     participant Server as Remote Server (IMAP / JMAP / Graph)
@@ -128,14 +132,14 @@ Vespetrel natively abstracts differences between modern and legacy email protoco
 * **Rich In-App Attachment Previewer**: Inspect images, syntax-highlighted code/text, PDF metadata, audio/video codecs/duration, archive trees (ZIP/TAR/GZ), and vCard/iCal data without third-party viewers.
 * **Custom Signatures with Variables**: Per-account rich signatures supporting dynamic placeholders (`{name}`, `{email}`, `{title}`, `{company}`, `{phone}`) with automatic compose injection.
 
-### 🎨 7-Pillar Customization & Betterbird Parity
-* **Diacritic-Insensitive Quick Filter**: Sub-millisecond search across active folder lists with automatic accent folding (`é, à, ö, ü, ñ, ç, ß` → ASCII) and full `/regex/` pattern evaluation.
+### 🎨 7-Pillar Customization & Betterbird-Inspired
+* **Diacritic-Insensitive Quick Filter**: Fast search across active folder lists with automatic accent folding (`é, à, ö, ü, ñ, ç, ß` → ASCII) and full `/regex/` pattern evaluation.
 * **Multi-Template HTML Signatures**: Visual designer generating email-safe responsive HTML signatures across 4 templates (*Modern*, *Minimal*, *Corporate*, *Creative*) with avatars, social badges, and per-account assignment.
 * **Per-Account & Folder Accent Colors**: Customizable color indicators persisted in SQLite for instant visual recognition across complex multi-account setups.
 * **Multi-Density Message Rows**: User-selectable row density modes (`Compact` 32px, `Comfortable` 64px, `Roomy` 96px) matching user workspace preferences.
 * **7-Pillar Settings Engine**: Comprehensive GUI preferences modal controlling Layout, Themes (Dark/Light/OLED Black), Typography, Triaging, Composer, Keyboard Shortcuts, and Privacy/Security.
 
-### 📬 Complete Mail Engine
+### 📬 Mail Engine
 * **Protocol Diversity**: Full support for standard **IMAP4rev2** (`IDLE`, `CONDSTORE`, `QRESYNC`, `SPECIAL-USE` with `VANISHED (EARLIER)` / `EXPUNGE` propagation and incremental UID sync), modern **JMAP** (RFC 8620/8621), and **Microsoft Graph REST** (for corporate Microsoft 365 environments where IMAP is disabled).
 * **MIME Parsing**: Powered by `mail-parser` for zero-copy string slicing (`Cow<str>`), streaming attachments, and robust decoding of 41 legacy character sets.
 * **OAuth2 with PKCE**: Built-in graphical authorization with ephemeral loopback callbacks (`127.0.0.1:0`), SHA-256 challenge + CSRF/Host validation, automated token rotation (60s proactive refresh), and credential storage in the OS credential manager (`keyring-rs` v4, non-blocking `spawn_blocking` load).
@@ -160,7 +164,7 @@ Vespetrel is architected as a highly modular Cargo workspace:
 
 ```
 vespetrel/
-├── Cargo.toml                  # Workspace manifest & shared dependencies (gpui-kit 0.6.0, aws-lc-rs)
+├── Cargo.toml                  # Workspace manifest & shared dependencies (gpui-kit 0.8.1, aws-lc-rs)
 ├── rust-toolchain.toml         # Pinned stable Rust toolchain
 ├── packaging/                  # Native packaging: windows/ (.nsi + manifest), linux/ (.desktop), macos/ (Info.plist)
 ├── .github/workflows/          # CI matrix (fmt + clippy + test + release build + headless verify + cargo-deny audit) & nightly release
@@ -242,100 +246,59 @@ Interactive console commands once launched: `list`/`inbox`, `read <ID>`, `compos
 
 ---
 
-## 🗺️ Detailed Roadmap
+## 🗺️ Roadmap & Status
 
-- [x] **P0: Foundation, Storage & Edition 2024 (COMPLETE)**
-  - [x] Full workspace migration to **Rust 2024 Edition** across all member crates
-  - [x] Rusqlite relational schema with foreign keys, WAL mode, and `_schema_migrations` version tracking (17 tables)
-  - [x] SQLite FTS5 full-text search with BM25 ranking (sub-15ms queries)
-  - [x] Domain entities (`Account`, `Folder`, `Message`, `Thread`, `Contact`, `TaskItem`, `UserSettings`) & unified `MailProvider` trait
-  - [x] Zero-copy MIME parser (`mail-parser`) & compressed raw message store (`lz4_flex` + `zstd`)
-  - [x] Real-time HTML sanitizer (`ammonia`), tracking pixel stripper (`lol_html`), and sandboxed CSP document generator
+Vespetrel is **pre-1.0 (v0.3.x)**. Items are only ticked when they are implemented **and** reachable from the app. Engine-level building blocks (parsers, command builders, data types) that are not yet wired into the UI or sync pipeline are listed as **Planned**, not done. See `CHANGELOG.md` for details.
 
-- [x] **P1: gpui-kit 3-Pane Shell & Message Reader (COMPLETE)**
-  - [x] 3-Pane dock state model & view logic (`vespetrel-app`)
-  - [x] Sandboxed HTML viewport with Content-Security-Policy generator
-  - [x] Zero-allocation SIMD search filter with `memchr` and `ahash`
-  - [x] JWZ message thread tree grouping and sorting algorithm
-  - [x] Virtualized message list state model with dynamic row height prefix-sums
-  - [x] Plaintext / Markdown viewer + security badge indicator model
+### ✅ Shipped
 
-- [x] **P2: Multi-Account Providers & Live Authentication (COMPLETE)**
-  - [x] Google & Microsoft OAuth2 PKCE engine + Loopback TCP listener (`127.0.0.1:0`)
-  - [x] Google OAuth2 access token auto-refresh routine (`refresh_access_token`)
-  - [x] OS Keyring secure token storage (`keyring-rs` v4)
-  - [x] Tokio Account Worker actors & Sync Coordinator with SQLite pool persistence (`vespetrel-engine`)
-  - [x] IMAP IDLE state machine, QRESYNC/CONDSTORE & XOAUTH2 command builders (`vespetrel-imap`)
-  - [x] Live SMTP submit transport with Lettre & DKIM (`vespetrel-smtp::send_live`)
-  - [x] JMAP provider adapter (`vespetrel-jmap`)
-  - [x] Microsoft Graph REST provider adapter (`vespetrel-graph`)
-  - [x] Multi-provider graphical login wizard state machine & compose editor state
+- [x] **Storage & domain model**: Rust 2024 workspace, SQLite (WAL) schema with versioned migrations, FTS5/BM25 full-text search, `MailProvider` trait, `mail-parser` MIME parsing, LZ4/Zstd raw-message blob store
+- [x] **HTML safety pipeline**: `ammonia` sanitizer, `lol_html` tracking-pixel stripping, remote-content blocking, CSP + CID rewriting (sanitizes only; there is no HTML layout/paint engine yet, see Planned)
+- [x] **Mail core**: IMAP (IDLE, CONDSTORE/QRESYNC, XOAUTH2), SMTP via `lettre` with DKIM, JMAP and Microsoft Graph adapters, Gmail label handling
+- [x] **Auth**: OAuth2 PKCE loopback flow (Google, Microsoft), proactive token refresh, OS keyring storage
+- [x] **Setup**: Thunderbird ISPDB autoconfig + heuristic autodiscover, setup wizard, account aliases, HTML signatures
+- [x] **Persistent outbox**: SQLite-backed retry/backoff and scheduled send
+- [x] **UI shell**: `gpui-kit` 3-pane layout, virtualized message list, JWZ threading, settings, command palette, keybinding maps, diacritic-insensitive quick filter, density modes, accent colors
+- [x] **Calendar / contacts / tasks**: CalDAV/CardDAV client (in-crate WebDAV), VTODO tasks. `RRULE` expansion is **not** implemented
+- [x] **Crypto**: OpenPGP via `rPGP`, Autocrypt headers, S/MIME validation
+- [x] **Packaging & CI**: Windows NSIS installer, Linux `.desktop`, macOS `Info.plist`, GitHub Actions matrix, `cargo-deny`
 
-- [x] **P3: PIM, Calendar, Contacts, Tasks & Encryption (COMPLETE)**
-  - [x] CalDAV & CardDAV client integration foundation (in-crate WebDAV, `icalendar`, `vcard4`)
-  - [x] OpenPGP (RFC 9580 v6) armor detector & Autocrypt 1.1 engine (`vespetrel-crypto`)
-  - [x] CalDAV Month, Week, and Day grid views (`CalendarView`)
-  - [x] CardDAV address book with alphabetical grouping and recipient autocomplete (`ContactsView`)
-  - [x] RFC 5545 `VTODO` Tasks engine & view model with due dates and completion toggle (`TaskListView`)
-  - [x] Autocrypt 1.1 header parsing, roundtrip validation, and outbound SMTP injection
+### 🚧 Planned / Partial (engine pieces exist, not production-ready or not wired in)
 
-- [x] **P4: Platform Hardening, Optimization & Packaging (COMPLETE)**
-  - [x] High-DPI Per-Monitor V2 awareness on Windows (`SetProcessDpiAwarenessContext`)
-  - [x] Windows Registry OS Dark/Light theme detection (`AppsUseLightTheme`)
-  - [x] Input Method Editor (IME) composition tracking for CJK/accented input
-  - [x] Hardware SIMD accelerations (`simdutf8`, `memchr`, `ahash`)
-  - [x] `mimalloc` global allocator integration (-40% RAM fragmentation)
-  - [x] Bounded in-memory TinyLFU cache (`moka`) & zero-copy byte slicing (`bytes`)
-  - [x] Lock-free `ArcSwap` shared UI state for 120 FPS `gpui-kit` rendering
-  - [x] Native OS packaging (`packaging/windows/*.nsi` + manifest, `packaging/linux/*.desktop`, `packaging/macos/Info.plist`)
-  - [x] GitHub Actions multi-platform CI matrix + nightly release (`.github/workflows/ci.yml`, `release.yml`)
+**Needed before this can replace Thunderbird day to day**
+- [ ] **HTML email layout & rendering**: current pipeline sanitizes HTML but has no CSS layout/paint engine. Evaluating Blitz (+ `css-inline`) with a plain-text fallback
+- [ ] **Mailbox import / migration**: Thunderbird `profiles.ini`/`prefs.js` and mbox parsers exist in `vespetrel-engine::migrator`, but are not wired into any UI flow. Maildir and Apple Mail import are not implemented
+- [ ] **Message filters / rules engine**: matching types exist (`vespetrel-engine::filter`); not applied on message arrival/send, no rule-editor UI, no auto-reply/forward actions
+- [ ] **Undo send & snooze**: `UndoSendBuffer` and `SnoozeManager` exist but are not connected to the app
+- [ ] **Split inbox categories, unified inboxes, saved searches**: data types exist in `vespetrel-core`; UI and query wiring need verification
+- [ ] **Meeting invitations (iCalendar RSVP)**: parsing types exist; no end-to-end accept/decline flow
+- [ ] **Printing**
+- [ ] **Spell-check / dictionaries**
+- [ ] **Accessibility (screen readers)**: depends on `gpui` support
+- [ ] **CalDAV edge cases**: `RRULE` expansion, timezone handling
 
-- [x] **P5: Power-User Capabilities, Interoperability & Migration (COMPLETE)**
-  - [x] **1-Click Thunderbird & Apple Mail Migrator**: Direct import from `~/.thunderbird/` profile directories (`profiles.ini`, `prefs.js`, `ImapMail/`, `Mail/Local Folders/`, `abook.sqlite`, `mbox`, and `maildir` files)
-  - [x] **Message Filter & Automation Rule Engine**: Client-side filtering pipeline (triggers on arrival/send, criteria matching with regex/SIMD text search, actions: move to folder, add tags/flags, mark read, forward, auto-reply)
-  - [x] **ManageSieve RFC 5804 Client**: Sieve script management, syntax validation, and remote synchronization with Dovecot, Fastmail, and Stalwart mail servers
-  - [x] **Smart Virtual Folders & Unified Inboxes**: Cross-account unified views (All Inboxes, All Flagged, Unread, Today) and saved persistent search queries (Smart Folders)
-  - [x] **iCalendar Meeting Invitations State Machine**: Parsing incoming `.ics` attachments, showing rich meeting invitation banners with 1-click RSVP (Accept / Decline / Tentative) and auto-updating CalDAV calendars
-  - [x] **News & RSS/Atom Feed Reader**: Full RSS 2.0 / Atom feed parser & subscription manager integrated into the folder tree with offline article caching
-  - [x] **URL Tracker Cleaner & Anti-Phishing Analyzer**: Strips query tracking parameters (`utm_*`, `fbclid`, `gclid`, `mc_eid`) and analyzes links for homograph attacks and suspicious punycode domains
+**Protocols & integrations (building blocks only)**
+- [ ] **POP3**: command builders and UIDL tracking only; no network client
+- [ ] **ManageSieve**: command builders and script validator only; no network client
+- [ ] **RSS/Atom feeds**: parser (`parse_feed_xml`) only; no fetching, subscription UI or folder-tree integration
+- [ ] **Matrix bridge**: request/URL builders only; no sync loop or UI
+- [ ] **Plugin system**: manifest + permission model only; **no WASM runtime**, plugins cannot execute
+- [ ] **Hardware tokens (YubiKey / PKCS#11 / FIDO2)**: current code is a software-only PIN/HMAC simulation. There is no real smartcard or token integration. Do not rely on it for key protection
+- [ ] **Newsgroups (NNTP)**, enterprise policy / group-policy support, add-on ecosystem: not planned yet
 
-- [x] **P6: Extensibility, Statistical Intelligence & Enterprise Security (COMPLETE)**
-  - [x] **WASM / WebExtension Plugin Sandbox**: Secure plugin runtime model for custom toolbar buttons, notifications, message tags, and AI assistant sidecars
-  - [x] **Bayesian Spam Filter & Statistical Classifier**: Local on-device Naive Bayes spam engine learning from user `Spam` / `Ham` actions with $O(n)$ token probability selection
-  - [x] **Hardware Token & Smartcard Cryptography**: FIDO2 / YubiKey PKCS#11 hardware PGP & S/MIME token signing and decryption
-  - [x] **Configurable Keybinding Engine**: Gmail, Vim, and Thunderbird default keyboard shortcut maps with custom JSON keymap configurations
-  - [x] **POP3 Legacy Client Engine**: Full RFC 1939 POP3 provider support with SSL/TLS and UIDL tracking for legacy mail servers
-  - [x] **Decentralized Matrix & Chat Bridge**: Native Matrix protocol client integration for real-time team communication alongside email threads
+**Quality & verification**
+- [ ] Reproducible benchmark harness (startup, search over 100k+ messages, idle RAM, typing latency) before publishing any performance numbers. Today only loose storage regression budgets exist (`crates/vespetrel-storage/tests/perf_budget.rs`, ~4,500 messages)
+- [ ] Real-server interop testing: Gmail, Outlook.com, Fastmail, iCloud, Dovecot, Stalwart
+- [ ] Audit and isolate the `mock` features in `vespetrel-imap` / `-graph` / `-dav` / `-jmap` / `-smtp` so a real failure can never fall back to fabricated data (the IMAP client already gates this on loopback hosts only)
+- [ ] Split the 8,500-line `vespetrel-app/src/gui.rs` into modules
+- [ ] Linux CI deps (`xcb` / `xkbcommon` / `fontconfig`), clippy + `cargo-deny` parity, docs polish
+- [ ] Verified Linux and macOS builds (Windows is the primary target today)
 
-- [x] **P7: Modern Workflow Ergonomics, Customization & Betterbird Parity (COMPLETE)**
-  - [x] **7-Pillar Customization & Settings Engine**: Tabbed modal view model (`SettingsViewState`) controlling Layout, Themes, Typography, Triaging, Composer, Shortcuts, and Privacy/Security.
-  - [x] **Betterbird Parity — Diacritic Folding & Regex Quick Filter**: Accent-agnostic search (`é, à, ö, ü, ñ, ç, ß` → ASCII) and live `/regex/` pattern matching across folder items.
-  - [x] **Multi-Template HTML Signature Designer**: 4 responsive HTML signature templates (*Modern*, *Minimal*, *Corporate*, *Creative*) with live preview and per-account assignment.
-  - [x] **Per-Account & Folder Accent Colors**: Custom color indicators saved in SQLite and rendered dynamically across folder tree and account switchers.
-  - [x] **Multi-Density Message Row Modes**: `Compact` (32px), `Comfortable` (64px), and `Roomy` (96px) row layouts.
-  - [x] **Native TipTap-Style Rich Text & Markdown WYSIWYG Editor**: Native span & block attributed text engine with floating bubble menu, markdown input rules (`**bold**`, `# heading`, `- list`), and clean MIME HTML serialization.
-  - [x] **Undo Send (Configurable Grace Period Buffer)**: 5–30s cancellation delay buffer allowing immediate recall of accidental sends.
-  - [x] **Scheduled Send (Delayed Outbox Queue)**: Timezone-aware delayed outbox queue for automated future email transmission.
-  - [x] **Thread Snoozing & Reminder Queue**: Temporarily snooze conversations with automatic resurfacing in Inbox at trigger timestamp.
-  - [x] **Split Inbox Categories**: Categorized inbox tabs (Primary, Updates, Promotions, Newsletters, Social) with heuristic and SIMD header classification.
-  - [x] **1-Click `List-Unsubscribe` & Newsletter Bundling**: RFC 2369 / RFC 8058 automated one-click unsubscribe and collapsible newsletter bundles.
-  - [x] **Command Palette (`Ctrl+K` / `Cmd+K` Superhuman Action Switcher)**: Instant fuzzy-finder action switcher for commands, folders, and compose actions.
-  - [x] **Reusable Email Snippets & Templates with Variables**: Pre-saved response templates with `{{name}}`, `{{company}}`, `{{email}}` placeholder interpolation.
-
-- [ ] **P8: Unreleased — Interactive Setup, Outbox & Hardening (IN PROGRESS, see `CHANGELOG.md`)**
-  - [x] **Interactive Setup Wizard**: `gpui-kit` `Input`/`InputState` fields, masked password + eye toggle, Personal/Work/Team presets
-  - [x] **OAuth2 Browser Flow (PKCE)**: `127.0.0.1:0` loopback, SHA-256 challenge + CSRF/Host checks, browser consent, HTML confirmation, OpenID userinfo discovery, OS keyring storage
-  - [x] **Dual Gmail Auth**: `Browser OAuth2` vs `App Password (IMAP)` (`imap.gmail.com:993` / `smtp.gmail.com:587`)
-  - [x] **Persistent Outbox & Dispatch**: SQLite-backed retry backoff + scheduled send, background worker + `flume` wake, graceful shutdown
-  - [x] **Proactive Token Refresh**: 60s pre-expiry refresh with cached-credential fallback
-  - [x] **Protocol Hardening**: `QRESYNC`/`CONDSTORE` incremental sync, `VANISHED (EARLIER)`/`EXPUNGE` propagation, PGP/MIME + S/MIME verification, FTS5 transactional integrity, CSP + CID rewrite + pixel removal
-  - [x] **UI Stack Migration**: Raw `gpui` git dep → `gpui-kit 0.6.0` (`Root`/`init`/`input`), `aws-lc-rs` default crypto provider
-  - [ ] Remaining: CI Linux deps (`xcb`/`xkbcommon`/`fontconfig`), `clippy` + `cargo-deny` audit parity, docs polish
-
-
-
-
-
+### Known limitations
+- No benchmark numbers are published yet; earlier performance targets were goals, not measurements. A local harness is available via `vespetrel --benchmark`.
+- Accessibility (screen readers) is not yet supported: gpui 0.8.1 does not expose platform accessibility APIs, so this is tracked upstream and is documented here rather than claimed.
+- Complex HTML newsletters will look worse than in Thunderbird until a layout engine lands.
+- Some features exist as libraries with unit tests but have not been exercised against live servers.
 
 ---
 

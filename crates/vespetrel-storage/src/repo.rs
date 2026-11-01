@@ -1423,6 +1423,55 @@ pub fn mark_outbox_failed(conn: &Connection, id: &str, error: &str) -> StorageRe
     Ok(())
 }
 
+pub fn add_message_tag(
+    conn: &Connection,
+    message_id: &str,
+    tag: &str,
+    color: &str,
+) -> StorageResult<()> {
+    conn.execute(
+        "INSERT OR IGNORE INTO message_tags (message_id, tag, color) VALUES (?1, ?2, ?3)",
+        params![message_id, tag, color],
+    )?;
+    Ok(())
+}
+
+pub fn remove_message_tag(conn: &Connection, message_id: &str, tag: &str) -> StorageResult<()> {
+    conn.execute(
+        "DELETE FROM message_tags WHERE message_id = ?1 AND tag = ?2",
+        params![message_id, tag],
+    )?;
+    Ok(())
+}
+
+pub fn list_message_tags(
+    conn: &Connection,
+    message_id: &str,
+) -> StorageResult<Vec<(String, String)>> {
+    let mut stmt =
+        conn.prepare("SELECT tag, color FROM message_tags WHERE message_id = ?1 ORDER BY tag")?;
+    let rows = stmt.query_map(params![message_id], |r| Ok((r.get(0)?, r.get(1)?)))?;
+    let mut result = Vec::new();
+    for r in rows {
+        result.push(r?);
+    }
+    Ok(result)
+}
+
+pub fn frequent_contacts(
+    conn: &Connection,
+    account_id: &str,
+    limit: usize,
+) -> StorageResult<Vec<String>> {
+    let mut stmt = conn.prepare("SELECT from_address, COUNT(*) AS c FROM messages WHERE account_id = ?1 GROUP BY from_address ORDER BY c DESC LIMIT ?2")?;
+    let rows = stmt.query_map(params![account_id, limit as i64], |r| r.get::<_, String>(0))?;
+    let mut result = Vec::new();
+    for r in rows {
+        result.push(r?);
+    }
+    Ok(result)
+}
+
 #[cfg(test)]
 mod tests {
 

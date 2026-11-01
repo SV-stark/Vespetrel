@@ -86,6 +86,12 @@ pub static MIGRATIONS: &[Migration] = &[
         sql: include_str!("../sql/006_account_aliases.sql"),
         guard: None,
     },
+    Migration {
+        version: 7,
+        name: "message_tags",
+        sql: include_str!("../sql/007_message_tags.sql"),
+        guard: None,
+    },
 ];
 
 /// Add `messages.remote_id` only when an older database predates the column.

@@ -101,7 +101,10 @@ async fn main() -> anyhow::Result<()> {
     }));
 
     if args.contains(&"--help".to_string()) || args.contains(&"-h".to_string()) {
-        println!("Vespetrel - Pure Rust Mail Client v0.1.0");
+        println!(
+            "Vespetrel - Pure Rust Mail Client v{}",
+            env!("CARGO_PKG_VERSION")
+        );
         println!("\nUsage: vespetrel [OPTIONS]");
         println!("\nOptions:");
         println!(
@@ -111,12 +114,20 @@ async fn main() -> anyhow::Result<()> {
         println!("  --headless     Run headless startup check and exit immediately");
         println!("  --verbose      Enable verbose debug tracing output");
         println!("  --version      Print version information");
+        println!("  --doctor       Run diagnostics (autodiscover, OAuth, IMAP/SMTP, keyring, DB)");
+        println!("  --benchmark    Run the local benchmark harness");
+        println!(
+            "  --import-thunderbird  Scan for Thunderbird profiles (pass `--apply` to persist into DB)"
+        );
         println!("  --help         Print this help message");
         return Ok(());
     }
 
     if args.contains(&"--version".to_string()) || args.contains(&"-v".to_string()) {
-        println!("vespetrel 0.1.0 (pure rust mail client)");
+        println!(
+            "vespetrel {} (pure rust mail client)",
+            env!("CARGO_PKG_VERSION")
+        );
         return Ok(());
     }
 
@@ -156,6 +167,299 @@ async fn main() -> anyhow::Result<()> {
             })
             .await;
     }
+    if args.contains(&"--doctor".to_string()) {
+        println!("Vespetrel Doctor Diagnostics");
+        println!("Database: {db_path}");
+        // DB integrity
+        if let Some(pool) = &storage_pool {
+            if let Ok(conn) = pool.get().await {
+                let status: String = conn
+                    .interact(|c| {
+                        c.query_row("PRAGMA quick_check(1);", [], |r| r.get(0))
+                            .unwrap_or_else(|e| format!("error: {e}"))
+                    })
+                    .await
+                    .unwrap_or_else(|e| format!("error: {e}"));
+                println!("  SQLite quick_check: {status}");
+            }
+        } else {
+            println!("  SQLite: no storage pool");
+        }
+
+        let accounts = if let Some(pool) = &storage_pool {
+            match pool.get().await {
+                Ok(conn) => conn
+                    .interact(|c| vespetrel_storage::repo::list_accounts(c))
+                    .await
+                    .ok()
+                    .and_then(|r| r.ok())
+                    .unwrap_or_default(),
+                Err(_) => Vec::new(),
+            }
+        } else {
+            Vec::new()
+        };
+
+        println!("  Accounts: {}", accounts.len());
+        for acct in &accounts {
+            println!(
+                "    - {} <{}> ({:?})",
+                acct.name, acct.email, acct.provider_type
+            );
+            // keyring
+            let key = acct
+                .auth_config
+                .keyring_key
+                .clone()
+                .unwrap_or_else(|| acct.id.clone());
+            let has_secret = keyring::Entry::new("vespetrel", &key)
+                .and_then(|e| e.get_password())
+                .map(|p| !p.is_empty())
+                .unwrap_or(false);
+            println!("        keyring secret present: {has_secret}");
+            if acct.auth_config.refresh_token_keyring_key.is_some() {
+                println!(
+                    "        oauth refresh token present: {}",
+                    acct.auth_config
+                        .refresh_token_keyring_key
+                        .as_ref()
+                        .map(|k| keyring::Entry::new("vespetrel", k)
+                            .and_then(|e| e.get_password())
+                            .map(|p| !p.is_empty())
+                            .unwrap_or(false))
+                        .unwrap_or(false)
+                );
+            }
+            // autodiscover hint
+            let domain = acct.email.split('@').nth(1).unwrap_or("").to_lowercase();
+            println!("        autodiscover domain: {domain}");
+
+            // connectivity
+            let host =
+                acct.auth_config
+                    .server_host
+                    .clone()
+                    .unwrap_or_else(|| match acct.provider_type {
+                        vespetrel_core::account::ProviderType::Gmail => "imap.gmail.com".into(),
+                        vespetrel_core::account::ProviderType::Graph => {
+                            "outlook.office365.com".into()
+                        }
+                        vespetrel_core::account::ProviderType::Jmap => "api.fastmail.com".into(),
+                        _ => format!("imap.{}", domain),
+                    });
+            let port = acct.auth_config.server_port.unwrap_or(993);
+            let addr = format!("{host}:{port}");
+            let conn_res = tokio::time::timeout(
+                std::time::Duration::from_secs(5),
+                tokio::net::TcpStream::connect(&addr),
+            )
+            .await;
+            match conn_res {
+                Ok(Ok(_)) => println!("        IMAP TCP {addr}: OK"),
+                Ok(Err(e)) => println!("        IMAP TCP {addr}: FAIL ({e})"),
+                Err(_) => println!("        IMAP TCP {addr}: TIMEOUT"),
+            }
+        }
+
+        println!("Doctor finished.");
+        return Ok(());
+    }
+
+    if args.contains(&"--benchmark".to_string()) {
+        println!("Vespetrel Benchmark");
+        let bench_start = std::time::Instant::now();
+        let pool_start = std::time::Instant::now();
+        let pool = vespetrel_storage::db::create_pool(":memory:").expect("pool");
+        let conn = pool.get().await.expect("conn");
+        let startup_ms = pool_start.elapsed().as_millis();
+        println!("Startup/init: {} ms", startup_ms);
+        // account/folder setup
+        let acct = vespetrel_core::Account::new(
+            "Bench",
+            "bench@example.com",
+            vespetrel_core::account::ProviderType::Imap,
+        );
+        let acct_clone = acct.clone();
+        conn.interact(move |c| vespetrel_storage::repo::upsert_account(c, &acct_clone))
+            .await
+            .unwrap()
+            .unwrap();
+        let folder = vespetrel_core::Folder::new(&acct.id, "inbox", "Inbox", "INBOX");
+        let folder_clone = folder.clone();
+        conn.interact(move |c| vespetrel_storage::repo::upsert_folder(c, &folder_clone))
+            .await
+            .unwrap()
+            .unwrap();
+
+        let n = 100_000usize;
+        let start = std::time::Instant::now();
+        let acct_id = acct.id.clone();
+        let folder_id = folder.id.clone();
+        conn.interact(move |c| -> anyhow::Result<()> {
+            let tx = c.transaction()?;
+            for i in 0..n {
+                let mut msg = vespetrel_core::Message::new(
+                    &acct_id,
+                    &folder_id,
+                    i as u32 + 1,
+                    format!("Subject {}", i),
+                    "sender@example.com",
+                    vec!["bench@example.com".into()],
+                );
+                msg.body_snippet = Some(format!("body text {}", i));
+                vespetrel_storage::repo::insert_message(&tx, &msg)?;
+            }
+            tx.commit()?;
+            Ok(())
+        })
+        .await
+        .unwrap()
+        .unwrap();
+        let insert_elapsed = start.elapsed();
+        println!("Inserted {} messages in {:?}", n, insert_elapsed);
+
+        // search
+        let qstart = std::time::Instant::now();
+        let results = conn
+            .interact(|c| vespetrel_storage::fts::search_messages(c, "Subject", None, 50))
+            .await
+            .unwrap()
+            .unwrap();
+        let qelapsed = qstart.elapsed();
+        println!(
+            "Search 'Subject' -> {} results in {:?}",
+            results.len(),
+            qelapsed
+        );
+        println!("Total benchmark time: {:?}", bench_start.elapsed());
+        println!("Benchmark finished.");
+        return Ok(());
+    }
+
+    if args.contains(&"--import-thunderbird".to_string()) {
+        let apply = args.contains(&"--apply".to_string());
+        println!(
+            "Thunderbird Import{}",
+            if apply { " (applying to database)" } else { "" }
+        );
+        let profiles = vespetrel_engine::discover_thunderbird_profiles();
+        println!("Discovered {} profile(s)", profiles.len());
+        let mut total_accounts = 0;
+        let mut total_messages = 0;
+
+        for p in &profiles {
+            println!(
+                "  - {} ({}){}",
+                p.name,
+                p.path.display(),
+                if p.is_default { " [default]" } else { "" }
+            );
+            if let Ok(prefs) = std::fs::read_to_string(p.path.join("prefs.js")) {
+                let accounts = vespetrel_engine::parse_thunderbird_prefs(&prefs);
+                println!("      parsed {} account(s)", accounts.len());
+                for a in &accounts {
+                    println!(
+                        "        * {} <{}> ({}:{})",
+                        a.name, a.email, a.incoming_host, a.incoming_port
+                    );
+
+                    if apply && let Some(ref pool) = storage_pool {
+                        let mut acct = vespetrel_core::Account::new(
+                            a.name.clone(),
+                            a.email.clone(),
+                            a.provider_type.clone(),
+                        );
+                        acct.auth_config.server_host = Some(a.incoming_host.clone());
+                        acct.auth_config.server_port = Some(a.incoming_port);
+                        acct.auth_config.username = Some(a.incoming_user.clone());
+
+                        let local_folders = vec![
+                            vespetrel_core::Folder::new(&acct.id, "INBOX", "Inbox", "INBOX")
+                                .with_role(vespetrel_core::FolderRole::Inbox),
+                            vespetrel_core::Folder::new(&acct.id, "Drafts", "Drafts", "Drafts")
+                                .with_role(vespetrel_core::FolderRole::Drafts),
+                            vespetrel_core::Folder::new(&acct.id, "Sent", "Sent", "Sent")
+                                .with_role(vespetrel_core::FolderRole::Sent),
+                            vespetrel_core::Folder::new(&acct.id, "Trash", "Trash", "Trash")
+                                .with_role(vespetrel_core::FolderRole::Trash),
+                            vespetrel_core::Folder::new(&acct.id, "Archive", "Archive", "Archive")
+                                .with_role(vespetrel_core::FolderRole::Archive),
+                        ];
+
+                        let mbox_files = vespetrel_engine::migrator::find_thunderbird_mbox_files(
+                            &p.path,
+                            &a.incoming_host,
+                        );
+                        let mut msgs_to_insert = Vec::new();
+                        let inbox_folder_id = local_folders[0].id.clone();
+
+                        for (name, path) in mbox_files {
+                            let target_folder_id = if name.eq_ignore_ascii_case("inbox") {
+                                &inbox_folder_id
+                            } else if name.to_ascii_lowercase().contains("draft") {
+                                &local_folders[1].id
+                            } else if name.to_ascii_lowercase().contains("sent") {
+                                &local_folders[2].id
+                            } else if name.to_ascii_lowercase().contains("trash") {
+                                &local_folders[3].id
+                            } else {
+                                &inbox_folder_id
+                            };
+
+                            if let Ok(data) = std::fs::read(&path) {
+                                let raw_msgs = vespetrel_engine::migrator::parse_mbox_data(&data);
+                                for (idx, raw) in raw_msgs.iter().take(100).enumerate() {
+                                    if let Some(msg) =
+                                        vespetrel_engine::migrator::parse_mime_to_message(
+                                            &acct.id,
+                                            target_folder_id,
+                                            (idx + 1) as u32,
+                                            raw,
+                                        )
+                                    {
+                                        msgs_to_insert.push(msg);
+                                    }
+                                }
+                            }
+                        }
+
+                        if let Ok(conn) = pool.get().await {
+                            let a_clone = acct.clone();
+                            let f_clone = local_folders.clone();
+                            let m_clone = msgs_to_insert.clone();
+                            let _ = conn
+                                .interact(move |c| -> anyhow::Result<()> {
+                                    vespetrel_storage::repo::upsert_account(c, &a_clone)?;
+                                    for f in &f_clone {
+                                        let _ = vespetrel_storage::repo::upsert_folder(c, f);
+                                    }
+                                    for m in &m_clone {
+                                        let _ = vespetrel_storage::repo::insert_message(c, m);
+                                    }
+                                    Ok(())
+                                })
+                                .await;
+                        }
+
+                        total_accounts += 1;
+                        total_messages += msgs_to_insert.len();
+                    }
+                }
+            }
+        }
+        if apply {
+            println!(
+                "Import applied: {} account(s), {} message(s) stored in database.",
+                total_accounts, total_messages
+            );
+        } else {
+            println!(
+                "Import scan finished. Pass `--apply` to persist accounts and messages into the database."
+            );
+        }
+        return Ok(());
+    }
+
     let blob_dir = if db_path == ":memory:" {
         let p = std::env::temp_dir().join(format!("vespetrel_blobs_{}", uuid::Uuid::new_v4()));
         let _ = std::fs::create_dir_all(&p);
@@ -199,7 +503,10 @@ async fn main() -> anyhow::Result<()> {
 
     // In-memory / CI verification mode
     if is_headless {
-        println!("Vespetrel - Pure Rust gpui Mail Client v0.1.0");
+        println!(
+            "Vespetrel - Pure Rust gpui Mail Client v{}",
+            env!("CARGO_PKG_VERSION")
+        );
         println!("Storage: SQLite WAL + FTS5 | Engine: Tokio Sync | Render: ammonia+lol_html");
         println!(
             "✓ Storage schema OK ({} PRAGMAs applied, target: {})",

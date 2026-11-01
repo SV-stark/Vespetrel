@@ -253,7 +253,7 @@ impl MailProvider for GraphProvider {
             }
         }
 
-        #[cfg(any(test, feature = "mock"))]
+        #[cfg(test)]
         {
             // Test/Offline simulated folders
             return Ok(vec![
@@ -276,7 +276,7 @@ impl MailProvider for GraphProvider {
             ]);
         }
 
-        #[cfg(not(any(test, feature = "mock")))]
+        #[cfg(not(test))]
         {
             Err(vespetrel_core::provider::ProviderError::Protocol(
                 "Microsoft Graph returned no mailboxes or token is invalid".into(),
@@ -477,7 +477,7 @@ impl MailProvider for GraphProvider {
             return Ok(delta);
         }
 
-        #[cfg(any(test, feature = "mock"))]
+        #[cfg(test)]
         {
             // Offline / simulated delta response
             let new_sync_state = SyncState {
@@ -490,7 +490,7 @@ impl MailProvider for GraphProvider {
             });
         }
 
-        #[cfg(not(any(test, feature = "mock")))]
+        #[cfg(not(test))]
         {
             Err(vespetrel_core::provider::ProviderError::Protocol(
                 "Microsoft Graph sync failed: invalid access token".into(),
@@ -521,7 +521,7 @@ impl MailProvider for GraphProvider {
             return Ok(bytes.to_vec());
         }
 
-        #[cfg(any(test, feature = "mock"))]
+        #[cfg(test)]
         {
             return Ok(format!(
                 "From: graph@example.com\r\nSubject: Graph {}\r\n\r\nGraph Message Content",
@@ -530,7 +530,7 @@ impl MailProvider for GraphProvider {
             .into_bytes());
         }
 
-        #[cfg(not(any(test, feature = "mock")))]
+        #[cfg(not(test))]
         {
             Err(vespetrel_core::provider::ProviderError::Protocol(format!(
                 "unable to fetch MIME for Graph message {remote_id}: invalid access token"

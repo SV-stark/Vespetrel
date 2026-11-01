@@ -11,6 +11,7 @@ pub mod message;
 pub mod provider;
 pub mod richtext;
 pub mod search;
+pub mod search_ops;
 pub mod settings;
 pub mod signature;
 
@@ -33,6 +34,7 @@ pub use message::{
 pub use provider::{FolderDelta, MailProvider, RemoteFolder, SyncDelta, SyncEvent, SyncScope};
 pub use richtext::{BlockKind, InlineStyle, RichTextDocument, TextSpan};
 pub use search::{escape_fts5_query, escape_fts5_term, fts5_predicate};
+pub use search_ops::*;
 pub use settings::*;
 pub use signature::{Signature, SignatureProfile, SignatureStore, SignatureTemplate};
 pub use split_inbox::{InboxCategory, classify_inbox_category};

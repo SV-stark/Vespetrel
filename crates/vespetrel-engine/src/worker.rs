@@ -28,7 +28,7 @@ const MAX_BODY_PREVIEW_CHARS: usize = 4096;
 ///
 /// Returns `None` for the all-zero value mail-parser produces when the header is missing or
 /// unparsable, so a bogus date cannot overwrite a good default with 1970.
-fn mail_date_to_utc(d: &mail_parser::DateTime) -> Option<chrono::DateTime<chrono::Utc>> {
+pub(crate) fn mail_date_to_utc(d: &mail_parser::DateTime) -> Option<chrono::DateTime<chrono::Utc>> {
     if d.year == 0 && d.month == 0 && d.day == 0 {
         return None;
     }

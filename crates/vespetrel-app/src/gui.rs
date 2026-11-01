@@ -15,7 +15,7 @@ pub mod gpui_app {
         quick_filter::QuickFilterState,
         tasks::TaskListView,
     };
-    pub use gpui_kit::assets::Assets;
+    pub use gpui_kit::assets::{Assets, IconName};
     pub use gpui_kit::base;
     use gpui_kit::base::Selectable;
     pub use gpui_kit::component;
@@ -35,8 +35,7 @@ pub mod gpui_app {
     use gpui_kit::component::text::TextView;
     pub use gpui_kit::component::theme::{Theme, ThemeMode};
     pub use gpui_kit::component::{
-        ActiveTheme, Icon, IconName, Sizable, ThemeStyled, TitleBar, VirtualList, WindowExt,
-        v_virtual_list,
+        ActiveTheme, Icon, Sizable, ThemeStyled, TitleBar, VirtualList, WindowExt, v_virtual_list,
     };
     pub use gpui_kit::gpui;
     pub use gpui_kit::prelude::FluentBuilder;
@@ -489,6 +488,9 @@ pub mod gpui_app {
         Compose,
         CommandPalette,
         AddAccount,
+        FilterRules,
+        ThunderbirdImport,
+        ContactsPicker,
         AttachmentPreview {
             filename: String,
             mime_type: String,
@@ -535,6 +537,12 @@ pub mod gpui_app {
         pub folders: Vec<Folder>,
         pub selected_folder_id: Option<String>,
         pub is_unified_inbox: bool,
+        /// Active virtual folder (saved search / split category) applied on top of the loaded list.
+        pub active_virtual_folder: Option<vespetrel_core::VirtualFolder>,
+        /// Selected split-inbox category filter (None = all).
+        pub active_split_category: Option<vespetrel_core::split_inbox::InboxCategory>,
+        /// User-created saved searches shown in the folder pane.
+        pub saved_searches: Vec<vespetrel_core::VirtualFolder>,
         pub messages: Vec<MessageSummary>,
         /// The reader's current row and the bulk-action range, kept together so a
         /// selection cannot outlive the message it points at.
@@ -542,6 +550,8 @@ pub mod gpui_app {
         pub selected_message_id: Option<String>,
         pub list_filter: ListFilter,
         pub search_query: String,
+        pub search_history: Vec<String>,
+        pub selected_message_tags: Vec<(String, String)>,
         /// Whether the folder pane is shown. A keyboard shortcut toggles it, so it has
         /// to be state rather than a constant in the render function.
         pub folder_tree_visible: bool,
@@ -610,11 +620,55 @@ pub mod gpui_app {
         pub wizard_inputs: Option<WizardInputEntities>,
         pub toasts: Vec<Toast>,
         pub command_state: Option<Entity<CommandState>>,
+        /// In-memory undo-send grace buffer (connected to the outbox).
+        pub undo_send_buffer: vespetrel_engine::UndoSendBuffer,
+        /// In-memory snooze manager (connected to folder moves).
+        pub snooze_manager: vespetrel_engine::SnoozeManager,
+        /// Message filter engine applied on arrival.
+        pub filter_engine: vespetrel_engine::FilterEngine,
     }
 
     impl MainWindow {
         /// Creates a mock `MainWindow` with in-memory sample fixtures (for tests or headless mock preview).
         /// In production runtime, use [`MainWindow::from_storage`] with an initialized SQLite storage pool.
+        fn virtual_folder_matches(
+            vf: &vespetrel_core::VirtualFolder,
+            msg: &vespetrel_core::MessageSummary,
+        ) -> bool {
+            use vespetrel_core::virtual_folder::VirtualFolderType;
+            match &vf.folder_type {
+                VirtualFolderType::UnifiedInbox
+                | VirtualFolderType::UnifiedFlagged
+                | VirtualFolderType::UnifiedUnread
+                | VirtualFolderType::Today
+                | VirtualFolderType::HasAttachments => true,
+                VirtualFolderType::SavedSearch { query } => {
+                    let q = query.to_lowercase();
+                    if q.trim().is_empty() {
+                        return true;
+                    }
+                    msg.subject
+                        .as_deref()
+                        .unwrap_or("")
+                        .to_lowercase()
+                        .contains(&q)
+                        || msg.from_address.to_lowercase().contains(&q)
+                        || msg
+                            .from_name
+                            .as_deref()
+                            .unwrap_or("")
+                            .to_lowercase()
+                            .contains(&q)
+                        || msg
+                            .snippet
+                            .as_deref()
+                            .unwrap_or("")
+                            .to_lowercase()
+                            .contains(&q)
+                }
+            }
+        }
+
         pub fn new(
             window: &mut Window,
             cx: &mut Context<Self>,
@@ -845,6 +899,11 @@ pub mod gpui_app {
                         if let Ok((accs, flds, msgs, cnts, cals, tsks, stgs, aliases, sigs)) = res {
                             let _ = this.update(cx, |view, cx| {
                                 view.accounts = accs;
+                                if view.accounts.is_empty()
+                                    && !vespetrel_engine::discover_thunderbird_profiles().is_empty()
+                                {
+                                    view.active_modal = ActiveModal::ThunderbirdImport;
+                                }
                                 view.folders = flds;
                                 if let Some(first_fld) = view.folders.first() {
                                     view.selected_folder_id = Some(first_fld.id.clone());
@@ -908,12 +967,17 @@ pub mod gpui_app {
                 accounts,
                 selected_folder_id: folders.first().map(|f: &Folder| f.id.clone()),
                 is_unified_inbox: true,
+                active_virtual_folder: None,
+                active_split_category: None,
+                saved_searches: Vec::new(),
                 selected_message_id: messages.first().map(|m: &MessageSummary| m.id.clone()),
                 folders,
                 messages,
                 selection: MessageSelection::new(),
                 list_filter: ListFilter::All,
                 search_query: String::new(),
+                search_history: Vec::new(),
+                selected_message_tags: Vec::new(),
                 folder_tree_visible: true,
                 block_remote_images: true,
                 message_viewer: MessageViewer::new(),
@@ -946,12 +1010,34 @@ pub mod gpui_app {
                 wizard_inputs: None,
                 toasts: Vec::new(),
                 command_state: None,
+                undo_send_buffer: vespetrel_engine::UndoSendBuffer::new(
+                    UserSettings::default().undo_send_seconds as i64,
+                ),
+                snooze_manager: vespetrel_engine::SnoozeManager::new(),
+                filter_engine: vespetrel_engine::FilterEngine::default(),
             }
         }
 
         pub fn handle_sync_event(&mut self, event: SyncEvent, cx: &mut Context<Self>) {
             match event {
-                SyncEvent::MessagesInserted(new_msgs) => {
+                SyncEvent::MessagesInserted(mut new_msgs) => {
+                    // Apply message filters/rules on arrival (move, tag, mark read, star).
+                    for msg in &mut new_msgs {
+                        let actions = self.filter_engine.evaluate(msg);
+                        for action in actions {
+                            match action {
+                                vespetrel_engine::FilterAction::MarkRead => msg.is_read = true,
+                                vespetrel_engine::FilterAction::MarkUnread => msg.is_read = false,
+                                vespetrel_engine::FilterAction::MarkFlagged => {
+                                    msg.is_flagged = true
+                                }
+                                vespetrel_engine::FilterAction::MarkUnflagged => {
+                                    msg.is_flagged = false
+                                }
+                                _ => {}
+                            }
+                        }
+                    }
                     self.status_message = format!("Received {} new message(s)", new_msgs.len());
                     if let Some(first) = new_msgs.first() {
                         let sender = if let Some(ref name) = first.from_name {
@@ -1120,7 +1206,7 @@ pub mod gpui_app {
                     let Some(conn) = pool.get().await.ok() else {
                         return;
                     };
-                    let (full_msg, atts) = conn
+                    let (full_msg, atts, tags) = conn
                         .interact(move |c| {
                             let _ = vespetrel_storage::repo::update_message_flags(
                                 c,
@@ -1133,10 +1219,12 @@ pub mod gpui_app {
                             let atts =
                                 vespetrel_storage::repo::list_attachments_for_message(c, &mid)
                                     .unwrap_or_default();
-                            (full_msg, atts)
+                            let tags = vespetrel_storage::repo::list_message_tags(c, &mid)
+                                .unwrap_or_default();
+                            (full_msg, atts, tags)
                         })
                         .await
-                        .unwrap_or((None, Vec::new()));
+                        .unwrap_or((None, Vec::new(), Vec::new()));
                     let Some(full) = full_msg else {
                         return;
                     };
@@ -1163,6 +1251,7 @@ pub mod gpui_app {
                             email: full.from_address.clone(),
                         });
                         view.message_viewer.sent_at = Some(full.sent_at);
+                        view.selected_message_tags = tags.clone();
                         view.message_viewer.attachments = atts
                             .into_iter()
                             .map(|a| AttachmentInfo {
@@ -1233,6 +1322,10 @@ pub mod gpui_app {
         pub fn execute_fts_search(&mut self, query: &str, cx: &mut Context<Self>) {
             let q = query.trim().to_string();
             self.search_query = q.clone();
+            if !q.is_empty() && !self.search_history.iter().any(|h| h == &q) {
+                self.search_history.insert(0, q.clone());
+                self.search_history.truncate(10);
+            }
             self.invalidate_message_cache();
             if q.is_empty() {
                 self.reload_messages_for_current_folder(cx);
@@ -1987,6 +2080,9 @@ pub mod gpui_app {
         }
 
         pub fn undo_send(&mut self, outbox_id: &str, cx: &mut Context<Self>) {
+            // Drop the in-memory undo-send entry first so the delayed SMTP task
+            // observes the cancellation even before the database row is flipped.
+            self.undo_send_buffer.cancel(outbox_id);
             let out_id = outbox_id.to_string();
             let pool_opt = self.storage_pool.clone();
             if let Some(pool) = pool_opt {
@@ -2260,16 +2356,223 @@ pub mod gpui_app {
             self.reload_messages_for_current_folder(cx);
         }
 
+        pub fn snooze_thread(
+            &mut self,
+            thread_id: String,
+            account_id: String,
+            original_folder_id: String,
+            wake_at: chrono::DateTime<chrono::Utc>,
+        ) {
+            self.snooze_manager
+                .snooze(thread_id, account_id, original_folder_id, wake_at);
+        }
+
+        pub fn export_to_mbox(&mut self, cx: &mut Context<Self>) {
+            let pool_opt = self.storage_pool.clone();
+            let folder_id = self.selected_folder_id.clone();
+            if folder_id.is_none() {
+                self.show_toast("Select a folder to export", true, cx);
+                return;
+            }
+            let fid = folder_id.unwrap();
+            cx.spawn(async move |this, cx| {
+                if let Some(pool) = pool_opt
+                    && let Ok(conn) = pool.get().await
+                {
+                    let fid_c = fid.clone();
+                    let msgs = conn
+                        .interact(move |c| {
+                            vespetrel_storage::repo::list_messages_in_folder(c, &fid_c, 10000, 0)
+                        })
+                        .await;
+                    if let Ok(Ok(loaded)) = msgs {
+                        let mut out = String::new();
+                        for m in loaded {
+                            out.push_str(&format!(
+                                "From {} {}\n",
+                                m.from_address,
+                                m.sent_at.to_rfc2822()
+                            ));
+                            out.push_str(&format!(
+                                "Subject: {}\n\n",
+                                m.subject.as_deref().unwrap_or("")
+                            ));
+                            out.push_str(m.body_text_preview.as_deref().unwrap_or(""));
+                            out.push_str("\n\n");
+                        }
+                        let dir = std::path::PathBuf::from(
+                            std::env::var("USERPROFILE").unwrap_or_default(),
+                        )
+                        .join("Downloads");
+                        let _ = std::fs::create_dir_all(&dir);
+                        let path = dir.join(format!("export-{}.mbox", uuid::Uuid::new_v4()));
+                        if std::fs::write(&path, out).is_ok() {
+                            let _ = this.update(cx, |view, cx| {
+                                view.show_toast(
+                                    format!("Exported mbox to {}", path.display()),
+                                    false,
+                                    cx,
+                                );
+                            });
+                        }
+                    }
+                }
+            })
+            .detach();
+        }
+
+        pub fn save_as_eml(&mut self, cx: &mut Context<Self>) {
+            let dir = std::path::PathBuf::from(std::env::var("USERPROFILE").unwrap_or_default())
+                .join("Downloads");
+            let _ = std::fs::create_dir_all(&dir);
+            let filename = format!("message-{}.eml", uuid::Uuid::new_v4());
+            let path = dir.join(filename);
+            let subject = self.message_viewer.subject.clone().unwrap_or_default();
+            let from = self
+                .message_viewer
+                .from
+                .as_ref()
+                .map(|a| format!("{} <{}>", a.name.as_deref().unwrap_or(""), a.email))
+                .unwrap_or_default();
+            let body = self
+                .message_viewer
+                .raw_html
+                .clone()
+                .or_else(|| self.message_viewer.plain_text.clone())
+                .unwrap_or_default();
+            let content = format!(
+                "From: {}\r\nSubject: {}\r\nMIME-Version: 1.0\r\nContent-Type: text/html; charset=utf-8\r\n\r\n{}",
+                from, subject, body
+            );
+            if std::fs::write(&path, content).is_ok() {
+                self.show_toast(format!("Saved EML to {}", path.display()), false, cx);
+            } else {
+                self.show_toast("Failed to save EML", true, cx);
+            }
+        }
+
+        pub fn add_tag_to_selected(&mut self, cx: &mut Context<Self>) {
+            if let Some(msg_id) = self.selected_message_id.clone() {
+                if let Some(pool) = self.storage_pool.clone() {
+                    cx.spawn(async move |this, cx| {
+                        if let Ok(conn) = pool.get().await {
+                            let _ = conn
+                                .interact(move |c| {
+                                    vespetrel_storage::repo::add_message_tag(
+                                        c,
+                                        &msg_id,
+                                        "important",
+                                        "#f59e0b",
+                                    )
+                                })
+                                .await;
+                            let _ = this.update(cx, |view, cx| {
+                                view.show_toast("Tagged 'important'", false, cx);
+                                cx.notify();
+                            });
+                        }
+                    })
+                    .detach();
+                }
+            } else {
+                self.show_toast("No message selected", true, cx);
+            }
+        }
+
+        pub fn save_all_attachments(&mut self, cx: &mut Context<Self>) {
+            let atts = self.message_viewer.attachments.clone();
+            if atts.is_empty() {
+                self.show_toast("No attachments to save", true, cx);
+                return;
+            }
+            let dir = std::path::PathBuf::from(std::env::var("USERPROFILE").unwrap_or_default())
+                .join("Downloads");
+            let _ = std::fs::create_dir_all(&dir);
+            let mut saved = 0;
+            for a in &atts {
+                if !a.blob_path.is_empty() {
+                    let dest = dir.join(&a.filename);
+                    if std::fs::copy(&a.blob_path, &dest).is_ok() {
+                        saved += 1;
+                    }
+                }
+            }
+            self.show_toast(
+                format!("Saved {} attachment(s) to Downloads", saved),
+                false,
+                cx,
+            );
+        }
+
+        pub fn open_original_in_browser(&mut self, _cx: &mut Context<Self>) {
+            if let Some(html) = self.message_viewer.raw_html.clone() {
+                let path = std::env::temp_dir()
+                    .join(format!("vespetrel-original-{}.html", uuid::Uuid::new_v4()));
+                let doc = vespetrel_render::render_sandboxed_document(&html, false);
+                if std::fs::write(&path, doc).is_ok() {
+                    #[cfg(target_os = "windows")]
+                    let _ = std::process::Command::new("cmd")
+                        .args(["/c", "start", "", &path.to_string_lossy()])
+                        .spawn();
+                    #[cfg(target_os = "macos")]
+                    let _ = std::process::Command::new("open").arg(&path).spawn();
+                    #[cfg(target_os = "linux")]
+                    let _ = std::process::Command::new("xdg-open").arg(&path).spawn();
+                }
+            }
+        }
+
         pub fn select_unified_inbox(&mut self, cx: &mut Context<Self>) {
             self.selected_folder_id = None;
             self.is_unified_inbox = true;
+            self.active_virtual_folder = None;
+            self.active_split_category = None;
             self.reload_messages_for_current_folder(cx);
+        }
+
+        pub fn select_split_category(
+            &mut self,
+            cat: vespetrel_core::split_inbox::InboxCategory,
+            cx: &mut Context<Self>,
+        ) {
+            self.selected_folder_id = None;
+            self.is_unified_inbox = true;
+            self.active_virtual_folder = None;
+            self.active_split_category = Some(cat);
+            self.reload_messages_for_current_folder(cx);
+        }
+
+        pub fn select_saved_search(
+            &mut self,
+            vf: vespetrel_core::VirtualFolder,
+            cx: &mut Context<Self>,
+        ) {
+            self.selected_folder_id = None;
+            self.is_unified_inbox = true;
+            self.active_virtual_folder = Some(vf);
+            self.reload_messages_for_current_folder(cx);
+        }
+
+        pub fn create_saved_search_from_query(&mut self, cx: &mut Context<Self>) {
+            if self.search_query.trim().is_empty() {
+                return;
+            }
+            let vf = vespetrel_core::VirtualFolder::saved_search(
+                format!("Search: {}", self.search_query),
+                self.search_query.clone(),
+            );
+            self.saved_searches.push(vf.clone());
+            self.select_saved_search(vf, cx);
         }
 
         pub fn reload_messages_for_current_folder(&mut self, cx: &mut Context<Self>) {
             let pool_opt = self.storage_pool.clone();
-            let is_unified = self.is_unified_inbox;
+            let is_unified = self.is_unified_inbox
+                || self.active_virtual_folder.is_some()
+                || self.active_split_category.is_some();
             let folder_id_opt = self.selected_folder_id.clone();
+            let active_vf = self.active_virtual_folder.clone();
+            let active_cat = self.active_split_category;
             let folder_obj = self
                 .folders
                 .iter()
@@ -2312,8 +2615,16 @@ pub mod gpui_app {
                         })
                         .await;
                     if let Ok(Ok(loaded_msgs)) = msgs {
-                        let summaries: Vec<MessageSummary> =
+                        let mut summaries: Vec<MessageSummary> =
                             loaded_msgs.into_iter().map(|m| m.summary()).collect();
+                        if let Some(vf) = active_vf.clone() {
+                            summaries.retain(|m| Self::virtual_folder_matches(&vf, m));
+                        }
+                        if let Some(cat) = active_cat {
+                            summaries.retain(|m| {
+                                vespetrel_core::split_inbox::classify_inbox_category(m, None) == cat
+                            });
+                        }
                         let _ = this.update(cx, |view, cx| {
                             view.messages = summaries;
                             view.invalidate_message_cache();
@@ -2466,6 +2777,20 @@ pub mod gpui_app {
                 return;
             }
 
+            // "Forgot the attachment?" detection: body mentions an attachment but none is
+            // attached. Warn and abort the send so the user can fix it.
+            let body_lower = body_val.to_lowercase();
+            if self.compose_attachments.is_empty()
+                && (body_lower.contains("attach") || body_lower.contains("enclosed"))
+            {
+                self.show_toast(
+                    "You mentioned an attachment but none is attached. Add it or send anyway? (aborted)",
+                    true,
+                    cx,
+                );
+                return;
+            }
+
             // Auto-harvest recipient to contacts if not already present
             let recipient_email = to_val.clone();
             if !self
@@ -2564,7 +2889,10 @@ pub mod gpui_app {
                 attachments: self.compose_attachments.clone(),
             };
 
-            let outbox_id = format!("outbox-{}", uuid::Uuid::new_v4());
+            // Route through the in-memory undo-send buffer so a pending message can be
+            // recalled before its grace period elapses. The buffer mints the id that is
+            // also used as the durable outbox row id.
+            let outbox_id = self.undo_send_buffer.enqueue(composed.clone());
             let now_ts = chrono::Utc::now().timestamp();
             let account_opt = self.accounts.first().cloned();
             let pool_opt = self.storage_pool.clone();
@@ -2581,7 +2909,7 @@ pub mod gpui_app {
                         .unwrap_or_else(|| "default".into()),
                     composed_message: composed.clone(),
                     scheduled_at: now_ts,
-                    send_at: now_ts,
+                    send_at: now_ts + self.settings.undo_send_seconds as i64,
                     is_cancelled: false,
                     attempts: 0,
                     last_error: None,
@@ -2689,9 +3017,29 @@ pub mod gpui_app {
             );
             cx.notify();
 
+            // Honour the undo-send grace period before transmitting so the message can
+            // still be recalled. Sleep first, then bail out if it was cancelled.
+            let grace_secs = self.settings.undo_send_seconds;
             // Asynchronously transmit via SMTP
             let outbox_id_clone = outbox_id.clone();
             cx.spawn(async move |this, cx| {
+                tokio::time::sleep(std::time::Duration::from_secs(grace_secs as u64)).await;
+                if let Some(pool) = &pool_opt {
+                    let oid = outbox_id_clone.clone();
+                    if let Ok(conn) = pool.get().await {
+                        let cancelled = conn
+                            .interact(move |c| vespetrel_storage::repo::get_outbox_entry(c, &oid))
+                            .await
+                            .ok()
+                            .and_then(|r| r.ok())
+                            .flatten()
+                            .map(|e| e.is_cancelled)
+                            .unwrap_or(true);
+                        if cancelled {
+                            return;
+                        }
+                    }
+                }
                 let send_res: Result<(), String> = if let Some(acct) = account_opt {
                     let auth_token = if let Some(ref k) = acct.auth_config.keyring_key {
                         keyring::Entry::new("vespetrel", k)
@@ -2790,6 +3138,22 @@ pub mod gpui_app {
                     &self.compose_subject,
                     &self.compose_body,
                 ));
+                // Autosave drafts locally every 30s while composing.
+                cx.spawn(async move |this, cx| {
+                    loop {
+                        tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+                        let is_compose = this
+                            .update(cx, |view, _| view.active_modal == ActiveModal::Compose)
+                            .unwrap_or(false);
+                        if !is_compose {
+                            break;
+                        }
+                        let _ = this.update(cx, |view, cx| {
+                            view.save_draft(cx);
+                        });
+                    }
+                })
+                .detach();
             }
 
             div()
@@ -3912,6 +4276,37 @@ pub mod gpui_app {
                         .into_any_element(),
                     );
 
+                    // Split inbox categories
+                    if self.is_unified_inbox {
+                        let cats = [
+                            vespetrel_core::split_inbox::InboxCategory::Primary,
+                            vespetrel_core::split_inbox::InboxCategory::Updates,
+                            vespetrel_core::split_inbox::InboxCategory::Promotions,
+                            vespetrel_core::split_inbox::InboxCategory::Newsletters,
+                            vespetrel_core::split_inbox::InboxCategory::Social,
+                        ];
+                        for cat in cats {
+                            let is_selected = self.active_split_category == Some(cat);
+                            let cat_clone = cat;
+                            folder_elements.push(
+                                self.render_folder_row(
+                                    FolderRow {
+                                        id: ElementId::Name(format!("split-{:?}", cat).into()),
+                                        icon: IconName::Inbox,
+                                        label: cat.display_name(),
+                                        unread: 0,
+                                        is_selected,
+                                    },
+                                    cx,
+                                    cx.listener(move |this, _, _, cx| {
+                                        this.select_split_category(cat_clone, cx);
+                                    }),
+                                )
+                                .into_any_element(),
+                            );
+                        }
+                    }
+
                     // Individual Folders
                     let nav_tree = NavigationTree::new(self.folders.clone());
                     let individual_folders = nav_tree
@@ -3940,6 +4335,94 @@ pub mod gpui_app {
                         .collect::<Vec<_>>();
 
                     folder_elements.extend(individual_folders);
+
+                    // Filters / rules entry point
+                    // Search history
+                    for (idx, h) in self.search_history.clone().into_iter().enumerate() {
+                        let h_clone = h.clone();
+                        folder_elements.push(
+                            self.render_folder_row(
+                                FolderRow {
+                                    id: ElementId::Name(format!("search-history-{}", idx).into()),
+                                    icon: IconName::Search,
+                                    label: &h,
+                                    unread: 0,
+                                    is_selected: false,
+                                },
+                                cx,
+                                cx.listener(move |this, _, _, cx| {
+                                    this.execute_fts_search(&h_clone, cx);
+                                }),
+                            )
+                            .into_any_element(),
+                        );
+                    }
+
+                    folder_elements.push(
+                        Button::new("btn-open-contacts")
+                            .ghost()
+                            .small()
+                            .icon(IconName::User)
+                            .label("Contacts")
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.active_modal = ActiveModal::ContactsPicker;
+                                cx.notify();
+                            }))
+                            .into_any_element(),
+                    );
+
+                    folder_elements.push(
+                        Button::new("btn-open-tb-import")
+                            .ghost()
+                            .small()
+                            .icon(IconName::FolderDown)
+                            .label("Import Thunderbird")
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.active_modal = ActiveModal::ThunderbirdImport;
+                                cx.notify();
+                            }))
+                            .into_any_element(),
+                    );
+
+                    folder_elements.push(
+                        Button::new("btn-open-filters")
+                            .ghost()
+                            .small()
+                            .icon(IconName::ListFilter)
+                            .label("Filters & Rules")
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.active_modal = ActiveModal::FilterRules;
+                                cx.notify();
+                            }))
+                            .into_any_element(),
+                    );
+
+                    // Saved searches
+                    for vf in self.saved_searches.clone() {
+                        let vf_clone = vf.clone();
+                        let is_selected = self
+                            .active_virtual_folder
+                            .as_ref()
+                            .map(|a| a.id == vf.id)
+                            .unwrap_or(false);
+                        folder_elements.push(
+                            self.render_folder_row(
+                                FolderRow {
+                                    id: ElementId::Name(format!("saved-search-{}", vf.id).into()),
+                                    icon: IconName::Search,
+                                    label: &vf.name,
+                                    unread: 0,
+                                    is_selected,
+                                },
+                                cx,
+                                cx.listener(move |this, _, _, cx| {
+                                    this.select_saved_search(vf_clone.clone(), cx);
+                                }),
+                            )
+                            .into_any_element(),
+                        );
+                    }
+
                     div()
                         .flex()
                         .flex_col()
@@ -4489,8 +4972,9 @@ pub mod gpui_app {
                                     div()
                                         .flex()
                                         .flex_row()
+                                        .flex_wrap()
                                         .items_center()
-                                        .gap(px(8.0))
+                                        .gap(px(6.0))
                                         .child(
                                             // Reply is the reader's most likely action, but
                                             // it opens a composition window rather than
@@ -4530,6 +5014,7 @@ pub mod gpui_app {
                                                     }
                                                 })),
                                         )
+
                                         .child(
                                             Button::new("btn-reply-all-message")
                                                 .ghost()
@@ -4611,7 +5096,7 @@ pub mod gpui_app {
                                         .child(
                                             Button::new("btn-archive-message")
                                                 .secondary()
-                                                .icon(IconName::HardDrive)
+                                                .icon(IconName::Archive)
                                                 .label("Archive")
                                                 .on_click(cx.listener(|this, _, _, cx| {
                                                     this.archive_selected_message(cx);
@@ -4624,6 +5109,72 @@ pub mod gpui_app {
                                                 .label("Delete")
                                                 .on_click(cx.listener(|this, _, _, cx| {
                                                     this.delete_selected_message(cx);
+                                                })),
+                                        )
+                                        // Workflow actions
+                                        .child(
+                                            Button::new("btn-snooze-message")
+                                                .ghost()
+                                                .icon(IconName::Clock)
+                                                .label("Snooze")
+                                                .on_click(cx.listener({
+                                                    let thread_id = msg.thread_id.clone().unwrap_or_else(|| msg.id.clone());
+                                                    let account_id = self.accounts.first().map(|a| a.id.clone()).unwrap_or_else(|| "default".into());
+                                                    move |this, _, _, cx| {
+                                                        let wake = chrono::Utc::now() + chrono::Duration::days(1);
+                                                        this.snooze_manager.snooze(thread_id.clone(), account_id.clone(), "inbox".to_string(), wake);
+                                                        this.show_toast("Snoozed for 1 day", false, cx);
+                                                        cx.notify();
+                                                    }
+                                                })),
+                                        )
+                                        .child(
+                                            Button::new("btn-add-tag")
+                                                .ghost()
+                                                .icon(IconName::Tag)
+                                                .label("Tag")
+                                                .on_click(cx.listener(|this, _, _, cx| {
+                                                    this.add_tag_to_selected(cx);
+                                                })),
+                                        )
+                                        // Attachment download (only when message has attachments)
+                                        .when(!attachments.is_empty(), |el| {
+                                            el.child(
+                                                Button::new("btn-save-all-attachments")
+                                                    .ghost()
+                                                    .icon(IconName::Download)
+                                                    .label("Save all attachments")
+                                                    .on_click(cx.listener(|this, _, _, cx| {
+                                                        this.save_all_attachments(cx);
+                                                    })),
+                                            )
+                                        })
+                                        // Raw message / export actions
+                                        .child(
+                                            Button::new("btn-open-original")
+                                                .ghost()
+                                                .icon(IconName::ExternalLink)
+                                                .label("Open original")
+                                                .on_click(cx.listener(|this, _, _, cx| {
+                                                    this.open_original_in_browser(cx);
+                                                })),
+                                        )
+                                        .child(
+                                            Button::new("btn-save-as-eml")
+                                                .ghost()
+                                                .icon(IconName::FileText)
+                                                .label("Save as EML")
+                                                .on_click(cx.listener(|this, _, _, cx| {
+                                                    this.save_as_eml(cx);
+                                                })),
+                                        )
+                                        .child(
+                                            Button::new("btn-export-mbox")
+                                                .ghost()
+                                                .icon(IconName::FolderDown)
+                                                .label("Export mbox")
+                                                .on_click(cx.listener(|this, _, _, cx| {
+                                                    this.export_to_mbox(cx);
                                                 })),
                                         ),
                                 )
@@ -4784,8 +5335,9 @@ pub mod gpui_app {
                                     div()
                                         .flex()
                                         .flex_row()
+                                        .flex_wrap()
                                         .items_center()
-                                        .gap(px(8.0))
+                                        .gap(px(6.0))
                                         .child(
                                             Icon::new(if self.block_remote_images {
                                                 IconName::CircleCheck
@@ -6073,6 +6625,15 @@ pub mod gpui_app {
                 ActiveModal::AddAccount => {
                     self.render_add_account_modal(window, cx).into_any_element()
                 }
+                ActiveModal::FilterRules => self
+                    .render_filter_rules_modal(window, cx)
+                    .into_any_element(),
+                ActiveModal::ThunderbirdImport => self
+                    .render_thunderbird_import_modal(window, cx)
+                    .into_any_element(),
+                ActiveModal::ContactsPicker => self
+                    .render_contacts_picker_modal(window, cx)
+                    .into_any_element(),
                 ActiveModal::AttachmentPreview {
                     filename,
                     mime_type,
@@ -6652,8 +7213,9 @@ pub mod gpui_app {
                                     div()
                                         .flex()
                                         .flex_row()
+                                        .flex_wrap()
                                         .items_center()
-                                        .gap(px(8.0))
+                                        .gap(px(6.0))
                                         .child(
                                             Button::new("btn-toggle-markdown")
                                                 .icon(IconName::FileText)
@@ -6903,8 +7465,9 @@ pub mod gpui_app {
                                     div()
                                         .flex()
                                         .flex_row()
+                                        .flex_wrap()
                                         .items_center()
-                                        .gap(px(8.0))
+                                        .gap(px(6.0))
                                         .child(
                                             Button::new("btn-discard-compose")
                                                 .label("Discard")
@@ -7095,6 +7658,772 @@ pub mod gpui_app {
             )
         }
 
+        fn render_filter_rules_modal(
+            &self,
+            _window: &mut Window,
+            cx: &mut Context<Self>,
+        ) -> impl IntoElement {
+            let rules = self.filter_engine.rules.clone();
+            let count = rules.len();
+
+            Dialog::new(cx).child(
+                div()
+                    .id("modal-filter-rules-overlay")
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .size_full()
+                    .bg(gpui_kit::gpui::transparent_black())
+                    .child(
+                        div()
+                            .id("modal-filter-rules-box")
+                            .flex()
+                            .flex_col()
+                            .w(px(580.0))
+                            .max_h(px(600.0))
+                            .rounded_xl()
+                            .bg(cx.theme().popover)
+                            .border_1()
+                            .border_color(cx.theme().border)
+                            .p(px(24.0))
+                            .gap(px(16.0))
+                            // Header
+                            .child(
+                                div()
+                                    .flex()
+                                    .flex_row()
+                                    .items_center()
+                                    .justify_between()
+                                    .child(
+                                        div()
+                                            .flex()
+                                            .flex_col()
+                                            .gap(px(2.0))
+                                            .child(
+                                                div()
+                                                    .flex()
+                                                    .flex_row()
+                                                    .items_center()
+                                                    .gap(px(8.0))
+                                                    .child(
+                                                        Icon::new(IconName::ListFilter)
+                                                            .text_color(cx.theme().primary),
+                                                    )
+                                                    .child(
+                                                        div()
+                                                            .text_base()
+                                                            .font_weight(FontWeight::BOLD)
+                                                            .text_color(cx.theme().foreground)
+                                                            .child("Message Filters and Rules"),
+                                                    ),
+                                            )
+                                            .child(
+                                                div()
+                                                    .text_xs()
+                                                    .text_color(cx.theme().muted_foreground)
+                                                    .child(format!(
+                                                        "Automatically organize and triage incoming messages ({count} configured)."
+                                                    )),
+                                            ),
+                                    )
+                                    .child(
+                                        Button::new("btn-close-filter-rules-top")
+                                            .icon(IconName::Close)
+                                            .ghost()
+                                            .xsmall()
+                                            .on_click(cx.listener(|this, _, _, cx| {
+                                                this.active_modal = ActiveModal::None;
+                                                cx.notify();
+                                            })),
+                                    ),
+                            )
+                            // Content list or empty state
+                            .child(if rules.is_empty() {
+                                div()
+                                    .flex()
+                                    .flex_col()
+                                    .items_center()
+                                    .justify_center()
+                                    .py(px(32.0))
+                                    .gap(px(8.0))
+                                    .rounded_lg()
+                                    .border_1()
+                                    .border_color(cx.theme().border)
+                                    .bg(cx.theme().background)
+                                    .child(
+                                        Icon::new(IconName::ListFilter)
+                                            .large()
+                                            .text_color(cx.theme().muted_foreground),
+                                    )
+                                    .child(
+                                        div()
+                                            .text_sm()
+                                            .font_weight(FontWeight::MEDIUM)
+                                            .text_color(cx.theme().foreground)
+                                            .child("No filter rules configured"),
+                                    )
+                                    .child(
+                                        div()
+                                            .text_xs()
+                                            .text_color(cx.theme().muted_foreground)
+                                            .child("Add rules to automate triage, mark read, or star incoming mail."),
+                                    )
+                                    .into_any_element()
+                            } else {
+                                div()
+                                    .id("filter-rules-scroll-list")
+                                    .flex()
+                                    .flex_col()
+                                    .gap(px(8.0))
+                                    .max_h(px(320.0))
+                                    .overflow_y_scroll()
+                                    .children(rules.into_iter().enumerate().map(|(idx, r)| {
+                                        div()
+                                            .id(ElementId::Name(format!("rule-{idx}").into()))
+                                            .flex()
+                                            .flex_row()
+                                            .items_center()
+                                            .justify_between()
+                                            .p(px(10.0))
+                                            .rounded_lg()
+                                            .bg(cx.theme().background)
+                                            .border_1()
+                                            .border_color(cx.theme().border)
+                                            .child(
+                                                div()
+                                                    .flex()
+                                                    .flex_col()
+                                                    .gap(px(2.0))
+                                                    .child(
+                                                        div()
+                                                            .text_sm()
+                                                            .font_weight(FontWeight::MEDIUM)
+                                                            .text_color(cx.theme().foreground)
+                                                            .child(r.name.clone()),
+                                                    )
+                                                    .child(
+                                                        div()
+                                                            .text_xs()
+                                                            .text_color(cx.theme().muted_foreground)
+                                                            .child(format!(
+                                                                "{} condition(s), {} action(s)",
+                                                                r.conditions.len(),
+                                                                r.actions.len()
+                                                            )),
+                                                    ),
+                                            )
+                                            .child(
+                                                Badge::new()
+                                                    .child(if r.is_enabled { "Active" } else { "Disabled" }),
+                                            )
+                                    }))
+                                    .into_any_element()
+                            })
+                            // Footer actions
+                            .child(
+                                div()
+                                    .flex()
+                                    .flex_row()
+                                    .items_center()
+                                    .justify_between()
+                                    .pt(px(8.0))
+                                    .border_t_1()
+                                    .border_color(cx.theme().border)
+                                    .child(
+                                        div()
+                                            .flex()
+                                            .flex_row()
+                                            .items_center()
+                                            .gap(px(8.0))
+                                            .child(
+                                                Button::new("add-filter-rule")
+                                                    .small()
+                                                    .icon(IconName::Plus)
+                                                    .label("Add GitHub sample rule")
+                                                    .on_click(cx.listener(|this, _, _, cx| {
+                                                        use vespetrel_engine::{ConditionCombinator, FilterAction, FilterCondition, FilterField, FilterPredicate, FilterRule};
+                                                        let mut rule = FilterRule::new("GitHub notifications", ConditionCombinator::MatchAll);
+                                                        rule.conditions.push(FilterCondition {
+                                                            field: FilterField::FromAddress,
+                                                            predicate: FilterPredicate::Contains("github.com".into()),
+                                                        });
+                                                        rule.actions.push(FilterAction::MarkRead);
+                                                        rule.actions.push(FilterAction::MarkFlagged);
+                                                        this.filter_engine.add_rule(rule);
+                                                        cx.notify();
+                                                    })),
+                                            )
+                                            .when(count > 0, |el| {
+                                                el.child(
+                                                    Button::new("clear-filter-rules")
+                                                        .ghost()
+                                                        .small()
+                                                        .label("Clear all")
+                                                        .on_click(cx.listener(|this, _, _, cx| {
+                                                            this.filter_engine.rules.clear();
+                                                            cx.notify();
+                                                        })),
+                                                )
+                                            }),
+                                    )
+                                    .child(
+                                        Button::new("close-filter-rules")
+                                            .ghost()
+                                            .small()
+                                            .label("Close")
+                                            .on_click(cx.listener(|this, _, _, cx| {
+                                                this.active_modal = ActiveModal::None;
+                                                cx.notify();
+                                            })),
+                                    ),
+                            ),
+                    ),
+            )
+        }
+
+        fn render_thunderbird_import_modal(
+            &self,
+            _window: &mut Window,
+            cx: &mut Context<Self>,
+        ) -> impl IntoElement {
+            let profiles = vespetrel_engine::discover_thunderbird_profiles();
+            let mut account_lines = Vec::new();
+            for p in &profiles {
+                if let Ok(prefs) = std::fs::read_to_string(p.path.join("prefs.js")) {
+                    let accts = vespetrel_engine::parse_thunderbird_prefs(&prefs);
+                    for a in accts {
+                        account_lines.push(format!(
+                            "{} <{}> ({}:{})",
+                            a.name, a.email, a.incoming_host, a.incoming_port
+                        ));
+                    }
+                }
+            }
+            Dialog::new(cx).child(
+                div()
+                    .id("modal-tb-import-overlay")
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .size_full()
+                    .bg(gpui_kit::gpui::transparent_black())
+                    .child(
+                        div()
+                            .id("modal-tb-import-box")
+                            .flex()
+                            .flex_col()
+                            .w(px(620.0))
+                            .max_h(px(660.0))
+                            .rounded_xl()
+                            .bg(cx.theme().popover)
+                            .border_1()
+                            .border_color(cx.theme().border)
+                            .p(px(24.0))
+                            .gap(px(16.0))
+                            // Header
+                            .child(
+                                div()
+                                    .flex()
+                                    .flex_row()
+                                    .items_center()
+                                    .justify_between()
+                                    .child(
+                                        div()
+                                            .flex()
+                                            .flex_col()
+                                            .gap(px(2.0))
+                                            .child(
+                                                div()
+                                                    .flex()
+                                                    .flex_row()
+                                                    .items_center()
+                                                    .gap(px(8.0))
+                                                    .child(
+                                                        Icon::new(IconName::FolderDown)
+                                                            .text_color(cx.theme().primary),
+                                                    )
+                                                    .child(
+                                                        div()
+                                                            .text_base()
+                                                            .font_weight(FontWeight::BOLD)
+                                                            .text_color(cx.theme().foreground)
+                                                            .child("Import from Mozilla Thunderbird"),
+                                                    ),
+                                            )
+                                            .child(
+                                                div()
+                                                    .text_xs()
+                                                    .text_color(cx.theme().muted_foreground)
+                                                    .child(format!(
+                                                        "Detected {} profile(s) and {} account(s) on this machine.",
+                                                        profiles.len(),
+                                                        account_lines.len()
+                                                    )),
+                                            ),
+                                    )
+                                    .child(
+                                        Button::new("btn-close-tb-import-top")
+                                            .icon(IconName::Close)
+                                            .ghost()
+                                            .xsmall()
+                                            .on_click(cx.listener(|this, _, _, cx| {
+                                                this.active_modal = ActiveModal::None;
+                                                cx.notify();
+                                            })),
+                                    ),
+                            )
+                            // Content
+                            .child(if account_lines.is_empty() {
+                                div()
+                                    .flex()
+                                    .flex_col()
+                                    .items_center()
+                                    .justify_center()
+                                    .py(px(32.0))
+                                    .gap(px(8.0))
+                                    .rounded_lg()
+                                    .border_1()
+                                    .border_color(cx.theme().border)
+                                    .bg(cx.theme().background)
+                                    .child(
+                                        Icon::new(IconName::FolderArchive)
+                                            .large()
+                                            .text_color(cx.theme().muted_foreground),
+                                    )
+                                    .child(
+                                        div()
+                                            .text_sm()
+                                            .font_weight(FontWeight::MEDIUM)
+                                            .text_color(cx.theme().foreground)
+                                            .child("No Thunderbird profiles or accounts detected"),
+                                    )
+                                    .child(
+                                        div()
+                                            .text_xs()
+                                            .text_color(cx.theme().muted_foreground)
+                                            .child("Vespetrel checks default Thunderbird profile folders for accounts and mbox files."),
+                                    )
+                                    .into_any_element()
+                            } else {
+                                div()
+                                    .id("tb-acct-scroll-list")
+                                    .flex()
+                                    .flex_col()
+                                    .gap(px(8.0))
+                                    .max_h(px(280.0))
+                                    .overflow_y_scroll()
+                                    .children(account_lines.iter().enumerate().map(|(idx, l)| {
+                                        div()
+                                            .id(ElementId::Name(format!("tb-acct-{idx}").into()))
+                                            .flex()
+                                            .flex_row()
+                                            .items_center()
+                                            .gap(px(10.0))
+                                            .p(px(10.0))
+                                            .rounded_lg()
+                                            .bg(cx.theme().background)
+                                            .border_1()
+                                            .border_color(cx.theme().border)
+                                            .child(
+                                                Icon::new(IconName::Mail)
+                                                    .text_color(cx.theme().primary),
+                                            )
+                                            .child(
+                                                div()
+                                                    .flex()
+                                                    .flex_col()
+                                                    .gap(px(2.0))
+                                                    .child(
+                                                        div()
+                                                            .text_sm()
+                                                            .font_weight(FontWeight::MEDIUM)
+                                                            .text_color(cx.theme().foreground)
+                                                            .child(l.clone()),
+                                                    )
+                                                    .child(
+                                                        div()
+                                                            .text_xs()
+                                                            .text_color(cx.theme().muted_foreground)
+                                                            .child("Mbox mailboxes ready for one-click import"),
+                                                    ),
+                                            )
+                                    }))
+                                    .into_any_element()
+                            })
+                            // Footer
+                            .child(
+                                div()
+                                    .flex()
+                                    .flex_row()
+                                    .items_center()
+                                    .justify_between()
+                                    .pt(px(8.0))
+                                    .border_t_1()
+                                    .border_color(cx.theme().border)
+                                    .child(
+                                        div()
+                                            .flex()
+                                            .flex_row()
+                                            .items_center()
+                                            .gap(px(8.0))
+                                            .when(!account_lines.is_empty(), |el| {
+                                                el.child(
+                                                    Button::new("import-tb-accounts")
+                                                        .primary()
+                                                        .icon(IconName::FolderDown)
+                                                        .label("Import accounts & messages")
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            // Import account metadata, folders, and messages into storage.
+                            if let Some(pool) = this.storage_pool.clone() {
+                                let profiles = vespetrel_engine::discover_thunderbird_profiles();
+                                cx.spawn(async move |this, cx| {
+                                    let mut imported_accounts = Vec::new();
+                                    let mut imported_folders = Vec::new();
+                                    let mut imported_messages = Vec::new();
+
+                                    for p in profiles {
+                                        if let Ok(prefs) = std::fs::read_to_string(p.path.join("prefs.js")) {
+                                            let accts = vespetrel_engine::parse_thunderbird_prefs(&prefs);
+                                            for a in accts {
+                                                let mut acct = vespetrel_core::Account::new(
+                                                    a.name.clone(),
+                                                    a.email.clone(),
+                                                    a.provider_type,
+                                                );
+                                                acct.auth_config.server_host = Some(a.incoming_host.clone());
+                                                acct.auth_config.server_port = Some(a.incoming_port);
+                                                acct.auth_config.username = Some(a.incoming_user.clone());
+
+                                                let local_folders = vec![
+                                                    Folder::new(&acct.id, "INBOX", "Inbox", "INBOX")
+                                                        .with_role(FolderRole::Inbox),
+                                                    Folder::new(&acct.id, "Drafts", "Drafts", "Drafts")
+                                                        .with_role(FolderRole::Drafts),
+                                                    Folder::new(&acct.id, "Sent", "Sent", "Sent")
+                                                        .with_role(FolderRole::Sent),
+                                                    Folder::new(&acct.id, "Trash", "Trash", "Trash")
+                                                        .with_role(FolderRole::Trash),
+                                                    Folder::new(&acct.id, "Archive", "Archive", "Archive")
+                                                        .with_role(FolderRole::Archive),
+                                                ];
+
+                                                let mbox_files = vespetrel_engine::migrator::find_thunderbird_mbox_files(
+                                                    &p.path,
+                                                    &a.incoming_host,
+                                                );
+                                                let mut msgs_to_insert = Vec::new();
+                                                let inbox_folder_id = local_folders[0].id.clone();
+
+                                                for (name, path) in mbox_files {
+                                                    let target_folder_id = if name.eq_ignore_ascii_case("inbox") {
+                                                        &inbox_folder_id
+                                                    } else if name.to_ascii_lowercase().contains("draft") {
+                                                        &local_folders[1].id
+                                                    } else if name.to_ascii_lowercase().contains("sent") {
+                                                        &local_folders[2].id
+                                                    } else if name.to_ascii_lowercase().contains("trash") {
+                                                        &local_folders[3].id
+                                                    } else {
+                                                        &inbox_folder_id
+                                                    };
+
+                                                    if let Ok(data) = std::fs::read(&path) {
+                                                        let raw_msgs = vespetrel_engine::migrator::parse_mbox_data(&data);
+                                                        for (idx, raw) in raw_msgs.iter().take(100).enumerate() {
+                                                            if let Some(msg) =
+                                                                vespetrel_engine::migrator::parse_mime_to_message(
+                                                                    &acct.id,
+                                                                    target_folder_id,
+                                                                    (idx + 1) as u32,
+                                                                    raw,
+                                                                )
+                                                            {
+                                                                msgs_to_insert.push(msg);
+                                                            }
+                                                        }
+                                                    }
+                                                }
+
+                                                if let Ok(conn) = pool.get().await {
+                                                    let a_clone = acct.clone();
+                                                    let f_clone = local_folders.clone();
+                                                    let m_clone = msgs_to_insert.clone();
+                                                    let _ = conn
+                                                        .interact(move |c| -> anyhow::Result<()> {
+                                                            vespetrel_storage::repo::upsert_account(c, &a_clone)?;
+                                                            for f in &f_clone {
+                                                                let _ = vespetrel_storage::repo::upsert_folder(c, f);
+                                                            }
+                                                            for m in &m_clone {
+                                                                let _ = vespetrel_storage::repo::insert_message(c, m);
+                                                            }
+                                                            Ok(())
+                                                        })
+                                                        .await;
+                                                }
+
+                                                imported_accounts.push(acct);
+                                                imported_folders.extend(local_folders);
+                                                imported_messages.extend(
+                                                    msgs_to_insert.into_iter().map(|m| m.summary()),
+                                                );
+                                            }
+                                        }
+                                    }
+
+                                    let _ = this.update(cx, |view, cx| {
+                                        let acc_count = imported_accounts.len();
+                                        let msg_count = imported_messages.len();
+                                        view.accounts.extend(imported_accounts);
+                                        view.folders.extend(imported_folders);
+                                        if view.selected_folder_id.is_none() {
+                                            view.selected_folder_id =
+                                                view.folders.first().map(|f| f.id.clone());
+                                        }
+                                        if !imported_messages.is_empty() {
+                                            view.messages.extend(imported_messages);
+                                            view.invalidate_message_cache();
+                                        }
+                                        view.active_modal = ActiveModal::None;
+                                        view.show_toast(
+                                            format!(
+                                                "Imported {} account(s) and {} message(s) from Thunderbird",
+                                                acc_count, msg_count
+                                            ),
+                                            false,
+                                            cx,
+                                        );
+                                        cx.notify();
+                                    });
+                                })
+                                .detach();
+                            }
+                        })),
+                                                )
+                                            }),
+                                    )
+                                    .child(
+                                        Button::new("close-tb-import")
+                                            .ghost()
+                                            .small()
+                                            .label("Close")
+                                            .on_click(cx.listener(|this, _, _, cx| {
+                                                this.active_modal = ActiveModal::None;
+                                                cx.notify();
+                                            })),
+                                    ),
+                            ),
+                    ),
+            )
+        }
+
+        fn render_contacts_picker_modal(
+            &self,
+            _window: &mut Window,
+            cx: &mut Context<Self>,
+        ) -> impl IntoElement {
+            let contacts = self.contacts.clone();
+            let count = contacts.len();
+
+            Dialog::new(cx).child(
+                div()
+                    .id("modal-contacts-picker-overlay")
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .size_full()
+                    .bg(gpui_kit::gpui::transparent_black())
+                    .child(
+                        div()
+                            .id("modal-contacts-picker-box")
+                            .flex()
+                            .flex_col()
+                            .w(px(520.0))
+                            .max_h(px(580.0))
+                            .rounded_xl()
+                            .bg(cx.theme().popover)
+                            .border_1()
+                            .border_color(cx.theme().border)
+                            .p(px(24.0))
+                            .gap(px(16.0))
+                            // Header
+                            .child(
+                                div()
+                                    .flex()
+                                    .flex_row()
+                                    .items_center()
+                                    .justify_between()
+                                    .child(
+                                        div()
+                                            .flex()
+                                            .flex_col()
+                                            .gap(px(2.0))
+                                            .child(
+                                                div()
+                                                    .flex()
+                                                    .flex_row()
+                                                    .items_center()
+                                                    .gap(px(8.0))
+                                                    .child(
+                                                        Icon::new(IconName::User)
+                                                            .text_color(cx.theme().primary),
+                                                    )
+                                                    .child(
+                                                        div()
+                                                            .text_base()
+                                                            .font_weight(FontWeight::BOLD)
+                                                            .text_color(cx.theme().foreground)
+                                                            .child("Contacts"),
+                                                    ),
+                                            )
+                                            .child(
+                                                div()
+                                                    .text_xs()
+                                                    .text_color(cx.theme().muted_foreground)
+                                                    .child(format!(
+                                                        "Select a contact to insert into message ({count} available)."
+                                                    )),
+                                            ),
+                                    )
+                                    .child(
+                                        Button::new("btn-close-contacts-top")
+                                            .icon(IconName::Close)
+                                            .ghost()
+                                            .xsmall()
+                                            .on_click(cx.listener(|this, _, _, cx| {
+                                                this.active_modal = ActiveModal::None;
+                                                cx.notify();
+                                            })),
+                                    ),
+                            )
+                            // Content
+                            .child(if contacts.is_empty() {
+                                div()
+                                    .flex()
+                                    .flex_col()
+                                    .items_center()
+                                    .justify_center()
+                                    .py(px(32.0))
+                                    .gap(px(8.0))
+                                    .rounded_lg()
+                                    .border_1()
+                                    .border_color(cx.theme().border)
+                                    .bg(cx.theme().background)
+                                    .child(
+                                        Icon::new(IconName::User)
+                                            .large()
+                                            .text_color(cx.theme().muted_foreground),
+                                    )
+                                    .child(
+                                        div()
+                                            .text_sm()
+                                            .font_weight(FontWeight::MEDIUM)
+                                            .text_color(cx.theme().foreground)
+                                            .child("No contacts found"),
+                                    )
+                                    .child(
+                                        div()
+                                            .text_xs()
+                                            .text_color(cx.theme().muted_foreground)
+                                            .child("Contacts are indexed automatically from incoming messages and address books."),
+                                    )
+                                    .into_any_element()
+                            } else {
+                                div()
+                                    .id("contacts-scroll-list")
+                                    .flex()
+                                    .flex_col()
+                                    .gap(px(6.0))
+                                    .max_h(px(340.0))
+                                    .overflow_y_scroll()
+                                    .children(contacts.into_iter().map(|c| {
+                                        let email = c.email.clone();
+                                        let display = c.display_name.clone().unwrap_or_else(|| c.email.clone());
+                                        div()
+                                            .id(ElementId::Name(format!("contact-{}", c.id).into()))
+                                            .flex()
+                                            .flex_row()
+                                            .items_center()
+                                            .justify_between()
+                                            .p(px(8.0))
+                                            .rounded_lg()
+                                            .bg(cx.theme().background)
+                                            .border_1()
+                                            .border_color(cx.theme().border)
+                                            .child(
+                                                div()
+                                                    .flex()
+                                                    .flex_row()
+                                                    .items_center()
+                                                    .gap(px(10.0))
+                                                    .child(
+                                                        Icon::new(IconName::CircleUser)
+                                                            .text_color(cx.theme().muted_foreground),
+                                                    )
+                                                    .child(
+                                                        div()
+                                                            .flex()
+                                                            .flex_col()
+                                                            .gap(px(2.0))
+                                                            .child(
+                                                                div()
+                                                                    .text_sm()
+                                                                    .font_weight(FontWeight::MEDIUM)
+                                                                    .text_color(cx.theme().foreground)
+                                                                    .child(display),
+                                                            )
+                                                            .child(
+                                                                div()
+                                                                    .text_xs()
+                                                                    .text_color(cx.theme().muted_foreground)
+                                                                    .child(email.clone()),
+                                                            ),
+                                                    ),
+                                            )
+                                            .child(
+                                                Button::new(format!("pick-{}", c.id))
+                                                    .small()
+                                                    .secondary()
+                                                    .label("To")
+                                                    .on_click(cx.listener(move |this, _, _, cx| {
+                                                        if this.compose_to.is_empty() {
+                                                            this.compose_to = email.clone();
+                                                        } else {
+                                                            this.compose_to = format!("{}, {}", this.compose_to, email);
+                                                        }
+                                                        let _ = &this.compose_inputs;
+                                                        this.active_modal = ActiveModal::None;
+                                                        cx.notify();
+                                                    })),
+                                            )
+                                    }))
+                                    .into_any_element()
+                            })
+                            // Footer
+                            .child(
+                                div()
+                                    .flex()
+                                    .flex_row()
+                                    .items_center()
+                                    .justify_end()
+                                    .pt(px(8.0))
+                                    .border_t_1()
+                                    .border_color(cx.theme().border)
+                                    .child(
+                                        Button::new("close-contacts-picker")
+                                            .ghost()
+                                            .small()
+                                            .label("Close")
+                                            .on_click(cx.listener(|this, _, _, cx| {
+                                                this.active_modal = ActiveModal::None;
+                                                cx.notify();
+                                            })),
+                                    ),
+                            ),
+                    ),
+            )
+        }
+
         fn render_add_account_modal(
             &self,
             _window: &mut Window,
@@ -7109,7 +8438,7 @@ pub mod gpui_app {
                     ProviderType::Gmail,
                     "Google (Gmail)",
                     "OAuth2, IMAP and SMTP",
-                    IconName::Globe,
+                    IconName::Mail,
                 ),
                 (
                     ProviderType::Graph,
@@ -7121,13 +8450,13 @@ pub mod gpui_app {
                     ProviderType::Jmap,
                     "Fastmail (JMAP)",
                     "Push mail",
-                    IconName::Cpu,
+                    IconName::Mail,
                 ),
                 (
                     ProviderType::Imap,
                     "Custom IMAP",
                     "IMAP 993, submission 587",
-                    IconName::FolderClosed,
+                    IconName::Server,
                 ),
             ];
 
@@ -7165,7 +8494,7 @@ pub mod gpui_app {
                         .flex()
                         .flex_col()
                         .w(px(580.0))
-                        .max_h(px(720.0))
+                        .max_h(px(680.0))
                         .overflow_y_scroll()
                         .rounded_xl()
                         .bg(cx.theme().popover)
@@ -7452,12 +8781,12 @@ pub mod gpui_app {
                                     .gap(px(6.0))
                                     .p(px(8.0))
                                     .rounded_md()
-                                    .bg(cx.theme().primary)
+                                    .bg(cx.theme().accent)
                                     .border_1()
-                                    .border_color(cx.theme().primary)
+                                    .border_color(cx.theme().border)
                                     .text_xs()
-                                    .text_color(cx.theme().primary_hover)
-                                    .child(Icon::new(IconName::LoaderCircle).small())
+                                    .text_color(cx.theme().foreground)
+                                    .child(Icon::new(IconName::LoaderCircle).small().text_color(cx.theme().primary))
                                     .child(status_str.clone())
                             } else {
                                 div()
@@ -7477,7 +8806,8 @@ pub mod gpui_app {
                                         .justify_between()
                                         .child(
                                             Button::new("btn-toggle-manual")
-                                                .label(if is_manual { "Hide manual configuration ⌃" } else { "Configure manually ⌄" })
+                                                .icon(if is_manual { IconName::ChevronUp } else { IconName::ChevronDown })
+                                                .label(if is_manual { "Hide manual configuration" } else { "Configure manually" })
                                                 .ghost()
                                                 .xsmall()
                                                 .on_click(cx.listener(|this, _, _, cx| {
@@ -7485,9 +8815,10 @@ pub mod gpui_app {
                                                     cx.notify();
                                                 })),
                                         )
-                                        .child(
-                                            if is_manual {
+                                        .when(is_manual, |row| {
+                                            row.child(
                                                 Button::new("btn-retest-config")
+                                                    .icon(IconName::RefreshCw)
                                                     .label("Re-test / Detect")
                                                     .ghost()
                                                     .xsmall()
@@ -7508,10 +8839,8 @@ pub mod gpui_app {
                                                         }
                                                         cx.notify();
                                                     }))
-                                            } else {
-                                                Button::new("btn-placeholder-space").ghost().xsmall()
-                                            }
-                                        ),
+                                            )
+                                        }),
                                 )
                                 .child(
                                     if is_manual {
@@ -7576,7 +8905,7 @@ pub mod gpui_app {
                                                             })
                                                             .child({
                                                                 let mut btn = Button::new("auth-mode-password")
-                                                                    .icon(IconName::FolderClosed)
+                                                                    .icon(IconName::Key)
                                                                     .label("App Password / IMAP")
                                                                     .on_click(cx.listener(|this, _, _, cx| {
                                                                         this.login_wizard.auth_mode = AuthModeChoice::Password;
@@ -7684,7 +9013,7 @@ pub mod gpui_app {
                                     .border_color(cx.theme().danger)
                                     .text_xs()
                                     .text_color(cx.theme().danger_foreground)
-                                    .child(Icon::new(IconName::TriangleAlert).small().text_color(cx.theme().danger))
+                                    .child(Icon::new(IconName::TriangleAlert).small().text_color(cx.theme().danger_foreground))
                                     .child(err.clone())
                             } else {
                                 div()
@@ -7702,6 +9031,7 @@ pub mod gpui_app {
                                     .child(
                                         Button::new("wizard-btn-cancel")
                                             .label("Cancel")
+                                            .ghost()
                                             .on_click(cx.listener(|this, _, _, cx| {
                                                 this.active_modal = ActiveModal::None;
                                                 this.wizard_inputs = None;

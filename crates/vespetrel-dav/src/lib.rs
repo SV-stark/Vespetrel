@@ -207,7 +207,7 @@ impl DavClient {
             return Ok(calendars);
         }
 
-        #[cfg(any(test, feature = "mock"))]
+        #[cfg(test)]
         {
             Ok(vec![RemoteCalendar {
                 id: "personal".into(),
@@ -216,7 +216,7 @@ impl DavClient {
             }])
         }
 
-        #[cfg(not(any(test, feature = "mock")))]
+        #[cfg(not(test))]
         {
             anyhow::bail!("CalDAV server returned no calendars or authentication failed");
         }
@@ -287,7 +287,7 @@ impl DavClient {
             });
         }
 
-        #[cfg(any(test, feature = "mock"))]
+        #[cfg(test)]
         {
             Ok(CalendarSyncResult {
                 events: vec![],
@@ -295,7 +295,7 @@ impl DavClient {
             })
         }
 
-        #[cfg(not(any(test, feature = "mock")))]
+        #[cfg(not(test))]
         {
             anyhow::bail!("CalDAV sync failed: server unreachable or invalid credentials");
         }
@@ -342,12 +342,12 @@ impl DavClient {
             return Ok(contacts);
         }
 
-        #[cfg(any(test, feature = "mock"))]
+        #[cfg(test)]
         {
             Ok(vec![])
         }
 
-        #[cfg(not(any(test, feature = "mock")))]
+        #[cfg(not(test))]
         {
             anyhow::bail!(
                 "CardDAV list_contacts failed: server unreachable or invalid credentials"

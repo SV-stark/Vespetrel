@@ -378,6 +378,108 @@ fn unescape_mboxrd(raw: &[u8]) -> Vec<u8> {
     out
 }
 
+/// Parse raw MIME bytes into a Vespetrel `Message` structure.
+pub fn parse_mime_to_message(
+    account_id: &str,
+    folder_id: &str,
+    uid: u32,
+    raw_bytes: &[u8],
+) -> Option<vespetrel_core::Message> {
+    let parsed = mail_parser::MessageParser::default().parse(raw_bytes)?;
+    let from_addr = parsed
+        .from()
+        .and_then(|f| f.first())
+        .and_then(|a| a.address.as_deref())
+        .map(|s| s.to_string())
+        .unwrap_or_else(|| "unknown@example.com".to_string());
+
+    let from_name = parsed
+        .from()
+        .and_then(|f| f.first())
+        .and_then(|a| a.name.as_deref())
+        .map(|s| s.to_string());
+
+    let to_addrs = parsed
+        .to()
+        .map(|t| {
+            t.iter()
+                .filter_map(|a| a.address.as_deref())
+                .map(|s| s.to_string())
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+
+    let subject = parsed.subject().unwrap_or("No Subject").to_string();
+
+    let mut msg =
+        vespetrel_core::Message::new(account_id, folder_id, uid, &subject, from_addr, to_addrs);
+    msg.from_name = from_name;
+    msg.message_id_header = parsed.message_id().map(|s| s.to_string());
+    msg.in_reply_to = parsed.in_reply_to().as_text().map(|s| s.to_string());
+    msg.references = parsed.references().as_text().map(|s| s.to_string());
+    msg.body_snippet = parsed
+        .body_text(0)
+        .map(|t| t.chars().take(200).collect::<String>());
+    msg.body_text_preview = parsed
+        .body_text(0)
+        .map(|t| t.chars().take(500).collect::<String>());
+    if let Some(d) = parsed.date() {
+        if let Some(dt) = crate::worker::mail_date_to_utc(d) {
+            msg.sent_at = dt;
+            msg.received_at = dt;
+        }
+    }
+    msg.has_attachments = parsed.attachment_count() > 0;
+    msg.size_bytes = raw_bytes.len() as i64;
+    Some(msg)
+}
+
+/// Discover existing Thunderbird mbox mail files for an account host under a profile.
+pub fn find_thunderbird_mbox_files(
+    profile_path: &Path,
+    server_host: &str,
+) -> Vec<(String, PathBuf)> {
+    let mut results = Vec::new();
+    let host_clean = server_host.to_ascii_lowercase();
+
+    for sub in ["ImapMail", "Mail"] {
+        let dir = profile_path.join(sub);
+        if let Ok(entries) = std::fs::read_dir(dir) {
+            for entry in entries.flatten() {
+                if entry.file_type().map(|t| t.is_dir()).unwrap_or(false) {
+                    let folder_name = entry.file_name().to_string_lossy().to_ascii_lowercase();
+                    // Match host or common prefixes
+                    if folder_name.contains(&host_clean)
+                        || (host_clean.contains("gmail") && folder_name.contains("gmail"))
+                        || (host_clean.contains("yahoo") && folder_name.contains("yahoo"))
+                        || (host_clean.contains("bestreseller") && folder_name.contains("saglnx"))
+                        || folder_name == "local folders"
+                    {
+                        if let Ok(folder_entries) = std::fs::read_dir(entry.path()) {
+                            for fe in folder_entries.flatten() {
+                                let path = fe.path();
+                                if path.is_file() && path.extension().is_none() {
+                                    if let Ok(meta) = path.metadata() {
+                                        if meta.len() > 0 {
+                                            let name = path
+                                                .file_name()
+                                                .and_then(|n| n.to_str())
+                                                .unwrap_or("Inbox")
+                                                .to_string();
+                                            results.push((name, path));
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    results
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

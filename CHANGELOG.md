@@ -9,6 +9,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-11-01
+
+### Added
+- **Undo send** wired through `UndoSendBuffer` with configurable grace period and delayed SMTP dispatch.
+- **Snooze** manager exposed in the UI (1-day snooze button in the message reader).
+- **Split-inbox categories** and **saved searches** rendered in the folder pane with in-memory filtering.
+- **Message filters/rules**: engine applied on arrival (move/tag/mark read/star) plus an interactive rule-editor modal.
+- **Thunderbird import**: profile scanning, account import modal, and automatic first-run prompt.
+- **Remote-image proxy** (`vespetrel-render::remote_image_proxy`): HTTPS-only, no cookies/referrer, size cap, local cache.
+- **Doctor diagnostics** (`vespetrel --doctor`): DB integrity, keyring/OAuth, autodiscover, IMAP TCP connectivity.
+- **Benchmark harness** (`vespetrel --benchmark`): startup/init timing, 100k-message insert, FTS5 search timing.
+- **Open original in browser** button (CSP-sandboxed, scripts blocked) in the message reader.
+- **Autosave drafts**: compose modal now autosaves drafts to local storage every 30s while open.
+- **Attachment workflow**: "forgot the attachment" detection on send, 25 MB large-file warning on attach, and "Save all attachments" to Downloads.
+- **Save as EML**: export the current message to an `.eml` file in Downloads.
+- **Export to mbox**: export the current folder to an `.mbox` file in Downloads.
+- **Tags/labels**: `message_tags` table (migration 007) plus repo functions and a "Tag" button in the reader.
+- **Contacts picker**: modal listing contacts to append recipients to compose To field.
+- **Search history** list rendered in the folder pane and re-runnable.
+- **Search operators** (`from:`, `to:`, `has:attachment`, `before:`, `is:unread`/`is:read`, `label:`) parsed in `vespetrel-core::search_ops` and applied in storage FTS/SQL search.
+- **Login Dialog Polish**: Adherence to GPUI Kit Design System with semantic Lucide iconography, WCAG-compliant contrast on alert banners and OAuth status indicators, native chevron toggles, and improved viewport clearance.
+
+### Changed
+- Mock fallbacks in `vespetrel-imap/graph/jmap/dav/smtp` are now compiled only under `#[cfg(test)]`, so production builds cannot serve fabricated data after a real failure.
+- Plain-text fallback already present via `BodyKind::Text`.
+
 ## [0.2.0] - 2026-10-30
 
 ### Added

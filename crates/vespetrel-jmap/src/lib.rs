@@ -359,7 +359,7 @@ impl MailProvider for JmapProvider {
             }
         }
 
-        #[cfg(any(test, feature = "mock"))]
+        #[cfg(test)]
         {
             // Test/Offline simulated folders
             return Ok(vec![
@@ -382,7 +382,7 @@ impl MailProvider for JmapProvider {
             ]);
         }
 
-        #[cfg(not(any(test, feature = "mock")))]
+        #[cfg(not(test))]
         {
             Err(vespetrel_core::provider::ProviderError::Protocol(
                 "JMAP server returned no mailboxes or endpoint unreachable".into(),
@@ -725,7 +725,7 @@ impl MailProvider for JmapProvider {
             return Ok(bytes.to_vec());
         }
 
-        #[cfg(any(test, feature = "mock"))]
+        #[cfg(test)]
         {
             return Ok(format!(
                 "From: jmap@example.com\r\nSubject: JMAP {}\r\n\r\nJMAP Message Body",
@@ -734,7 +734,7 @@ impl MailProvider for JmapProvider {
             .into_bytes());
         }
 
-        #[cfg(not(any(test, feature = "mock")))]
+        #[cfg(not(test))]
         {
             Err(vespetrel_core::provider::ProviderError::Protocol(format!(
                 "unable to fetch raw JMAP message for {remote_id}: invalid server connection"

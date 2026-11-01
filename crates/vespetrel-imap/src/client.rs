@@ -778,7 +778,7 @@ impl ImapConnection {
             return Ok(payload);
         }
 
-        #[cfg(any(test, feature = "mock"))]
+        #[cfg(test)]
         if self.is_mock() {
             let formatted = format!(
                 "MIME-Version: 1.0\r\n\

@@ -8699,7 +8699,7 @@ checksum = "0b928f33d975fc6ad9f86c8f283853ad26bdd5b10b7f1542aa2fa15e2289105a"
 
 [[package]]
 name = "vespetrel-app"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "ahash",
  "anyhow",
@@ -8734,7 +8734,7 @@ dependencies = [
 
 [[package]]
 name = "vespetrel-core"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "ahash",
  "anyhow",
@@ -8753,7 +8753,7 @@ dependencies = [
 
 [[package]]
 name = "vespetrel-crypto"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -8782,7 +8782,7 @@ dependencies = [
 
 [[package]]
 name = "vespetrel-dav"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "chrono",
@@ -8800,7 +8800,7 @@ dependencies = [
 
 [[package]]
 name = "vespetrel-engine"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "ahash",
  "anyhow",
@@ -8834,7 +8834,7 @@ dependencies = [
 
 [[package]]
 name = "vespetrel-gmail"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -8853,7 +8853,7 @@ dependencies = [
 
 [[package]]
 name = "vespetrel-graph"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -8871,7 +8871,7 @@ dependencies = [
 
 [[package]]
 name = "vespetrel-imap"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -8890,7 +8890,7 @@ dependencies = [
 
 [[package]]
 name = "vespetrel-jmap"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -8905,7 +8905,7 @@ dependencies = [
 
 [[package]]
 name = "vespetrel-render"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "ahash",
  "ammonia",
@@ -8914,8 +8914,13 @@ dependencies = [
  "mail-parser",
  "memchr",
  "regex",
+ "reqwest",
  "serde",
+ "sha2 0.10.9",
  "simdutf8",
+ "tempfile",
+ "thiserror 2.0.21",
+ "tokio",
  "tracing",
  "url",
  "urlencoding",
@@ -8923,7 +8928,7 @@ dependencies = [
 
 [[package]]
 name = "vespetrel-smtp"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "aws-lc-rs",
@@ -8945,7 +8950,7 @@ dependencies = [
 
 [[package]]
 name = "vespetrel-storage"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "ahash",
  "anyhow",

@@ -420,7 +420,7 @@ impl SmtpClient {
             return self.send_live(msg).await;
         }
 
-        #[cfg(any(test, feature = "mock"))]
+        #[cfg(test)]
         {
             let raw = self.build_rfc822(msg)?;
             debug!(size=%raw.len(), to=?msg.to, "simulated test SMTP delivery");
@@ -431,7 +431,7 @@ impl SmtpClient {
             Ok(())
         }
 
-        #[cfg(not(any(test, feature = "mock")))]
+        #[cfg(not(test))]
         {
             self.send_live(msg).await
         }

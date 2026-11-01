@@ -1,4 +1,4 @@
-use gpui_kit::component::IconName;
+use gpui_kit::assets::IconName;
 use vespetrel_core::{Folder, FolderRole};
 
 pub struct NavigationTree {
@@ -34,7 +34,7 @@ impl NavigationTree {
             FolderRole::Inbox => IconName::Inbox,
             FolderRole::Drafts => IconName::FileText,
             FolderRole::Sent => IconName::ArrowRight,
-            FolderRole::Archive => IconName::HardDrive,
+            FolderRole::Archive => IconName::Archive,
             FolderRole::Junk => IconName::CircleX,
             FolderRole::Trash => IconName::Delete,
             FolderRole::Custom => IconName::Folder,

@@ -6,6 +6,7 @@ pub mod html;
 pub mod mdn;
 pub mod mime;
 pub mod preview;
+pub mod remote_image_proxy;
 pub mod unsubscribe;
 
 pub use auth_badge::{AuthBadgeParser, AuthStatus, EmailSecuritySummary};
@@ -19,4 +20,5 @@ pub use preview::{
     AttachmentKind, AttachmentPreviewData, detect_attachment_kind, format_file_size,
     generate_preview,
 };
+pub use remote_image_proxy::{ProxyError, RemoteImageProxy};
 pub use unsubscribe::{ListUnsubscribe, UnsubscribeAction};
