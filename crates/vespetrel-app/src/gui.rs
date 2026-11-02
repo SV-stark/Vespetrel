@@ -9787,7 +9787,7 @@ mod design_tests {
         assert!(alias1.is_default);
         assert_eq!(alias2.reply_to.as_deref(), Some("contact@vespetrel.org"));
 
-        let aliases = vec![alias1.clone(), alias2.clone()];
+        let aliases = [alias1.clone(), alias2.clone()];
         let query_addr = "support@vespetrel.org";
         let matched = aliases
             .iter()

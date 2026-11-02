@@ -9,6 +9,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-11-03
+
+### Added
+- **Architecture Migration to `gpui-fast` + `gpui-kit 0.9.0`**:
+  - Upgraded frontend desktop UI framework to `gpui-kit 0.9.0` with the `gpui-fast` architecture feature activated across the workspace.
+  - Enabled GPUI Fast high-performance retained-mode mechanics: cached layout nodes, text measurement reuse, and cached GPU tile rendering for ultra-smooth scrolling and responsive window rendering across Windows, macOS, and Linux.
+  - Added direct dependency on `gpui-fast 0.1.13` and `gpui-fast-windows` / `gpui-fast-platform` backends in `Cargo.toml` and `vespetrel-app`.
+
+### Changed
+- **Full Dependency Updates (`cargo update`)**:
+  - Updated all dependencies across the workspace to their latest compatible releases.
+- **Workspace Version Bump to `0.4.0`**:
+  - Bumped `vespetrel-app`, `vespetrel-core`, `vespetrel-storage`, `vespetrel-engine`, `vespetrel-imap`, `vespetrel-gmail`, `vespetrel-jmap`, `vespetrel-graph`, `vespetrel-smtp`, `vespetrel-dav`, `vespetrel-crypto`, and `vespetrel-render` to `0.4.0`.
+
 ## [0.3.0] - 2026-11-01
 
 ### Added

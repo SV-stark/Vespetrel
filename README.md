@@ -6,7 +6,7 @@
 **Pre-1.0 • Multi-protocol (IMAP / JMAP / Graph) • Local FTS5 search • Native GPU UI**
 
 [![Rust](https://img.shields.io/badge/rust-stable-brightgreen.svg?style=flat-square&logo=rust)](https://www.rust-lang.org)
-[![GPUI](https://img.shields.io/badge/GUI-gpui--kit%200.8.1-blueviolet.svg?style=flat-square)](https://crates.io/crates/gpui-kit)
+[![GPUI](https://img.shields.io/badge/GUI-gpui--fast%20%2B%20gpui--kit%200.9.0-blueviolet.svg?style=flat-square)](https://crates.io/crates/gpui-kit)
 [![License: MIT OR Apache-2.0](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg?style=flat-square)](LICENSE)
 [![Nightly](https://img.shields.io/github/v/release/SV-stark/Vespetrel?include_prereleases&label=Windows%20Nightly&logo=windows&color=blue)](https://github.com/SV-stark/Vespetrel/releases/tag/nightly)
 [![Search](https://img.shields.io/badge/search-SQLite%20FTS5%20(BM25)-orange.svg?style=flat-square)](https://www.sqlite.org/fts5.html)
@@ -23,14 +23,14 @@
 
 Modern desktop email clients are almost universally trapped in web runtimes (Electron, Gecko, Chromium) that consume gigabytes of memory, introduce sluggish typing latency, and struggle when searching 50k+ local mailboxes.
 
-**Vespetrel** is a from-scratch desktop mail client written in Rust, using **`gpui-kit 0.8.1`** for a GPU-rendered native UI (no Electron, no embedded browser). It is pre-1.0: it already covers multi-protocol mail (IMAP, JMAP, Microsoft Graph, Gmail), OAuth2 sign-in, local SQLite FTS5 search, CalDAV/CardDAV and OpenPGP/S/MIME, but it is **not yet a Thunderbird replacement**. See the [honest comparison](#-vespetrel-vs-thunderbird-honest-comparison) and the [roadmap](#-roadmap--status) for what is and isn't done. Performance figures have not been benchmarked and are intentionally not claimed.
+**Vespetrel** is a from-scratch desktop mail client written in Rust, using **`gpui-fast + gpui-kit 0.9.0`** for a GPU-rendered native UI (no Electron, no embedded browser). It is pre-1.0: it already covers multi-protocol mail (IMAP, JMAP, Microsoft Graph, Gmail), OAuth2 sign-in, local SQLite FTS5 search, CalDAV/CardDAV and OpenPGP/S/MIME, but it is **not yet a Thunderbird replacement**. See the [honest comparison](#-vespetrel-vs-thunderbird-honest-comparison) and the [roadmap](#-roadmap--status) for what is and isn't done. Performance figures have not been benchmarked and are intentionally not claimed.
 
 ```
 ┌────────────────────────────────────────────────────────────────────────────────────────────┐
 │                                   VESPETREL ARCHITECTURE                                   │
 │                                                                                            │
 │  ┌──────────────────────────────────────────────────────────────────────────────────────┐  │
-│  │ GPUI-KIT 0.8.1 FRONTEND (GPU Metal / Vulkan / DirectX)                  │  │
+│  │ GPUI-FAST + GPUI-KIT 0.9.0 FRONTEND (GPU Metal / Vulkan / DirectX)           │  │
 │  │ • 3-Pane Dock Layout (Folders, Virtual Thread List, Message Viewer)                  │  │
 │  │ • Interactive Setup Wizard (Input/InputState, masked password + eye toggle)         │  │
 │  │ • Tree-sitter Rich Markdown/Plaintext Editor                 │  │
@@ -164,7 +164,7 @@ Vespetrel is architected as a highly modular Cargo workspace:
 
 ```
 vespetrel/
-├── Cargo.toml                  # Workspace manifest & shared dependencies (gpui-kit 0.8.1, aws-lc-rs)
+├── Cargo.toml                  # Workspace manifest & shared dependencies (gpui-fast, gpui-kit 0.9.0, aws-lc-rs)
 ├── rust-toolchain.toml         # Pinned stable Rust toolchain
 ├── packaging/                  # Native packaging: windows/ (.nsi + manifest), linux/ (.desktop), macos/ (Info.plist)
 ├── .github/workflows/          # CI matrix (fmt + clippy + test + release build + headless verify + cargo-deny audit) & nightly release

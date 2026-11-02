@@ -13,7 +13,7 @@ path = "src/main.rs"
 
 [features]
 default = ["gpui"]
-gpui = ["dep:gpui-kit"]
+gpui = ["dep:gpui-kit", "dep:gpui-fast"]
 
 [dependencies]
 vespetrel-core = { workspace = true }
@@ -43,6 +43,7 @@ smallvec = { workspace = true }
 regex = { workspace = true }
 rustls = { workspace = true }
 gpui-kit = { workspace = true, optional = true }
+gpui-fast = { workspace = true, optional = true }
 
 
 

@@ -423,11 +423,9 @@ pub fn parse_mime_to_message(
     msg.body_text_preview = parsed
         .body_text(0)
         .map(|t| t.chars().take(500).collect::<String>());
-    if let Some(d) = parsed.date() {
-        if let Some(dt) = crate::worker::mail_date_to_utc(d) {
-            msg.sent_at = dt;
-            msg.received_at = dt;
-        }
+    if let Some(dt) = parsed.date().and_then(crate::worker::mail_date_to_utc) {
+        msg.sent_at = dt;
+        msg.received_at = dt;
     }
     msg.has_attachments = parsed.attachment_count() > 0;
     msg.size_bytes = raw_bytes.len() as i64;
@@ -448,28 +446,24 @@ pub fn find_thunderbird_mbox_files(
             for entry in entries.flatten() {
                 if entry.file_type().map(|t| t.is_dir()).unwrap_or(false) {
                     let folder_name = entry.file_name().to_string_lossy().to_ascii_lowercase();
-                    // Match host or common prefixes
-                    if folder_name.contains(&host_clean)
+                    let is_match = folder_name.contains(&host_clean)
                         || (host_clean.contains("gmail") && folder_name.contains("gmail"))
                         || (host_clean.contains("yahoo") && folder_name.contains("yahoo"))
                         || (host_clean.contains("bestreseller") && folder_name.contains("saglnx"))
-                        || folder_name == "local folders"
-                    {
-                        if let Ok(folder_entries) = std::fs::read_dir(entry.path()) {
-                            for fe in folder_entries.flatten() {
-                                let path = fe.path();
-                                if path.is_file() && path.extension().is_none() {
-                                    if let Ok(meta) = path.metadata() {
-                                        if meta.len() > 0 {
-                                            let name = path
-                                                .file_name()
-                                                .and_then(|n| n.to_str())
-                                                .unwrap_or("Inbox")
-                                                .to_string();
-                                            results.push((name, path));
-                                        }
-                                    }
-                                }
+                        || folder_name == "local folders";
+                    if is_match && let Ok(folder_entries) = std::fs::read_dir(entry.path()) {
+                        for fe in folder_entries.flatten() {
+                            let path = fe.path();
+                            if path.is_file()
+                                && path.extension().is_none()
+                                && path.metadata().map(|m| m.len() > 0).unwrap_or(false)
+                            {
+                                let name = path
+                                    .file_name()
+                                    .and_then(|n| n.to_str())
+                                    .unwrap_or("Inbox")
+                                    .to_string();
+                                results.push((name, path));
                             }
                         }
                     }

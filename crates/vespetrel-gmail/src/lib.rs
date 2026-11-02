@@ -1050,7 +1050,7 @@ mod tests {
 
     #[test]
     fn walk_bounds_match_gmails_documented_limits() {
-        assert!(MAX_BATCH_MODIFY <= 1000, "batchModify caps at 1000 ids");
-        assert!(MAX_HISTORY_PAGES > 0 && MAX_LIST_PAGES > 0);
+        const { assert!(MAX_BATCH_MODIFY <= 1000, "batchModify caps at 1000 ids") };
+        const { assert!(MAX_HISTORY_PAGES > 0 && MAX_LIST_PAGES > 0) };
     }
 }
