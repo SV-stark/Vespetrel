@@ -17,7 +17,7 @@ pub mod gpui_app {
     };
     pub use gpui_kit::assets::{Assets, IconName};
     pub use gpui_kit::base;
-    use gpui_kit::base::Selectable;
+    use gpui_kit::base::{Disableable, Selectable};
     pub use gpui_kit::component;
     pub use gpui_kit::component::alert::Alert;
     pub use gpui_kit::component::badge::Badge;
@@ -616,6 +616,7 @@ pub mod gpui_app {
         pub command_palette: crate::command_palette::CommandPalette,
         // Event channel from Tokio sync engine
         pub sync_sender: flume::Sender<SyncEvent>,
+        pub is_syncing: bool,
         pub status_message: String,
         pub storage_pool: Option<vespetrel_storage::db::StoragePool>,
         pub login_wizard: LoginWizardState,
@@ -1007,6 +1008,7 @@ pub mod gpui_app {
                 palette_query: String::new(),
                 command_palette: crate::command_palette::CommandPalette::new(),
                 sync_sender: sync_tx,
+                is_syncing: false,
                 status_message: "All mailboxes synchronized".into(),
                 storage_pool,
                 login_wizard: LoginWizardState::new(),
@@ -1087,11 +1089,13 @@ pub mod gpui_app {
                     cx.notify();
                 }
                 SyncEvent::SyncError { folder, error } => {
+                    self.is_syncing = false;
                     self.status_message = format!("Sync error ({folder}): {error}");
                     self.show_toast(format!("Sync error ({}): {}", folder, error), true, cx);
                     cx.notify();
                 }
                 SyncEvent::SyncFinished { account_id: _ } => {
+                    self.is_syncing = false;
                     self.status_message = "All mailboxes synchronized".into();
                     cx.notify();
                 }
@@ -1673,14 +1677,22 @@ pub mod gpui_app {
         }
 
         pub fn trigger_sync(&mut self, cx: &mut Context<Self>) {
+            if self.is_syncing {
+                return;
+            }
+            self.is_syncing = true;
             self.status_message = "Syncing mailboxes...".into();
+            self.show_toast("Checking for new messages...", false, cx);
+            cx.notify();
             let _pool_opt = self.storage_pool.clone();
             let tx = self.sync_sender.clone();
             let accounts = self.accounts.clone();
             cx.spawn(async move |this, cx| {
                 if accounts.is_empty() {
                     let _ = this.update(cx, |view, cx| {
+                        view.is_syncing = false;
                         view.status_message = "No accounts configured".into();
+                        view.show_toast("No accounts configured to sync", true, cx);
                         cx.notify();
                     });
                     return;
@@ -1749,7 +1761,9 @@ pub mod gpui_app {
                     }
                 }
                 let _ = this.update(cx, |view, cx| {
-                    view.status_message = "Mailbox sync complete".into();
+                    view.is_syncing = false;
+                    view.status_message = "All mailboxes synchronized".into();
+                    view.show_toast("Mailbox sync complete", false, cx);
                     cx.notify();
                 });
             })
@@ -3995,16 +4009,30 @@ pub mod gpui_app {
                                         this.open_compose(cx);
                                     })),
                             )
-                            .child(
+                            .child({
+                                let is_syncing = self.is_syncing;
                                 Button::new("btn-header-sync")
                                     .ghost()
-                                    .icon(IconName::RotateCw)
-                                    .label("Sync")
-                                    .tooltip("Check mail for new messages")
+                                    .icon(if is_syncing {
+                                        IconName::LoaderCircle
+                                    } else {
+                                        IconName::RotateCw
+                                    })
+                                    .label(if is_syncing {
+                                        "Syncing..."
+                                    } else {
+                                        "Sync"
+                                    })
+                                    .tooltip(if is_syncing {
+                                        "Synchronizing mailboxes with server..."
+                                    } else {
+                                        "Check mail for new messages"
+                                    })
+                                    .when(is_syncing, |b| b.disabled(true))
                                     .on_click(cx.listener(|this, _, _, cx| {
                                         this.trigger_sync(cx);
-                                    })),
-                            )
+                                    }))
+                            })
                             // The shortcut is presented as a key, not as the button's name.
                             // A button labelled "⌘K" announced itself as a glyph, told the
                             // user nothing about the command, and showed the macOS notation
@@ -4278,36 +4306,18 @@ pub mod gpui_app {
                                 ),
                         )
                         .child(
-                            div()
-                                .flex()
-                                .flex_row()
-                                .items_center()
-                                .gap(px(4.0))
-                                .child(
-                                    Button::new("btn-sidebar-compose")
-                                        .icon(IconName::Plus)
-                                        .label("Compose")
-                                        .primary()
-                                        .small()
-                                        .tooltip("Compose new message (Ctrl+N)")
-                                        .on_click(cx.listener(|this, _, _, cx| {
-                                            this.open_compose(cx);
-                                        })),
-                                )
-                                .child(
-                                    Button::new("btn-add-account")
-                                        .icon(IconName::Plus)
-                                        .label("Add")
-                                        .ghost()
-                                        .small()
-                                        .tooltip("Add email account")
-                                        .on_click(cx.listener(|this, _, _, cx| {
-                                            this.login_wizard = LoginWizardState::new();
-                                            this.wizard_inputs = None;
-                                            this.active_modal = ActiveModal::AddAccount;
-                                            cx.notify();
-                                        })),
-                                ),
+                            Button::new("btn-add-account")
+                                .icon(IconName::Plus)
+                                .label("Add")
+                                .ghost()
+                                .small()
+                                .tooltip("Add email account")
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.login_wizard = LoginWizardState::new();
+                                    this.wizard_inputs = None;
+                                    this.active_modal = ActiveModal::AddAccount;
+                                    cx.notify();
+                                })),
                         ),
                 )
                 // 2. Main Scroll Area: Unified Folders + Grouped Accounts & Folders + Searches
@@ -6900,7 +6910,11 @@ pub mod gpui_app {
         /// to contain one of those words turned the indicator red, and a genuine failure
         /// whose wording differed stayed green.
         fn status_state(&self) -> StatusState {
-            classify_status(self.accounts.len(), &self.status_message)
+            if self.is_syncing {
+                StatusState::Busy
+            } else {
+                classify_status(self.accounts.len(), &self.status_message)
+            }
         }
 
         fn render_status_bar(&self, cx: &Context<Self>) -> impl IntoElement {
@@ -7332,16 +7346,16 @@ pub mod gpui_app {
                             .id("modal-compose-box")
                             .flex()
                             .flex_col()
-                            .w(px(680.0))
-                            .max_h(px(720.0))
+                            .w(px(640.0))
+                            .max_h(px(700.0))
                             .overflow_y_scroll()
                             .rounded_xl()
                             .bg(cx.theme().popover)
                             .border_1()
                             .border_color(cx.theme().border)
                             .shadow_2xl()
-                            .p(px(22.0))
-                            .gap(px(12.0))
+                            .p(px(24.0))
+                            .gap(px(14.0))
                             .child(
                                 div()
                                     .flex()
@@ -7351,16 +7365,28 @@ pub mod gpui_app {
                                     .child(
                                         div()
                                             .flex()
-                                            .flex_row()
-                                            .items_center()
-                                            .gap(px(8.0))
-                                            .child(Icon::new(IconName::Plus).text_color(cx.theme().primary))
+                                            .flex_col()
+                                            .gap(px(2.0))
                                             .child(
                                                 div()
-                                                    .text_base()
-                                                    .font_weight(FontWeight::BOLD)
-                                                    .text_color(cx.theme().foreground)
-                                                    .child("Compose"),
+                                                    .flex()
+                                                    .flex_row()
+                                                    .items_center()
+                                                    .gap(px(8.0))
+                                                    .child(Icon::new(IconName::Mail).text_color(cx.theme().primary))
+                                                    .child(
+                                                        div()
+                                                            .text_base()
+                                                            .font_weight(FontWeight::BOLD)
+                                                            .text_color(cx.theme().foreground)
+                                                            .child("Write New Message"),
+                                                    ),
+                                            )
+                                            .child(
+                                                div()
+                                                    .text_xs()
+                                                    .text_color(cx.theme().muted_foreground)
+                                                    .child("Draft and send messages with Markdown, identity signatures, and attachments."),
                                             ),
                                     )
                                     .child(
@@ -10255,6 +10281,30 @@ mod design_tests {
 
         let invalid_to = compose.validate_compose_fields("invalid-email", "Test Subject", "Hello");
         assert!(!invalid_to.is_valid());
+    }
+
+    #[test]
+    fn test_sync_visual_feedback_state() {
+        use super::gpui_app::{StatusState, classify_status};
+
+        // When accounts exist and sync is in progress
+        assert_eq!(
+            classify_status(1, "Syncing mailboxes..."),
+            StatusState::Busy
+        );
+        assert_eq!(classify_status(2, "Syncing..."), StatusState::Busy);
+        assert_eq!(
+            classify_status(1, "All mailboxes synchronized"),
+            StatusState::Ready
+        );
+        assert_eq!(
+            classify_status(1, "Sync error (INBOX): connection timed out"),
+            StatusState::Failed
+        );
+        assert_eq!(
+            classify_status(0, "All mailboxes synchronized"),
+            StatusState::NoAccount
+        );
     }
 
     #[test]

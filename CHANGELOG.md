@@ -9,6 +9,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.6] - 2026-11-04
+
+### Added
+- **Interactive Visual Feedback for Mailbox Syncing**:
+  - Direct visual state transformation on the `Sync` button (`btn-header-sync`): dynamically displays spinning `IconName::LoaderCircle`, switches label to `"Syncing..."`, and disables duplicate clicks while background synchronization runs.
+  - Interactive toast notifications on sync trigger (`"Checking for new messages..."`) and completion (`"Mailbox sync complete"`).
+  - Bottom status bar immediately activates `StatusState::Busy` with primary indicator dot and descriptive status line during sync operations.
+
+### Changed
+- **Unified Single Compose Button Placement**:
+  - Removed duplicate `+ Compose` button from the folder sidebar header, ensuring the `+ Compose` button (`btn-header-compose`) is uniquely placed next to the `Sync` button in the main window toolbar.
+  - Refined the Compose dialogue (`ActiveModal::Compose`) to mirror the spacious styling, subtitle, and card layout of the Add Account dialogue (`ActiveModal::AddAccount`).
+
 ## [0.4.5] - 2026-11-04
 
 ### Added

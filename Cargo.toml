@@ -16,7 +16,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.4.5"
+version = "0.4.6"
 edition = "2024"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/SV-stark/Vespetrel"
@@ -30,16 +30,16 @@ gpui-kit = { version = "0.9.0", features = ["gpui-fast"] }
 gpui-fast = "0.1.13"
 
 # Internal Workspace Crates
-vespetrel-core = { path = "crates/vespetrel-core", version = "0.4.5" }
-vespetrel-storage = { path = "crates/vespetrel-storage", version = "0.4.5" }
-vespetrel-engine = { path = "crates/vespetrel-engine", version = "0.4.5" }
-vespetrel-imap = { path = "crates/vespetrel-imap", version = "0.4.5" }
-vespetrel-gmail = { path = "crates/vespetrel-gmail", version = "0.4.5" }
-vespetrel-jmap = { path = "crates/vespetrel-jmap", version = "0.4.5" }
-vespetrel-graph = { path = "crates/vespetrel-graph", version = "0.4.5" }
-vespetrel-smtp = { path = "crates/vespetrel-smtp", version = "0.4.5" }
-vespetrel-crypto = { path = "crates/vespetrel-crypto", version = "0.4.5" }
-vespetrel-render = { path = "crates/vespetrel-render", version = "0.4.5" }
+vespetrel-core = { path = "crates/vespetrel-core", version = "0.4.6" }
+vespetrel-storage = { path = "crates/vespetrel-storage", version = "0.4.6" }
+vespetrel-engine = { path = "crates/vespetrel-engine", version = "0.4.6" }
+vespetrel-imap = { path = "crates/vespetrel-imap", version = "0.4.6" }
+vespetrel-gmail = { path = "crates/vespetrel-gmail", version = "0.4.6" }
+vespetrel-jmap = { path = "crates/vespetrel-jmap", version = "0.4.6" }
+vespetrel-graph = { path = "crates/vespetrel-graph", version = "0.4.6" }
+vespetrel-smtp = { path = "crates/vespetrel-smtp", version = "0.4.6" }
+vespetrel-crypto = { path = "crates/vespetrel-crypto", version = "0.4.6" }
+vespetrel-render = { path = "crates/vespetrel-render", version = "0.4.6" }
 
 # Database & Storage
 rusqlite = { version = "0.40", features = ["bundled", "chrono", "serde_json"] }
