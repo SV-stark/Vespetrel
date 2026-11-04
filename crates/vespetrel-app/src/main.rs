@@ -48,8 +48,9 @@ fn print_banner(db_path: &str, theme: vespetrel_app::platform::OsTheme) {
     \ V /  __/\__ \ |_) |  __/ |_| | |  __/ |
      \_/ \___||___/ .__/ \___|\__|_|  \___|_|
                   |_|                         
-    🕊️  Pure Rust Desktop Mail Client v0.1.0
-"#
+    🕊️  Pure Rust Desktop Mail Client v{}
+"#,
+        env!("CARGO_PKG_VERSION")
     );
     println!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
     println!("  Database : SQLite WAL + FTS5 ({db_path})");

@@ -17,7 +17,6 @@ vespetrel-jmap = { workspace = true }
 vespetrel-graph = { workspace = true }
 tokio = { workspace = true }
 async-trait = { workspace = true }
-futures = { workspace = true }
 tracing = { workspace = true }
 # Used only to name the pooled-connection type in worker.rs signatures; `deadpool_sqlite`
 # deliberately exports no alias for it.
@@ -38,7 +37,9 @@ rand = { workspace = true }
 keyring = { workspace = true }
 rusqlite = { workspace = true }
 sha2 = { workspace = true }
+aws-lc-rs = { workspace = true }
+zeroize = { workspace = true }
 
-
-
-
+[dev-dependencies]
+tokio = { workspace = true }
+tempfile = { workspace = true }

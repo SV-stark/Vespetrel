@@ -37,32 +37,44 @@ impl WorkspaceView {
 #[cfg(feature = "gpui")]
 mod gpui_impl {
     use super::*;
-    use gpui_kit::component::resizable::h_resizable;
+    use gpui_kit::component::resizable::{h_resizable, resizable_panel};
     use gpui_kit::gpui::*;
 
     impl Render for WorkspaceView {
         fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
             h_resizable("workspace-panels")
                 .child(
-                    div()
-                        .w(px(220.0))
-                        .h_full()
-                        .child("Navigation Pane")
-                        .into_any_element(),
+                    resizable_panel()
+                        .size(px(220.0))
+                        .size_range(px(140.0)..px(450.0))
+                        .child(
+                            div()
+                                .size_full()
+                                .overflow_hidden()
+                                .child("Navigation Pane")
+                                .into_any_element(),
+                        ),
                 )
                 .child(
-                    div()
-                        .w(px(350.0))
-                        .h_full()
-                        .child("Message List")
-                        .into_any_element(),
+                    resizable_panel()
+                        .size(px(320.0))
+                        .size_range(px(180.0)..px(750.0))
+                        .child(
+                            div()
+                                .size_full()
+                                .overflow_hidden()
+                                .child("Message List")
+                                .into_any_element(),
+                        ),
                 )
                 .child(
-                    div()
-                        .flex_1()
-                        .h_full()
-                        .child("Message Reader")
-                        .into_any_element(),
+                    resizable_panel().size_range(px(260.0)..Pixels::MAX).child(
+                        div()
+                            .size_full()
+                            .overflow_hidden()
+                            .child("Message Reader")
+                            .into_any_element(),
+                    ),
                 )
         }
     }

@@ -65,7 +65,7 @@ Modern desktop email clients are almost universally trapped in web runtimes (Ele
 
 Vespetrel is **not** a drop-in Thunderbird replacement yet. It is a young, fast-moving client with a different design focus.
 
-| Area | Thunderbird | Vespetrel (v0.2) |
+| Area | Thunderbird | Vespetrel (v0.4.5) |
 |---|---|---|
 | **Maturity** | 20+ years, large user base | Pre-1.0, single maintainer |
 | **UI technology** | Gecko (HTML/XUL/JS) | Native Rust, GPU-rendered via `gpui-kit` |
@@ -248,7 +248,7 @@ Interactive console commands once launched: `list`/`inbox`, `read <ID>`, `compos
 
 ## 🗺️ Roadmap & Status
 
-Vespetrel is **pre-1.0 (v0.3.x)**. Items are only ticked when they are implemented **and** reachable from the app. Engine-level building blocks (parsers, command builders, data types) that are not yet wired into the UI or sync pipeline are listed as **Planned**, not done. See `CHANGELOG.md` for details.
+Vespetrel is **pre-1.0 (v0.4.x)**. Items are only ticked when they are implemented **and** reachable from the app. Engine-level building blocks (parsers, command builders, data types) that are not yet wired into the UI or sync pipeline are listed as **Planned**, not done. See `CHANGELOG.md` for details.
 
 ### ✅ Shipped
 

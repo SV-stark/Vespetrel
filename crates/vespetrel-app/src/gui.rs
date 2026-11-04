@@ -11,7 +11,7 @@ pub mod gpui_app {
         login_wizard::{AuthModeChoice, AutodiscoverStatus, LoginWizardState, WizardStep},
         message_list::{ListFilter, MessageRowDensity},
         message_viewer::{AttachmentInfo, AuthState, BodyKind, MessageViewer, SecurityStatus},
-        navigation::NavigationTree,
+        navigation::{NavigationTree, folder_sort_key},
         quick_filter::QuickFilterState,
         tasks::TaskListView,
     };
@@ -28,7 +28,7 @@ pub mod gpui_app {
     pub use gpui_kit::component::kbd::Kbd;
     pub use gpui_kit::component::notification::Notification;
     pub use gpui_kit::component::popover::Popover;
-    use gpui_kit::component::resizable::{h_resizable, v_resizable};
+    use gpui_kit::component::resizable::{h_resizable, resizable_panel, v_resizable};
     pub use gpui_kit::component::sheet::Sheet;
     pub use gpui_kit::component::status_bar::StatusBar;
     pub use gpui_kit::component::tab::{Tab, TabBar};
@@ -555,6 +555,8 @@ pub mod gpui_app {
         /// Whether the folder pane is shown. A keyboard shortcut toggles it, so it has
         /// to be state rather than a constant in the render function.
         pub folder_tree_visible: bool,
+        /// Set of account IDs whose folder trees are collapsed in the sidebar.
+        pub collapsed_accounts: std::collections::HashSet<String>,
         pub block_remote_images: bool,
         pub message_viewer: MessageViewer,
         pub is_threaded: bool,
@@ -979,6 +981,7 @@ pub mod gpui_app {
                 search_history: Vec::new(),
                 selected_message_tags: Vec::new(),
                 folder_tree_visible: true,
+                collapsed_accounts: std::collections::HashSet::new(),
                 block_remote_images: true,
                 message_viewer: MessageViewer::new(),
                 is_threaded: false,
@@ -2732,6 +2735,15 @@ pub mod gpui_app {
             .detach();
         }
 
+        pub fn toggle_account_collapsed(&mut self, account_id: &str, cx: &mut Context<Self>) {
+            if self.collapsed_accounts.contains(account_id) {
+                self.collapsed_accounts.remove(account_id);
+            } else {
+                self.collapsed_accounts.insert(account_id.to_string());
+            }
+            cx.notify();
+        }
+
         pub fn send_composed_message(&mut self, cx: &mut Context<Self>) {
             let cc_val = self
                 .compose_inputs
@@ -3581,6 +3593,7 @@ pub mod gpui_app {
             self.compose_to.clear();
             self.compose_subject.clear();
             self.compose_attachments.clear();
+            self.compose_inputs = None;
 
             // Set default alias if available
             if self.selected_alias.is_none() {
@@ -3977,9 +3990,9 @@ pub mod gpui_app {
                                     .primary()
                                     .icon(IconName::Plus)
                                     .label("Compose")
+                                    .tooltip("Compose new message (Ctrl+N)")
                                     .on_click(cx.listener(|this, _, _, cx| {
-                                        this.active_modal = ActiveModal::Compose;
-                                        cx.notify();
+                                        this.open_compose(cx);
                                     })),
                             )
                             .child(
@@ -4116,319 +4129,650 @@ pub mod gpui_app {
         }
 
         fn render_mail_workspace(&self, cx: &Context<Self>) -> impl IntoElement {
-            h_resizable("mail-workspace-panels")
-                .children(
-                    self.folder_tree_visible
-                        .then(|| self.render_folder_tree(cx).into_any_element()),
+            match self.settings.layout {
+                vespetrel_core::PaneLayout::ClassicHorizontal => self
+                    .render_classic_horizontal_workspace(cx)
+                    .into_any_element(),
+                vespetrel_core::PaneLayout::SingleColumnFocus => {
+                    self.render_single_column_workspace(cx).into_any_element()
+                }
+                vespetrel_core::PaneLayout::ThreePaneVertical => self
+                    .render_three_pane_vertical_workspace(cx)
+                    .into_any_element(),
+            }
+        }
+
+        fn render_three_pane_vertical_workspace(&self, cx: &Context<Self>) -> impl IntoElement {
+            let panel_group_id = if self.folder_tree_visible {
+                "mail-workspace-3pane"
+            } else {
+                "mail-workspace-2pane"
+            };
+
+            let mut group = h_resizable(panel_group_id);
+            if self.folder_tree_visible {
+                group = group.child(
+                    resizable_panel()
+                        .size(px(240.0))
+                        .size_range(px(160.0)..px(450.0))
+                        .child(self.render_folder_tree(cx)),
+                );
+            }
+            group
+                .child(
+                    resizable_panel()
+                        .size(px(320.0))
+                        .size_range(px(180.0)..px(750.0))
+                        .child(self.render_message_list_pane(cx)),
                 )
-                .child(self.render_message_list_pane(cx).into_any_element())
-                .child(self.render_message_reader_pane(cx).into_any_element())
+                .child(
+                    resizable_panel()
+                        .size_range(px(260.0)..Pixels::MAX)
+                        .child(self.render_message_reader_pane(cx)),
+                )
+        }
+
+        fn render_classic_horizontal_workspace(&self, cx: &Context<Self>) -> impl IntoElement {
+            let panel_group_id = if self.folder_tree_visible {
+                "mail-classic-h-panels"
+            } else {
+                "mail-classic-h-panels-nofolder"
+            };
+
+            let right_side = v_resizable("mail-classic-v-panels")
+                .child(
+                    resizable_panel()
+                        .size(px(260.0))
+                        .size_range(px(120.0)..px(600.0))
+                        .child(self.render_message_list_pane(cx)),
+                )
+                .child(
+                    resizable_panel()
+                        .size_range(px(180.0)..Pixels::MAX)
+                        .child(self.render_message_reader_pane(cx)),
+                );
+
+            let mut group = h_resizable(panel_group_id);
+            if self.folder_tree_visible {
+                group = group.child(
+                    resizable_panel()
+                        .size(px(240.0))
+                        .size_range(px(160.0)..px(450.0))
+                        .child(self.render_folder_tree(cx)),
+                );
+            }
+            group.child(
+                resizable_panel()
+                    .size_range(px(280.0)..Pixels::MAX)
+                    .child(right_side),
+            )
+        }
+
+        fn render_single_column_workspace(&self, cx: &Context<Self>) -> impl IntoElement {
+            let panel_group_id = if self.folder_tree_visible {
+                "mail-single-h-panels"
+            } else {
+                "mail-single-h-panels-nofolder"
+            };
+
+            let right_side = if self.selected_message_id.is_some() {
+                self.render_message_reader_pane(cx).into_any_element()
+            } else {
+                self.render_message_list_pane(cx).into_any_element()
+            };
+
+            let mut group = h_resizable(panel_group_id);
+            if self.folder_tree_visible {
+                group = group.child(
+                    resizable_panel()
+                        .size(px(240.0))
+                        .size_range(px(160.0)..px(450.0))
+                        .child(self.render_folder_tree(cx)),
+                );
+            }
+            group.child(
+                resizable_panel()
+                    .size_range(px(280.0)..Pixels::MAX)
+                    .child(right_side),
+            )
         }
 
         fn render_folder_tree(&self, cx: &Context<Self>) -> impl IntoElement {
             div()
+                .id("folder-tree-pane")
                 .flex()
                 .flex_col()
-                .w(px(220.0))
-                .h_full()
-                .flex_shrink_0()
+                .size_full()
+                .overflow_hidden()
                 .bg(cx.theme().sidebar)
                 .border_r_1()
                 .border_color(cx.theme().sidebar_border)
-                .p(px(12.0))
-                .gap(px(12.0))
+                // 1. Pinned Top Header: Mailboxes title + Add Account button
                 .child(
                     div()
                         .flex()
                         .flex_row()
                         .items_center()
                         .justify_between()
+                        .px(px(12.0))
+                        .py(px(8.0))
+                        .border_b_1()
+                        .border_color(cx.theme().sidebar_border)
                         .child(
                             div()
-                                .text_xs()
-                                .font_weight(FontWeight::SEMIBOLD)
-                                .text_color(cx.theme().muted_foreground)
-                                .child("Accounts"),
+                                .flex()
+                                .flex_row()
+                                .items_center()
+                                .gap(px(6.0))
+                                .child(
+                                    Icon::new(IconName::Inbox)
+                                        .small()
+                                        .text_color(cx.theme().primary),
+                                )
+                                .child(
+                                    div()
+                                        .text_xs()
+                                        .font_weight(FontWeight::BOLD)
+                                        .text_color(cx.theme().sidebar_foreground)
+                                        .child("Mailboxes"),
+                                ),
                         )
                         .child(
-                            Button::new("btn-add-account")
-                                .icon(IconName::Plus)
-                                .label("Add")
-                                .ghost()
-                                .small()
-                                .tooltip("Add account")
-                                .on_click(cx.listener(|this, _, _, cx| {
-                                    this.login_wizard = LoginWizardState::new();
-                                    this.wizard_inputs = None;
-                                    this.active_modal = ActiveModal::AddAccount;
-                                    cx.notify();
-                                })),
+                            div()
+                                .flex()
+                                .flex_row()
+                                .items_center()
+                                .gap(px(4.0))
+                                .child(
+                                    Button::new("btn-sidebar-compose")
+                                        .icon(IconName::Plus)
+                                        .label("Compose")
+                                        .primary()
+                                        .small()
+                                        .tooltip("Compose new message (Ctrl+N)")
+                                        .on_click(cx.listener(|this, _, _, cx| {
+                                            this.open_compose(cx);
+                                        })),
+                                )
+                                .child(
+                                    Button::new("btn-add-account")
+                                        .icon(IconName::Plus)
+                                        .label("Add")
+                                        .ghost()
+                                        .small()
+                                        .tooltip("Add email account")
+                                        .on_click(cx.listener(|this, _, _, cx| {
+                                            this.login_wizard = LoginWizardState::new();
+                                            this.wizard_inputs = None;
+                                            this.active_modal = ActiveModal::AddAccount;
+                                            cx.notify();
+                                        })),
+                                ),
                         ),
                 )
-                .children(if self.accounts.is_empty() {
-                    vec![
-                        div()
-                            .id("btn-add-account-banner")
-                            .flex()
-                            .flex_col()
-                            .p(px(8.0))
-                            .rounded_md()
-                            .bg(cx.theme().muted)
-                            .hover(|s| s.bg(cx.theme().accent))
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                this.login_wizard = LoginWizardState::new();
-                                this.wizard_inputs = None;
-                                this.active_modal = ActiveModal::AddAccount;
-                                cx.notify();
-                            }))
-                            .child(
+                // 2. Main Scroll Area: Unified Folders + Grouped Accounts & Folders + Searches
+                .child(
+                    div()
+                        .id("folder-tree-scroll")
+                        .flex()
+                        .flex_col()
+                        .flex_1()
+                        .min_h(px(0.0))
+                        .p(px(8.0))
+                        .gap(px(10.0))
+                        .overflow_y_scroll()
+                        .children(if self.accounts.is_empty() {
+                            vec![
                                 div()
-                                    .text_xs()
-                                    .font_weight(FontWeight::SEMIBOLD)
-                                    .text_color(cx.theme().muted_foreground)
-                                    .child("No accounts configured"),
-                            )
-                            .child(
+                                    .id("btn-add-account-banner")
+                                    .flex()
+                                    .flex_col()
+                                    .items_center()
+                                    .text_center()
+                                    .p(px(16.0))
+                                    .gap(px(8.0))
+                                    .rounded_lg()
+                                    .bg(cx.theme().muted.opacity(0.5))
+                                    .border_1()
+                                    .border_color(cx.theme().border)
+                                    .child(
+                                        Icon::new(IconName::Mail)
+                                            .text_color(cx.theme().muted_foreground),
+                                    )
+                                    .child(
+                                        div()
+                                            .text_xs()
+                                            .font_weight(FontWeight::SEMIBOLD)
+                                            .text_color(cx.theme().foreground)
+                                            .child("No accounts configured"),
+                                    )
+                                    .child(
+                                        div()
+                                            .text_xs()
+                                            .text_color(cx.theme().muted_foreground)
+                                            .child("Connect an email account to view your inboxes and folders."),
+                                    )
+                                    .child(
+                                        Button::new("btn-connect-account-empty")
+                                            .label("Add Account")
+                                            .icon(IconName::Plus)
+                                            .primary()
+                                            .small()
+                                            .on_click(cx.listener(|this, _, _, cx| {
+                                                this.login_wizard = LoginWizardState::new();
+                                                this.wizard_inputs = None;
+                                                this.active_modal = ActiveModal::AddAccount;
+                                                cx.notify();
+                                            })),
+                                    )
+                                    .into_any_element(),
+                            ]
+                        } else {
+                            let mut sections: Vec<AnyElement> = Vec::new();
+
+                            // --- A. UNIFIED INBOX SECTION (Thunderbird Smart Folders) ---
+                            let unified_unread: i64 = self
+                                .folders
+                                .iter()
+                                .filter(|f| f.role == FolderRole::Inbox)
+                                .map(|f| f.unread_count)
+                                .sum();
+
+                            let mut unified_group = div()
+                                .id("unified-folders-group")
+                                .flex()
+                                .flex_col()
+                                .gap(px(2.0))
+                                .child(
+                                    div()
+                                        .flex()
+                                        .flex_row()
+                                        .items_center()
+                                        .justify_between()
+                                        .px(px(6.0))
+                                        .py(px(2.0))
+                                        .child(
+                                            div()
+                                                .text_xs()
+                                                .font_weight(FontWeight::BOLD)
+                                                .text_color(cx.theme().muted_foreground)
+                                                .child("UNIFIED FOLDERS"),
+                                        ),
+                                )
+                                .child(
+                                    self.render_folder_row(
+                                        FolderRow {
+                                            id: ElementId::Name("folder-unified-inbox".into()),
+                                            icon: IconName::Inbox,
+                                            label: "Unified Inbox",
+                                            unread: unified_unread,
+                                            is_selected: self.is_unified_inbox
+                                                && self.active_split_category.is_none(),
+                                        },
+                                        cx,
+                                        cx.listener(|this, _, _, cx| {
+                                            this.select_unified_inbox(cx);
+                                        }),
+                                    ),
+                                );
+
+                            // Split inbox sub-categories when in Unified mode
+                            if self.is_unified_inbox {
+                                let cats = [
+                                    vespetrel_core::split_inbox::InboxCategory::Primary,
+                                    vespetrel_core::split_inbox::InboxCategory::Updates,
+                                    vespetrel_core::split_inbox::InboxCategory::Promotions,
+                                    vespetrel_core::split_inbox::InboxCategory::Newsletters,
+                                    vespetrel_core::split_inbox::InboxCategory::Social,
+                                ];
+                                let mut split_items =
+                                    div().flex().flex_col().pl(px(14.0)).gap(px(1.0));
+                                for cat in cats {
+                                    let is_selected = self.active_split_category == Some(cat);
+                                    let cat_clone = cat;
+                                    split_items = split_items.child(
+                                        self.render_folder_row(
+                                            FolderRow {
+                                                id: ElementId::Name(
+                                                    format!("split-{:?}", cat).into(),
+                                                ),
+                                                icon: IconName::Inbox,
+                                                label: cat.display_name(),
+                                                unread: 0,
+                                                is_selected,
+                                            },
+                                            cx,
+                                            cx.listener(move |this, _, _, cx| {
+                                                this.select_split_category(cat_clone, cx);
+                                            }),
+                                        ),
+                                    );
+                                }
+                                unified_group = unified_group.child(split_items);
+                            }
+                            sections.push(unified_group.into_any_element());
+
+                            // Divider between Unified Folders and Accounts
+                            sections.push(
                                 div()
-                                    .text_xs()
-                                    .text_color(cx.theme().muted_foreground)
-                                    .child("Use Add to connect an email account"),
-                            ),
-                    ]
-                } else {
-                    self.accounts
-                        .iter()
-                        .enumerate()
-                        .map(|(idx, acc)| {
-                            let acc_id_clone = acc.id.clone();
+                                    .my(px(2.0))
+                                    .border_t_1()
+                                    .border_color(cx.theme().sidebar_border)
+                                    .into_any_element(),
+                            );
+
+                            // --- B. PER-ACCOUNT TREE (Grouped & Differentiated per Email like Thunderbird) ---
+                            for (idx, acc) in self.accounts.iter().enumerate() {
+                                let acc_id = acc.id.clone();
+                                let acc_email = acc.email.clone();
+                                let is_collapsed = self.collapsed_accounts.contains(&acc.id);
+
+                                // Get folders strictly belonging to THIS account
+                                let mut acc_folders: Vec<&Folder> = self
+                                    .folders
+                                    .iter()
+                                    .filter(|f| f.account_id == acc.id)
+                                    .collect();
+                                acc_folders.sort_by_key(|f| folder_sort_key(&f.role));
+
+                                let acc_unread: i64 =
+                                    acc_folders.iter().map(|f| f.unread_count).sum();
+                                let provider_tag = match acc.provider_type {
+                                    ProviderType::Gmail => "Gmail",
+                                    ProviderType::Graph => "Exchange",
+                                    ProviderType::Jmap => "JMAP",
+                                    ProviderType::Imap => "IMAP",
+                                };
+
+                                let mut acc_section = div()
+                                    .id(ElementId::Name(
+                                        format!("account-section-{}", acc_id).into(),
+                                    ))
+                                    .flex()
+                                    .flex_col()
+                                    .gap(px(3.0));
+
+                                // 1. Account Header Banner / Card
+                                let acc_id_for_toggle = acc_id.clone();
+                                let acc_id_for_delete = acc_id.clone();
+                                let acc_email_for_tooltip = acc_email.clone();
+
+                                let account_header = div()
+                                    .id(ElementId::Name(format!("account-card-{}", idx).into()))
+                                    .flex()
+                                    .flex_row()
+                                    .items_center()
+                                    .justify_between()
+                                    .px(px(6.0))
+                                    .py(px(4.0))
+                                    .rounded_md()
+                                    .bg(cx.theme().sidebar_accent.opacity(0.4))
+                                    .hover(|s| s.bg(cx.theme().sidebar_accent))
+                                    .child(
+                                        div()
+                                            .id(ElementId::Name(
+                                                format!("acc-header-toggle-{}", acc_id_for_toggle).into(),
+                                            ))
+                                            .flex()
+                                            .flex_row()
+                                            .items_center()
+                                            .gap(px(6.0))
+                                            .flex_1()
+                                            .min_w(px(0.0))
+                                            .cursor_pointer()
+                                            .on_click(cx.listener({
+                                                let acc_id = acc_id_for_toggle.clone();
+                                                move |this, _, _, cx| {
+                                                    this.toggle_account_collapsed(&acc_id, cx);
+                                                }
+                                            }))
+                                            // Collapse / Expand Chevron
+                                            .child(
+                                                Icon::new(if is_collapsed {
+                                                    IconName::ChevronRight
+                                                } else {
+                                                    IconName::ChevronDown
+                                                })
+                                                .xsmall()
+                                                .text_color(cx.theme().muted_foreground),
+                                            )
+                                            // Account Email & Provider Pill
+                                            .child(
+                                                div()
+                                                    .flex()
+                                                    .flex_col()
+                                                    .flex_1()
+                                                    .min_w(px(0.0))
+                                                    .child(
+                                                        div()
+                                                            .text_xs()
+                                                            .font_weight(FontWeight::SEMIBOLD)
+                                                            .text_color(cx.theme().foreground)
+                                                            .overflow_hidden()
+                                                            .text_ellipsis()
+                                                            .child(acc_email.clone()),
+                                                    )
+                                                    .child(
+                                                        div()
+                                                            .text_xs()
+                                                            .text_color(cx.theme().muted_foreground)
+                                                            .child(provider_tag),
+                                                    ),
+                                            ),
+                                    )
+                                    .child(
+                                        div()
+                                            .flex()
+                                            .flex_row()
+                                            .items_center()
+                                            .gap(px(4.0))
+                                            .when(acc_unread > 0, |this| {
+                                                this.child(
+                                                    Badge::new().count(acc_unread as usize),
+                                                )
+                                            })
+                                            .child(
+                                                Button::new(ElementId::Name(
+                                                    format!("btn-del-account-{}", idx).into(),
+                                                ))
+                                                .ghost()
+                                                .xsmall()
+                                                .icon(IconName::Delete)
+                                                .tooltip(format!(
+                                                    "Remove {}",
+                                                    acc_email_for_tooltip
+                                                ))
+                                                .accessibility_label(format!(
+                                                    "Remove {}",
+                                                    acc_email_for_tooltip
+                                                ))
+                                                .on_click(cx.listener(move |this, _, _, cx| {
+                                                    this.delete_account(&acc_id_for_delete, cx);
+                                                })),
+                                            ),
+                                    );
+
+                                acc_section = acc_section.child(account_header);
+
+                                // 2. Indented Folders belonging exclusively to this account
+                                if !is_collapsed {
+                                    if acc_folders.is_empty() {
+                                        acc_section = acc_section.child(
+                                            div()
+                                                .pl(px(20.0))
+                                                .py(px(4.0))
+                                                .text_xs()
+                                                .text_color(cx.theme().muted_foreground)
+                                                .child("No folders found"),
+                                        );
+                                    } else {
+                                        let mut folder_list = div()
+                                            .flex()
+                                            .flex_col()
+                                            .pl(px(14.0))
+                                            .ml(px(8.0))
+                                            .border_l_1()
+                                            .border_color(cx.theme().sidebar_border.opacity(0.5))
+                                            .gap(px(1.0));
+
+                                        for f in acc_folders {
+                                            let is_selected = !self.is_unified_inbox
+                                                && (self.selected_folder_id.as_deref()
+                                                    == Some(&f.id)
+                                                    || self.selected_folder_id.as_deref()
+                                                        == Some(&f.remote_id));
+                                            let folder_id_clone = f.id.clone();
+                                            folder_list = folder_list.child(
+                                                self.render_folder_row(
+                                                    FolderRow {
+                                                        id: ElementId::Name(
+                                                            format!("folder-{}", f.id).into(),
+                                                        ),
+                                                        icon: NavigationTree::folder_icon(&f.role),
+                                                        label: &f.name,
+                                                        unread: f.unread_count,
+                                                        is_selected,
+                                                    },
+                                                    cx,
+                                                    cx.listener(move |this, _, _, cx| {
+                                                        this.select_folder(
+                                                            folder_id_clone.clone(),
+                                                            cx,
+                                                        );
+                                                    }),
+                                                ),
+                                            );
+                                        }
+                                        acc_section = acc_section.child(folder_list);
+                                    }
+                                }
+
+                                sections.push(acc_section.into_any_element());
+                            }
+
+                            // --- C. SAVED SEARCHES (if any) ---
+                            if !self.saved_searches.is_empty() || !self.search_history.is_empty() {
+                                let mut search_group = div()
+                                    .flex()
+                                    .flex_col()
+                                    .pt(px(6.0))
+                                    .gap(px(2.0))
+                                    .child(
+                                        div()
+                                            .text_xs()
+                                            .font_weight(FontWeight::BOLD)
+                                            .text_color(cx.theme().muted_foreground)
+                                            .px(px(6.0))
+                                            .py(px(2.0))
+                                            .child("SEARCHES"),
+                                    );
+
+                                for vf in self.saved_searches.clone() {
+                                    let vf_clone = vf.clone();
+                                    let is_selected = self
+                                        .active_virtual_folder
+                                        .as_ref()
+                                        .map(|a| a.id == vf.id)
+                                        .unwrap_or(false);
+                                    search_group = search_group.child(
+                                        self.render_folder_row(
+                                            FolderRow {
+                                                id: ElementId::Name(
+                                                    format!("saved-search-{}", vf.id).into(),
+                                                ),
+                                                icon: IconName::Search,
+                                                label: &vf.name,
+                                                unread: 0,
+                                                is_selected,
+                                            },
+                                            cx,
+                                            cx.listener(move |this, _, _, cx| {
+                                                this.select_saved_search(vf_clone.clone(), cx);
+                                            }),
+                                        ),
+                                    );
+                                }
+
+                                for (idx, h) in self.search_history.clone().into_iter().enumerate()
+                                {
+                                    let h_clone = h.clone();
+                                    search_group = search_group.child(
+                                        self.render_folder_row(
+                                            FolderRow {
+                                                id: ElementId::Name(
+                                                    format!("search-history-{}", idx).into(),
+                                                ),
+                                                icon: IconName::Search,
+                                                label: &h,
+                                                unread: 0,
+                                                is_selected: false,
+                                            },
+                                            cx,
+                                            cx.listener(move |this, _, _, cx| {
+                                                this.execute_fts_search(&h_clone, cx);
+                                            }),
+                                        ),
+                                    );
+                                }
+                                sections.push(search_group.into_any_element());
+                            }
+
+                            sections
+                        }),
+                )
+                // 3. Pinned Bottom Quick Tools Toolbar
+                .child(
+                    div()
+                        .flex()
+                        .flex_col()
+                        .border_t_1()
+                        .border_color(cx.theme().sidebar_border)
+                        .p(px(8.0))
+                        .gap(px(4.0))
+                        .child(
                             div()
-                                .id(ElementId::Name(format!("account-card-{}", idx).into()))
                                 .flex()
                                 .flex_row()
                                 .items_center()
                                 .justify_between()
-                                .p(px(8.0))
-                                .rounded_md()
-                                .bg(cx.theme().muted)
                                 .child(
-                                    div()
-                                        .flex()
-                                        .flex_col()
-                                        .child(
-                                            div()
-                                                .text_xs()
-                                                .font_weight(FontWeight::SEMIBOLD)
-                                                .text_color(cx.theme().foreground)
-                                                .child(acc.email.clone()),
-                                        )
-                                        .child(
-                                            div()
-                                                .text_xs()
-                                                .text_color(cx.theme().muted_foreground)
-                                                .child(format!("{:?}", acc.provider_type)),
-                                        ),
+                                    Button::new("btn-open-contacts")
+                                        .ghost()
+                                        .small()
+                                        .icon(IconName::User)
+                                        .label("Contacts")
+                                        .tooltip("Address Book")
+                                        .on_click(cx.listener(|this, _, _, cx| {
+                                            this.active_modal = ActiveModal::ContactsPicker;
+                                            cx.notify();
+                                        })),
                                 )
                                 .child(
-                                    Button::new(ElementId::Name(
-                                        format!("btn-del-account-{}", idx).into(),
-                                    ))
-                                    .ghost()
-                                    .danger()
-                                    .icon(IconName::Delete)
-                                    .tooltip(format!("Remove {}", acc.email))
-                                    .accessibility_label(format!("Remove {}", acc.email))
-                                    .on_click(cx.listener(
-                                        move |this, _, _, cx| {
-                                            this.delete_account(&acc_id_clone, cx);
-                                        },
-                                    )),
+                                    Button::new("btn-open-filters")
+                                        .ghost()
+                                        .small()
+                                        .icon(IconName::ListFilter)
+                                        .label("Rules")
+                                        .tooltip("Message Filters & Rules")
+                                        .on_click(cx.listener(|this, _, _, cx| {
+                                            this.active_modal = ActiveModal::FilterRules;
+                                            cx.notify();
+                                        })),
                                 )
-                        })
-                        .collect()
-                })
-                .child({
-                    // One row shape for every destination, so the two branches return the same
-                    // element type and the tree cannot drift.
-                    let mut folder_elements: Vec<AnyElement> = Vec::new();
-
-                    // Unified Inbox
-                    let unified_unread: i64 = self
-                        .folders
-                        .iter()
-                        .filter(|f| f.role == FolderRole::Inbox)
-                        .map(|f| f.unread_count)
-                        .sum();
-
-                    folder_elements.push(
-                        self.render_folder_row(
-                            FolderRow {
-                                id: ElementId::Name("folder-unified-inbox".into()),
-                                icon: IconName::Inbox,
-                                label: "Unified Inbox",
-                                unread: unified_unread,
-                                is_selected: self.is_unified_inbox,
-                            },
-                            cx,
-                            cx.listener(|this, _, _, cx| {
-                                this.select_unified_inbox(cx);
-                            }),
-                        )
-                        .into_any_element(),
-                    );
-
-                    // Split inbox categories
-                    if self.is_unified_inbox {
-                        let cats = [
-                            vespetrel_core::split_inbox::InboxCategory::Primary,
-                            vespetrel_core::split_inbox::InboxCategory::Updates,
-                            vespetrel_core::split_inbox::InboxCategory::Promotions,
-                            vespetrel_core::split_inbox::InboxCategory::Newsletters,
-                            vespetrel_core::split_inbox::InboxCategory::Social,
-                        ];
-                        for cat in cats {
-                            let is_selected = self.active_split_category == Some(cat);
-                            let cat_clone = cat;
-                            folder_elements.push(
-                                self.render_folder_row(
-                                    FolderRow {
-                                        id: ElementId::Name(format!("split-{:?}", cat).into()),
-                                        icon: IconName::Inbox,
-                                        label: cat.display_name(),
-                                        unread: 0,
-                                        is_selected,
-                                    },
-                                    cx,
-                                    cx.listener(move |this, _, _, cx| {
-                                        this.select_split_category(cat_clone, cx);
-                                    }),
-                                )
-                                .into_any_element(),
-                            );
-                        }
-                    }
-
-                    // Individual Folders
-                    let nav_tree = NavigationTree::new(self.folders.clone());
-                    let individual_folders = nav_tree
-                        .sorted_folders()
-                        .into_iter()
-                        .map(|f| {
-                            let is_selected = !self.is_unified_inbox
-                                && (self.selected_folder_id.as_deref() == Some(&f.id)
-                                    || self.selected_folder_id.as_deref() == Some(&f.remote_id));
-                            let folder_id_clone = f.id.clone();
-                            self.render_folder_row(
-                                FolderRow {
-                                    id: ElementId::Name(format!("folder-{}", f.id).into()),
-                                    icon: NavigationTree::folder_icon(&f.role),
-                                    label: &f.name,
-                                    unread: f.unread_count,
-                                    is_selected,
-                                },
-                                cx,
-                                cx.listener(move |this, _, _, cx| {
-                                    this.select_folder(folder_id_clone.clone(), cx);
-                                }),
-                            )
-                            .into_any_element()
-                        })
-                        .collect::<Vec<_>>();
-
-                    folder_elements.extend(individual_folders);
-
-                    // Filters / rules entry point
-                    // Search history
-                    for (idx, h) in self.search_history.clone().into_iter().enumerate() {
-                        let h_clone = h.clone();
-                        folder_elements.push(
-                            self.render_folder_row(
-                                FolderRow {
-                                    id: ElementId::Name(format!("search-history-{}", idx).into()),
-                                    icon: IconName::Search,
-                                    label: &h,
-                                    unread: 0,
-                                    is_selected: false,
-                                },
-                                cx,
-                                cx.listener(move |this, _, _, cx| {
-                                    this.execute_fts_search(&h_clone, cx);
-                                }),
-                            )
-                            .into_any_element(),
-                        );
-                    }
-
-                    folder_elements.push(
-                        Button::new("btn-open-contacts")
-                            .ghost()
-                            .small()
-                            .icon(IconName::User)
-                            .label("Contacts")
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                this.active_modal = ActiveModal::ContactsPicker;
-                                cx.notify();
-                            }))
-                            .into_any_element(),
-                    );
-
-                    folder_elements.push(
-                        Button::new("btn-open-tb-import")
-                            .ghost()
-                            .small()
-                            .icon(IconName::FolderDown)
-                            .label("Import Thunderbird")
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                this.active_modal = ActiveModal::ThunderbirdImport;
-                                cx.notify();
-                            }))
-                            .into_any_element(),
-                    );
-
-                    folder_elements.push(
-                        Button::new("btn-open-filters")
-                            .ghost()
-                            .small()
-                            .icon(IconName::ListFilter)
-                            .label("Filters & Rules")
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                this.active_modal = ActiveModal::FilterRules;
-                                cx.notify();
-                            }))
-                            .into_any_element(),
-                    );
-
-                    // Saved searches
-                    for vf in self.saved_searches.clone() {
-                        let vf_clone = vf.clone();
-                        let is_selected = self
-                            .active_virtual_folder
-                            .as_ref()
-                            .map(|a| a.id == vf.id)
-                            .unwrap_or(false);
-                        folder_elements.push(
-                            self.render_folder_row(
-                                FolderRow {
-                                    id: ElementId::Name(format!("saved-search-{}", vf.id).into()),
-                                    icon: IconName::Search,
-                                    label: &vf.name,
-                                    unread: 0,
-                                    is_selected,
-                                },
-                                cx,
-                                cx.listener(move |this, _, _, cx| {
-                                    this.select_saved_search(vf_clone.clone(), cx);
-                                }),
-                            )
-                            .into_any_element(),
-                        );
-                    }
-
-                    div()
-                        .flex()
-                        .flex_col()
-                        .gap(px(4.0))
-                        .children(folder_elements)
-                })
+                                .child(
+                                    Button::new("btn-open-tb-import")
+                                        .ghost()
+                                        .small()
+                                        .icon(IconName::FolderDown)
+                                        .label("Import")
+                                        .tooltip("Import from Thunderbird")
+                                        .on_click(cx.listener(|this, _, _, cx| {
+                                            this.active_modal = ActiveModal::ThunderbirdImport;
+                                            cx.notify();
+                                        })),
+                                ),
+                        ),
+                )
         }
 
         /// One row in the folder tree.
@@ -4768,11 +5112,11 @@ pub mod gpui_app {
             };
 
             div()
+                .id("message-list-pane")
                 .flex()
                 .flex_col()
-                .w(px(360.0))
-                .h_full()
-                .flex_shrink_0()
+                .size_full()
+                .overflow_hidden()
                 .bg(cx.theme().background)
                 .border_r_1()
                 .border_color(cx.theme().border)
@@ -4941,10 +5285,11 @@ pub mod gpui_app {
             let (body_kind, body_source) = self.message_viewer.body();
 
             div()
+                .id("message-reader-pane")
                 .flex()
                 .flex_col()
-                .flex_1()
-                .h_full()
+                .size_full()
+                .overflow_hidden()
                 .bg(cx.theme().background)
                 .child(if let Some(msg) = msg_opt {
                     let from_name = msg.from_name.as_deref().unwrap_or("");
@@ -4954,9 +5299,11 @@ pub mod gpui_app {
                     let attachments = &self.message_viewer.attachments;
 
                     let header_panel = div()
+                        .id("reader-header-panel")
                         .flex()
                         .flex_col()
                         .w_full()
+                        .flex_none()
                         // Top toolbar
                         .child(
                             div()
@@ -5383,10 +5730,13 @@ pub mod gpui_app {
                         );
 
                     let body_panel = div()
+                        .id("reader-body-panel")
                         .flex()
                         .flex_col()
                         .flex_1()
                         .w_full()
+                        .h_full()
+                        .min_h(px(0.0))
                         .overflow_hidden()
                         // Attachments tray (if any)
                         .child(if !attachments.is_empty() {
@@ -5549,9 +5899,14 @@ pub mod gpui_app {
                                         ),
                                 ));
 
-                    v_resizable("reader-v-panels")
-                        .child(header_panel.into_any_element())
-                        .child(body_panel.into_any_element())
+                    div()
+                        .id("reader-content-layout")
+                        .flex()
+                        .flex_col()
+                        .size_full()
+                        .overflow_hidden()
+                        .child(header_panel)
+                        .child(body_panel)
                         .into_any_element()
                 } else {
                     // Empty state for the detail pane: it names the object the user must
@@ -6657,7 +7012,7 @@ pub mod gpui_app {
         #[allow(clippy::too_many_arguments)]
         fn render_attachment_preview_modal(
             &self,
-            window: &mut Window,
+            _window: &mut Window,
             cx: &mut Context<Self>,
             filename: &str,
             mime_type: &str,
@@ -6689,7 +7044,7 @@ pub mod gpui_app {
             let fn_clone = filename.to_string();
             let bp_clone = blob_path.map(|s| s.to_string());
 
-            Sheet::new(window, cx).child(
+            Dialog::new(cx).child(
                 div()
                     .id("modal-attachment-preview-overlay")
                     .flex()
@@ -6703,11 +7058,13 @@ pub mod gpui_app {
                             .flex()
                             .flex_col()
                             .w(px(720.0))
-                            .max_h(px(580.0))
+                            .max_h(px(600.0))
+                            .overflow_y_scroll()
                             .rounded_xl()
-                            .bg(cx.theme().input)
+                            .bg(cx.theme().popover)
                             .border_1()
                             .border_color(cx.theme().border)
+                            .shadow_2xl()
                             .p(px(20.0))
                             .gap(px(12.0))
                             // Modal Header
@@ -6898,7 +7255,7 @@ pub mod gpui_app {
 
         fn render_compose_modal(
             &self,
-            window: &mut Window,
+            _window: &mut Window,
             cx: &mut Context<Self>,
         ) -> impl IntoElement {
             let to_text = if self.compose_to.is_empty() {
@@ -6962,7 +7319,7 @@ pub mod gpui_app {
                 Vec::new()
             };
 
-            Sheet::new(window, cx).child(
+            Dialog::new(cx).child(
                 div()
                     .id("modal-compose-overlay")
                     .flex()
@@ -6975,14 +7332,16 @@ pub mod gpui_app {
                             .id("modal-compose-box")
                             .flex()
                             .flex_col()
-                            .w(px(640.0))
-                            .h(px(520.0))
+                            .w(px(680.0))
+                            .max_h(px(720.0))
+                            .overflow_y_scroll()
                             .rounded_xl()
-                            .bg(cx.theme().input)
+                            .bg(cx.theme().popover)
                             .border_1()
                             .border_color(cx.theme().border)
-                            .p(px(20.0))
-                            .gap(px(10.0))
+                            .shadow_2xl()
+                            .p(px(22.0))
+                            .gap(px(12.0))
                             .child(
                                 div()
                                     .flex()
@@ -7314,9 +7673,10 @@ pub mod gpui_app {
                                 .flex()
                                 .flex_col()
                                 .flex_1()
+                                .min_h(px(160.0))
                                 .p(px(8.0))
                                 .rounded_md()
-                                .bg(cx.theme().popover)
+                                .bg(cx.theme().background)
                                 .border_1()
                                 .border_color(cx.theme().border)
                                 .child(if let Some(inputs) = &self.compose_inputs {
@@ -9824,5 +10184,140 @@ mod design_tests {
         let pt = sig.plain_text.unwrap();
         assert!(pt.contains("Suyash Stark"));
         assert!(pt.contains("suyash@vespetrel.org"));
+    }
+
+    #[test]
+    fn test_active_modal_dialog_box_states() {
+        use super::gpui_app::ActiveModal;
+        use crate::views::login_wizard::{LoginWizardState, WizardStep};
+
+        let mut modal = ActiveModal::None;
+        assert_eq!(modal, ActiveModal::None);
+
+        modal = ActiveModal::AddAccount;
+        assert_eq!(modal, ActiveModal::AddAccount);
+
+        let mut wizard = LoginWizardState::new();
+        assert_eq!(wizard.step, WizardStep::EnterCredentials);
+        assert_eq!(
+            wizard.auth_mode,
+            crate::views::login_wizard::AuthModeChoice::Password
+        );
+
+        // Test preset application for dialogue box
+        wizard.apply_autodiscover_for_email("personal@gmail.com");
+        assert_eq!(wizard.incoming_host, "imap.gmail.com");
+        assert_eq!(wizard.incoming_port, 993);
+        assert_eq!(wizard.outgoing_host, "smtp.gmail.com");
+        assert_eq!(wizard.outgoing_port, 587);
+        assert_eq!(
+            wizard.auth_mode,
+            crate::views::login_wizard::AuthModeChoice::OAuth2
+        );
+
+        // Reset
+        modal = ActiveModal::None;
+        assert_eq!(modal, ActiveModal::None);
+
+        // Test Compose modal state
+        modal = ActiveModal::Compose;
+        assert_eq!(modal, ActiveModal::Compose);
+        modal = ActiveModal::None;
+        assert_eq!(modal, ActiveModal::None);
+    }
+
+    #[test]
+    fn test_compose_state_and_signature_injection() {
+        use crate::views::compose::ComposeState;
+        use vespetrel_core::{Address, Signature};
+
+        let mut compose = ComposeState::new(Address {
+            name: Some("Sender".to_string()),
+            email: "sender@example.com".to_string(),
+        });
+        assert!(!compose.is_markdown_mode);
+
+        let sig = Signature::new(
+            "acc-1",
+            "My Sig",
+            "<p>Best,\nSender</p>",
+            Some("Best,\nSender".into()),
+            true,
+            true,
+        );
+        compose.apply_signature(&sig);
+        assert!(compose.draft.body_text.contains("Best,\nSender"));
+
+        // Test field validation
+        let valid =
+            compose.validate_compose_fields("recipient@example.com", "Test Subject", "Hello");
+        assert!(valid.is_valid());
+
+        let invalid_to = compose.validate_compose_fields("invalid-email", "Test Subject", "Hello");
+        assert!(!invalid_to.is_valid());
+    }
+
+    #[test]
+    fn test_sidebar_per_account_grouping_and_collapsing() {
+        use vespetrel_core::{Account, Folder, FolderRole, ProviderType};
+
+        let acc1 = Account::new("Personal", "user@gmail.com", ProviderType::Gmail);
+        let acc2 = Account::new("Work", "work@company.com", ProviderType::Graph);
+
+        let f1_inbox =
+            Folder::new(&acc1.id, "inbox1", "Inbox", "INBOX").with_role(FolderRole::Inbox);
+        let f1_sent = Folder::new(&acc1.id, "sent1", "Sent", "SENT").with_role(FolderRole::Sent);
+        let f2_inbox =
+            Folder::new(&acc2.id, "inbox2", "Inbox", "INBOX").with_role(FolderRole::Inbox);
+        let f2_drafts =
+            Folder::new(&acc2.id, "drafts2", "Drafts", "DRAFTS").with_role(FolderRole::Drafts);
+
+        let all_folders = [f1_inbox, f1_sent, f2_inbox, f2_drafts];
+
+        // Filter per account like in render_folder_tree
+        let acc1_folders: Vec<&Folder> = all_folders
+            .iter()
+            .filter(|f| f.account_id == acc1.id)
+            .collect();
+        let acc2_folders: Vec<&Folder> = all_folders
+            .iter()
+            .filter(|f| f.account_id == acc2.id)
+            .collect();
+
+        assert_eq!(acc1_folders.len(), 2);
+        assert_eq!(acc2_folders.len(), 2);
+
+        // Verify folder sorting order
+        use crate::views::navigation::folder_sort_key;
+        let mut sorted1 = acc1_folders.clone();
+        sorted1.sort_by_key(|f| folder_sort_key(&f.role));
+        assert_eq!(sorted1[0].role, FolderRole::Inbox);
+        assert_eq!(sorted1[1].role, FolderRole::Sent);
+
+        // Test collapse state tracking
+        let mut collapsed = std::collections::HashSet::new();
+        assert!(!collapsed.contains(&acc1.id));
+        collapsed.insert(acc1.id.clone());
+        assert!(collapsed.contains(&acc1.id));
+        collapsed.remove(&acc1.id);
+        assert!(!collapsed.contains(&acc1.id));
+    }
+
+    #[test]
+    fn test_resizable_panes_and_layout_switching() {
+        use vespetrel_core::settings::{PaneLayout, UserSettings};
+
+        let mut settings = UserSettings::default();
+        assert_eq!(settings.layout, PaneLayout::ThreePaneVertical);
+
+        // Verify layout variants supported in mail workspace
+        settings.layout = PaneLayout::ClassicHorizontal;
+        assert_eq!(settings.layout, PaneLayout::ClassicHorizontal);
+
+        settings.layout = PaneLayout::SingleColumnFocus;
+        assert_eq!(settings.layout, PaneLayout::SingleColumnFocus);
+
+        settings.layout = PaneLayout::ThreePaneVertical;
+        assert_eq!(settings.layout, PaneLayout::ThreePaneVertical);
     }
 }

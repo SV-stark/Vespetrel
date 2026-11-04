@@ -27,4 +27,3 @@ uuid = { workspace = true }
 rustls = { workspace = true }
 tokio-rustls = { workspace = true }
 webpki-roots = { workspace = true }
-futures = { workspace = true }

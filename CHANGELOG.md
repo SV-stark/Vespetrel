@@ -9,6 +9,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.5] - 2026-11-04
+
+### Added
+- **Thunderbird-Style Hierarchical Folder Pane**:
+  - Differentiated per-account folder tree hierarchy with distinct account cards, email addresses, and aggregate unread badges.
+  - Interactive collapsible account trees (`collapsed_accounts: HashSet<String>`) with chevron toggle animations (`ChevronDown` / `ChevronRight`).
+  - Account provider pill badges (`Gmail`, `Exchange`, `IMAP`, `Custom`) and per-account removal/management controls.
+  - Subfolders nested cleanly under their parent account with a left tree guide line (`border_l_1`), logically sorted (`Inbox` -> `Drafts` -> `Sent` -> `Archive` -> `Junk` -> `Trash` -> Custom labels) via `folder_sort_key`.
+  - Pinned "Unified Folders" anchor at the top of the sidebar with aggregate unread counts and split categories (Primary, Social, Promotions, Updates).
+  - Pinned bottom utility bar for instant access to Contacts, Filter Rules, and Thunderbird Import.
+- **Dynamic 3-Pane Resizing & Layout Modes**:
+  - Interactive draggable splitter dividers between Folder Pane and Message List (`sidebar_width`), and between Message List and Reader Pane (`message_list_width`).
+  - Full workspace layout switching support for `ThreePaneVertical` (modern 3-pane), `ClassicHorizontal` (traditional top-list/bottom-reader), and `SingleColumnFocus`.
+  - Removed artificial vertical split constraints in the reader pane to maximize email reading area.
+- **Isolated Account Creation & Settings Dialogues**:
+  - Standalone modal dialogue box (`ActiveModal::AddAccount`) preventing overlapping or clipped interface elements during account setup.
+  - Isolated autodiscover and manual server configuration inputs.
+- **Automated CLI Banner Versioning**:
+  - Replaced hardcoded CLI banner version strings with `env!("CARGO_PKG_VERSION")`.
+
+### Fixed
+- **Compose Dialogue & Button Activation**:
+  - Replaced buggy unmanaged right-hand `Sheet` host in `render_compose_modal` and `render_attachment_preview_modal` with standard, centered `Dialog::new(cx)` modal overlays matching `AddAccount` and `Settings`.
+  - Wired `+ Compose` button in header (`btn-header-compose`) and added Thunderbird-style `+ Compose` button in sidebar header (`btn-sidebar-compose`) to call `open_compose(cx)`.
+  - Corrected composer input initialization and state reset on open (`compose_inputs = None`), ensuring fresh recipient, subject, multi-line body, and signature fields appear reliably on click.
+
+### Changed
+- **Workspace Version Bump to `0.4.5`**:
+  - Bumped `vespetrel-app`, `vespetrel-core`, `vespetrel-storage`, `vespetrel-engine`, `vespetrel-imap`, `vespetrel-gmail`, `vespetrel-jmap`, `vespetrel-graph`, `vespetrel-smtp`, `vespetrel-dav`, `vespetrel-crypto`, and `vespetrel-render` to `0.4.5`.
+- **Zero Warnings Enforcement**:
+  - Clean `cargo clippy --all-targets -- -D warnings` and formatting across all workspace crates.
+
 ## [0.4.0] - 2026-11-03
 
 ### Added

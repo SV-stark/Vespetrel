@@ -9058,7 +9058,7 @@ checksum = "0b928f33d975fc6ad9f86c8f283853ad26bdd5b10b7f1542aa2fa15e2289105a"
 
 [[package]]
 name = "vespetrel-app"
-version = "0.4.0"
+version = "0.4.5"
 dependencies = [
  "ahash",
  "anyhow",
@@ -9094,7 +9094,7 @@ dependencies = [
 
 [[package]]
 name = "vespetrel-core"
-version = "0.4.0"
+version = "0.4.5"
 dependencies = [
  "ahash",
  "anyhow",
@@ -9104,16 +9104,14 @@ dependencies = [
  "memchr",
  "serde",
  "serde_json",
- "simdutf8",
  "thiserror 2.0.21",
- "urlencoding",
  "uuid",
  "vcard4",
 ]
 
 [[package]]
 name = "vespetrel-crypto"
-version = "0.4.0"
+version = "0.4.5"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -9142,7 +9140,7 @@ dependencies = [
 
 [[package]]
 name = "vespetrel-dav"
-version = "0.4.0"
+version = "0.4.5"
 dependencies = [
  "anyhow",
  "chrono",
@@ -9160,16 +9158,16 @@ dependencies = [
 
 [[package]]
 name = "vespetrel-engine"
-version = "0.4.0"
+version = "0.4.5"
 dependencies = [
  "ahash",
  "anyhow",
  "async-trait",
+ "aws-lc-rs",
  "chrono",
  "deadpool",
  "deadpool-sqlite",
  "flume",
- "futures",
  "keyring",
  "mail-parser",
  "memchr",
@@ -9179,6 +9177,7 @@ dependencies = [
  "serde_json",
  "sha2 0.10.9",
  "simdutf8",
+ "tempfile",
  "thiserror 2.0.21",
  "tokio",
  "tracing",
@@ -9190,17 +9189,17 @@ dependencies = [
  "vespetrel-imap",
  "vespetrel-jmap",
  "vespetrel-storage",
+ "zeroize",
 ]
 
 [[package]]
 name = "vespetrel-gmail"
-version = "0.4.0"
+version = "0.4.5"
 dependencies = [
  "anyhow",
  "async-trait",
  "base64 0.22.1",
  "chrono",
- "mail-parser",
  "reqwest",
  "serde",
  "serde_json",
@@ -9213,7 +9212,7 @@ dependencies = [
 
 [[package]]
 name = "vespetrel-graph"
-version = "0.4.0"
+version = "0.4.5"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -9231,13 +9230,12 @@ dependencies = [
 
 [[package]]
 name = "vespetrel-imap"
-version = "0.4.0"
+version = "0.4.5"
 dependencies = [
  "anyhow",
  "async-trait",
  "base64 0.22.1",
  "chrono",
- "mail-parser",
  "memchr",
  "rustls",
  "thiserror 2.0.21",
@@ -9250,7 +9248,7 @@ dependencies = [
 
 [[package]]
 name = "vespetrel-jmap"
-version = "0.4.0"
+version = "0.4.5"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -9265,7 +9263,7 @@ dependencies = [
 
 [[package]]
 name = "vespetrel-render"
-version = "0.4.0"
+version = "0.4.5"
 dependencies = [
  "ahash",
  "ammonia",
@@ -9288,13 +9286,12 @@ dependencies = [
 
 [[package]]
 name = "vespetrel-smtp"
-version = "0.4.0"
+version = "0.4.5"
 dependencies = [
  "anyhow",
  "aws-lc-rs",
  "base64 0.22.1",
  "chrono",
- "futures",
  "lettre",
  "rustls",
  "serde",
@@ -9310,7 +9307,7 @@ dependencies = [
 
 [[package]]
 name = "vespetrel-storage"
-version = "0.4.0"
+version = "0.4.5"
 dependencies = [
  "ahash",
  "anyhow",
