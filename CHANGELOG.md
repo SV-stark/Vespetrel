@@ -9,6 +9,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-11-21
+
+### Added
+- **Clean-Room HTML Email Layout & Native GPUI Renderer**:
+  - Added `vespetrel_render::css` with `<style>` block and inline `style="..."` parsing, `(id, class, tag)` specificity cascade, inheritance, `!important` support, HTML presentational attribute mapping (`bgcolor`, `align`, `valign`, `width`, `height`, `border`, `hidden`, `aria-hidden`), and strict blocking of `url(...)`, `expression()`, `javascript:`, and `@import`.
+  - Added `vespetrel_render::layout` (`parse_email_html`) combining `lol_html` security rewriting with `html5ever` DOM traversal into a typed `EmailDocument` IR (`Container`, `Table`, `RichText`, `ButtonLink`, `Image`, `ListItem`, `Rule`).
+  - Added `vespetrel_app::views::html_renderer` to render `EmailDocument` natively via GPUI `div`, `InteractiveText`/`StyledText` (with clickable links and phishing indicators), styled CTA buttons, `colspan`-weighted table rows, dark-mode foreground contrast adaptation, base64 `data:image/*` decoding, and `blob://`/`cid:` local attachment image rendering.
+  - Cached `layout_doc` in `MessageViewer` across frame renders.
+- **CalDAV `RRULE` Recurrence Expansion**:
+  - Added `vespetrel_dav::rrule::RRule` supporting `DAILY`, `WEEKLY` (`BYDAY`), `MONTHLY`, `YEARLY`, `INTERVAL`, `COUNT`, and `UNTIL` with a 500-instance safety cap.
+  - Wired `RRule` expansion into `CalendarView::events_for_date` and `CalendarView::events_in_range`.
+- **Filter Rules Modal Actions**:
+  - Added `apply_filter_rules_to_loaded_messages`, **Rule from selected**, and **Run on folder** actions in `ActiveModal::FilterRules`.
+
+### Changed
+- **Dependency & Workspace Upgrades**:
+  - Upgraded `gpui-kit` to `0.10.0` and `gpui-fast` to `0.1.16` (resolved to `0.1.17`).
+  - Ran `cargo update` across workspace dependencies.
+  - Bumped workspace and crate versions to `0.5.0`.
+
+### Fixed
+- Removed unreachable `.map_err(...)` in `vespetrel-storage/src/db.rs` so `cargo clippy --workspace --all-targets -- -D warnings` passes with zero warnings.
+
 ## [0.4.6] - 2026-11-04
 
 ### Added

@@ -1,6 +1,8 @@
 use vespetrel_core::message::Address;
 use vespetrel_render::{
-    PhishingRisk, RewriteOptions, SanitizeOptions, sanitize, scan_content_for_phishing,
+    PhishingRisk, RewriteOptions, SanitizeOptions,
+    layout::{EmailDocument, parse_email_html},
+    sanitize, scan_content_for_phishing,
 };
 
 /// What the reader actually *determined* about a message's cryptography.
@@ -87,6 +89,7 @@ pub struct MessageViewer {
     pub raw_html: Option<String>,
     pub plain_text: Option<String>,
     pub sanitized_html: Option<String>,
+    pub layout_doc: Option<EmailDocument>,
     pub from: Option<Address>,
     pub to: Vec<Address>,
     pub cc: Vec<Address>,
@@ -104,6 +107,7 @@ impl MessageViewer {
             raw_html: None,
             plain_text: None,
             sanitized_html: None,
+            layout_doc: None,
             from: None,
             to: Vec::new(),
             cc: Vec::new(),
@@ -138,6 +142,7 @@ impl MessageViewer {
                 },
             };
             self.sanitized_html = sanitize(html, &opts).ok();
+            self.layout_doc = parse_email_html(html, &opts).ok();
         }
     }
 
@@ -147,6 +152,7 @@ impl MessageViewer {
         self.plain_text = Some(t);
         self.raw_html = None;
         self.sanitized_html = None;
+        self.layout_doc = None;
     }
 
     /// Drop every loaded body and every verdict.
@@ -417,5 +423,21 @@ mod tests {
         assert_eq!(kind, BodyKind::Html);
         assert!(body.contains("Hi"));
         assert!(!body.contains("<script"));
+    }
+
+    #[test]
+    fn load_html_populates_layout_doc_and_respects_image_toggle() {
+        let mut viewer = MessageViewer::new();
+        viewer.load_html(
+            r#"<style>.hero { color: #1d4ed8; }</style><p class="hero">Hello</p><img src="https://cdn.example/a.png" width="200" height="80" alt="Hero">"#,
+            true,
+        );
+        let doc = viewer.layout_doc.as_ref().expect("layout_doc populated");
+        assert_eq!(doc.blocked_image_count, 1);
+        assert!(doc.plain_text_preview().contains("Hello"));
+
+        viewer.toggle_remote_images();
+        let doc_unblocked = viewer.layout_doc.as_ref().expect("layout_doc updated");
+        assert_eq!(doc_unblocked.blocked_image_count, 0);
     }
 }

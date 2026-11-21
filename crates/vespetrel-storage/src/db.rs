@@ -59,9 +59,8 @@ pub fn create_pool_with_key(
 
     let is_memory = db_path == ":memory:";
     let key_owned = encryption_key.map(|s| Zeroizing::new(s.to_string()));
-    let pool = cfg
-        .builder(Runtime::Tokio1)
-        .map_err(|e| crate::StorageError::Pool(e.to_string()))?
+    let Ok(builder) = cfg.builder(Runtime::Tokio1);
+    let pool = builder
         .post_create(Hook::async_fn(move |conn, _metrics| {
             let key = key_owned.clone();
             Box::pin(async move {

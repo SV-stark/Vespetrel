@@ -1,4 +1,5 @@
 //! Vespetrel DAV - CalDAV / CardDAV sync §4 PIM
+pub mod rrule;
 use tracing::debug;
 
 #[derive(Clone)]

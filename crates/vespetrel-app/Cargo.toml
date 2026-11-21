@@ -20,6 +20,7 @@ vespetrel-core = { workspace = true }
 vespetrel-storage = { workspace = true }
 vespetrel-engine = { workspace = true }
 vespetrel-render = { workspace = true }
+vespetrel-dav = { path = "../vespetrel-dav" }
 vespetrel-smtp = { workspace = true }
 vespetrel-crypto = { workspace = true }
 keyring = { workspace = true }
@@ -42,6 +43,7 @@ flume = { workspace = true }
 smallvec = { workspace = true }
 regex = { workspace = true }
 rustls = { workspace = true }
+base64 = { workspace = true }
 gpui-kit = { workspace = true, optional = true }
 gpui-fast = { workspace = true, optional = true }
 

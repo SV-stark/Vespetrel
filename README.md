@@ -6,7 +6,7 @@
 **Pre-1.0 • Multi-protocol (IMAP / JMAP / Graph) • Local FTS5 search • Native GPU UI**
 
 [![Rust](https://img.shields.io/badge/rust-stable-brightgreen.svg?style=flat-square&logo=rust)](https://www.rust-lang.org)
-[![GPUI](https://img.shields.io/badge/GUI-gpui--fast%20%2B%20gpui--kit%200.9.0-blueviolet.svg?style=flat-square)](https://crates.io/crates/gpui-kit)
+[![GPUI](https://img.shields.io/badge/GUI-gpui--fast%20%2B%20gpui--kit%200.10.0-blueviolet.svg?style=flat-square)](https://crates.io/crates/gpui-kit)
 [![License: MIT OR Apache-2.0](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg?style=flat-square)](LICENSE)
 [![Nightly](https://img.shields.io/github/v/release/SV-stark/Vespetrel?include_prereleases&label=Windows%20Nightly&logo=windows&color=blue)](https://github.com/SV-stark/Vespetrel/releases/tag/nightly)
 [![Search](https://img.shields.io/badge/search-SQLite%20FTS5%20(BM25)-orange.svg?style=flat-square)](https://www.sqlite.org/fts5.html)
@@ -23,14 +23,14 @@
 
 Modern desktop email clients are almost universally trapped in web runtimes (Electron, Gecko, Chromium) that consume gigabytes of memory, introduce sluggish typing latency, and struggle when searching 50k+ local mailboxes.
 
-**Vespetrel** is a from-scratch desktop mail client written in Rust, using **`gpui-fast + gpui-kit 0.9.0`** for a GPU-rendered native UI (no Electron, no embedded browser). It is pre-1.0: it already covers multi-protocol mail (IMAP, JMAP, Microsoft Graph, Gmail), OAuth2 sign-in, local SQLite FTS5 search, CalDAV/CardDAV and OpenPGP/S/MIME, but it is **not yet a Thunderbird replacement**. See the [honest comparison](#-vespetrel-vs-thunderbird-honest-comparison) and the [roadmap](#-roadmap--status) for what is and isn't done. Performance figures have not been benchmarked and are intentionally not claimed.
+**Vespetrel** is a from-scratch desktop mail client written in Rust, using **`gpui-fast + gpui-kit 0.10.0`** for a GPU-rendered native UI (no Electron, no embedded browser). It is pre-1.0: it already covers multi-protocol mail (IMAP, JMAP, Microsoft Graph, Gmail), OAuth2 sign-in, local SQLite FTS5 search, CalDAV/CardDAV and OpenPGP/S/MIME, but it is **not yet a Thunderbird replacement**. See the [honest comparison](#-vespetrel-vs-thunderbird-honest-comparison) and the [roadmap](#-roadmap--status) for what is and isn't done. Performance figures have not been benchmarked and are intentionally not claimed.
 
 ```
 ┌────────────────────────────────────────────────────────────────────────────────────────────┐
 │                                   VESPETREL ARCHITECTURE                                   │
 │                                                                                            │
 │  ┌──────────────────────────────────────────────────────────────────────────────────────┐  │
-│  │ GPUI-FAST + GPUI-KIT 0.9.0 FRONTEND (GPU Metal / Vulkan / DirectX)           │  │
+│  │ GPUI-FAST + GPUI-KIT 0.10.0 FRONTEND (GPU Metal / Vulkan / DirectX)          │  │
 │  │ • 3-Pane Dock Layout (Folders, Virtual Thread List, Message Viewer)                  │  │
 │  │ • Interactive Setup Wizard (Input/InputState, masked password + eye toggle)         │  │
 │  │ • Tree-sitter Rich Markdown/Plaintext Editor                 │  │
@@ -65,15 +65,15 @@ Modern desktop email clients are almost universally trapped in web runtimes (Ele
 
 Vespetrel is **not** a drop-in Thunderbird replacement yet. It is a young, fast-moving client with a different design focus.
 
-| Area | Thunderbird | Vespetrel (v0.4.5) |
+| Area | Thunderbird | Vespetrel (v0.5.0) |
 |---|---|---|
 | **Maturity** | 20+ years, large user base | Pre-1.0, single maintainer |
 | **UI technology** | Gecko (HTML/XUL/JS) | Native Rust, GPU-rendered via `gpui-kit` |
 | **Protocols** | IMAP, POP3, SMTP, NNTP, Exchange (EWS) | IMAP, SMTP, JMAP, Microsoft Graph, Gmail API (POP3 not yet) |
-| **HTML email rendering** | Full web engine | Sanitize-only today; layout engine planned |
-| **Filters / rules** | Mature | Planned |
-| **Import / migration** | Broad | Planned |
-| **Calendar & contacts** | Built in | CalDAV/CardDAV (no `RRULE` expansion) |
+| **HTML email rendering** | Full web engine | Clean-room CSS cascade + HTML5 layout IR + native GPUI renderer (`data:`/`cid:` images; `@media` planned) |
+| **Filters / rules** | Mature | Rule evaluation on arrival & on demand in Filter Rules modal |
+| **Import / migration** | Broad | Thunderbird mbox import wired; Maildir/Apple Mail planned |
+| **Calendar & contacts** | Built in | CalDAV/CardDAV with `RRULE` expansion (`DAILY`/`WEEKLY`/`MONTHLY`/`YEARLY`) |
 | **Encryption** | OpenPGP + S/MIME | OpenPGP (`rPGP`) + S/MIME validation |
 | **Tracker blocking** | Remote content blocking | Built-in pixel stripping and remote-content block |
 | **Extensions** | Large add-on ecosystem | None (plugin runtime planned) |
@@ -152,7 +152,7 @@ Vespetrel natively abstracts differences between modern and legacy email protoco
 * **Hardening**: Deterministic FNV-1a `stable_uid_from_id` (no restart collisions), symlink-traversal guard + corrupt-account quarantine + transactional signatures, 16MB IMAP response cap with zero-alloc fetch parsing, `webpki-roots` TLS, `cargo-deny` supply-chain audit (`openssl-sys` banned, unknown registries denied).
 
 ### 📅 Integrated PIM (Calendar, Contacts & Tasks)
-* **CalDAV**: Direct two-way sync with Google Calendar, Nextcloud, Fastmail, and Apple iCloud. WebDAV requests, XML multistatus parsing and `icalendar` (RFC 5545) handling are implemented in-crate on `reqwest`. `RRULE` expansion is not implemented; recurring series round-trip verbatim.
+* **CalDAV**: Direct two-way sync with Google Calendar, Nextcloud, Fastmail, and Apple iCloud. WebDAV requests, XML multistatus parsing, `icalendar` (RFC 5545) handling, and `RRULE` expansion (`DAILY`/`WEEKLY` `BYDAY`/`MONTHLY`/`YEARLY`, `COUNT`, `UNTIL`) are implemented in-crate.
 * **CardDAV**: Address book synchronization with auto-complete chips in the compose editor (`vcard4` RFC 6350).
 * **Tasks Engine**: Full RFC 5545 `VTODO` task tracking with due dates, priority, status filters, and CalDAV synchronization.
 
@@ -164,7 +164,7 @@ Vespetrel is architected as a highly modular Cargo workspace:
 
 ```
 vespetrel/
-├── Cargo.toml                  # Workspace manifest & shared dependencies (gpui-fast, gpui-kit 0.9.0, aws-lc-rs)
+├── Cargo.toml                  # Workspace manifest & shared dependencies (gpui-fast, gpui-kit 0.10.0, aws-lc-rs)
 ├── rust-toolchain.toml         # Pinned stable Rust toolchain
 ├── packaging/                  # Native packaging: windows/ (.nsi + manifest), linux/ (.desktop), macos/ (Info.plist)
 ├── .github/workflows/          # CI matrix (fmt + clippy + test + release build + headless verify + cargo-deny audit) & nightly release
@@ -248,34 +248,34 @@ Interactive console commands once launched: `list`/`inbox`, `read <ID>`, `compos
 
 ## 🗺️ Roadmap & Status
 
-Vespetrel is **pre-1.0 (v0.4.x)**. Items are only ticked when they are implemented **and** reachable from the app. Engine-level building blocks (parsers, command builders, data types) that are not yet wired into the UI or sync pipeline are listed as **Planned**, not done. See `CHANGELOG.md` for details.
+Vespetrel is **pre-1.0 (v0.5.x)**. Items are only ticked when they are implemented **and** reachable from the app. Engine-level building blocks (parsers, command builders, data types) that are not yet wired into the UI or sync pipeline are listed as **Planned**, not done. See `CHANGELOG.md` for details.
 
 ### ✅ Shipped
 
 - [x] **Storage & domain model**: Rust 2024 workspace, SQLite (WAL) schema with versioned migrations, FTS5/BM25 full-text search, `MailProvider` trait, `mail-parser` MIME parsing, LZ4/Zstd raw-message blob store
-- [x] **HTML safety pipeline**: `ammonia` sanitizer, `lol_html` tracking-pixel stripping, remote-content blocking, CSP + CID rewriting (sanitizes only; there is no HTML layout/paint engine yet, see Planned)
+- [x] **HTML safety & native email layout pipeline**: `lol_html` + `ammonia` sanitization, tracking-pixel stripping, remote-content blocking, clean-room CSS cascade (`vespetrel_render::css`), HTML5 layout IR (`vespetrel_render::layout`), and native GPUI renderer (`html_renderer.rs` with tables, CTA buttons, dark-mode contrast adaptation, and `data:`/`cid:` images)
 - [x] **Mail core**: IMAP (IDLE, CONDSTORE/QRESYNC, XOAUTH2), SMTP via `lettre` with DKIM, JMAP and Microsoft Graph adapters, Gmail label handling
 - [x] **Auth**: OAuth2 PKCE loopback flow (Google, Microsoft), proactive token refresh, OS keyring storage
 - [x] **Setup**: Thunderbird ISPDB autoconfig + heuristic autodiscover, setup wizard, account aliases, HTML signatures
 - [x] **Persistent outbox**: SQLite-backed retry/backoff and scheduled send
-- [x] **UI shell**: `gpui-kit` 3-pane layout, virtualized message list, JWZ threading, settings, command palette, keybinding maps, diacritic-insensitive quick filter, density modes, accent colors
-- [x] **Calendar / contacts / tasks**: CalDAV/CardDAV client (in-crate WebDAV), VTODO tasks. `RRULE` expansion is **not** implemented
+- [x] **UI shell**: `gpui-kit` 3-pane layout, virtualized message list, JWZ threading, settings, command palette, keybinding maps, diacritic-insensitive quick filter, density modes, accent colors, Filter Rules modal (with on-demand folder evaluation), Thunderbird mbox import
+- [x] **Calendar / contacts / tasks**: CalDAV/CardDAV client (in-crate WebDAV), `RRULE` recurrence expansion, VTODO tasks
 - [x] **Crypto**: OpenPGP via `rPGP`, Autocrypt headers, S/MIME validation
 - [x] **Packaging & CI**: Windows NSIS installer, Linux `.desktop`, macOS `Info.plist`, GitHub Actions matrix, `cargo-deny`
 
 ### 🚧 Planned / Partial (engine pieces exist, not production-ready or not wired in)
 
 **Needed before this can replace Thunderbird day to day**
-- [ ] **HTML email layout & rendering**: current pipeline sanitizes HTML but has no CSS layout/paint engine. Evaluating Blitz (+ `css-inline`) with a plain-text fallback
-- [ ] **Mailbox import / migration**: Thunderbird `profiles.ini`/`prefs.js` and mbox parsers exist in `vespetrel-engine::migrator`, but are not wired into any UI flow. Maildir and Apple Mail import are not implemented
-- [ ] **Message filters / rules engine**: matching types exist (`vespetrel-engine::filter`); not applied on message arrival/send, no rule-editor UI, no auto-reply/forward actions
-- [ ] **Undo send & snooze**: `UndoSendBuffer` and `SnoozeManager` exist but are not connected to the app
+- [ ] **HTML email rendering edge cases**: `@media` responsive rules and remote image fetching via `RemoteImageProxy`
+- [ ] **Mailbox import / migration**: Maildir and Apple Mail import are not implemented (Thunderbird mbox import is wired)
+- [ ] **Message filters / rules engine**: custom rule-editor UI for complex conditions, persistence to SQLite, and server-side flag/move sync
+- [ ] **Undo send & snooze persistence**: wired in memory; SQLite persistence across restarts pending
 - [ ] **Split inbox categories, unified inboxes, saved searches**: data types exist in `vespetrel-core`; UI and query wiring need verification
 - [ ] **Meeting invitations (iCalendar RSVP)**: parsing types exist; no end-to-end accept/decline flow
 - [ ] **Printing**
 - [ ] **Spell-check / dictionaries**
 - [ ] **Accessibility (screen readers)**: depends on `gpui` support
-- [ ] **CalDAV edge cases**: `RRULE` expansion, timezone handling
+- [ ] **CalDAV edge cases**: timezone edge cases and `EXDATE` handling
 
 **Protocols & integrations (building blocks only)**
 - [ ] **POP3**: command builders and UIDL tracking only; no network client

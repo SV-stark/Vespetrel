@@ -1023,6 +1023,45 @@ pub mod gpui_app {
             }
         }
 
+        pub fn apply_filter_rules_to_loaded_messages(&mut self, cx: &mut Context<Self>) -> usize {
+            let mut affected = 0usize;
+            for msg in &mut self.messages {
+                let actions = self.filter_engine.evaluate(msg);
+                if actions.is_empty() {
+                    continue;
+                }
+                let mut changed = false;
+                for action in actions {
+                    match action {
+                        vespetrel_engine::FilterAction::MarkRead if !msg.is_read => {
+                            msg.is_read = true;
+                            changed = true;
+                        }
+                        vespetrel_engine::FilterAction::MarkUnread if msg.is_read => {
+                            msg.is_read = false;
+                            changed = true;
+                        }
+                        vespetrel_engine::FilterAction::MarkFlagged if !msg.is_flagged => {
+                            msg.is_flagged = true;
+                            changed = true;
+                        }
+                        vespetrel_engine::FilterAction::MarkUnflagged if msg.is_flagged => {
+                            msg.is_flagged = false;
+                            changed = true;
+                        }
+                        _ => {}
+                    }
+                }
+                if changed {
+                    affected += 1;
+                }
+            }
+            if affected > 0 {
+                cx.notify();
+            }
+            affected
+        }
+
         pub fn handle_sync_event(&mut self, event: SyncEvent, cx: &mut Context<Self>) {
             match event {
                 SyncEvent::MessagesInserted(mut new_msgs) => {
@@ -5875,11 +5914,21 @@ pub mod gpui_app {
                                 // renders HTML natively and no script can run, because
                                 // there is no webview in this build.
                                 .child(match body_kind {
-                                    BodyKind::Html => TextView::html(
-                                        ElementId::Name("reader-body".into()),
-                                        body_source.clone(),
-                                    )
-                                    .into_any_element(),
+                                    BodyKind::Html => {
+                                        if let Some(layout_doc) = &self.message_viewer.layout_doc {
+                                            crate::views::html_renderer::render_email_document(
+                                                layout_doc,
+                                                &self.message_viewer.attachments,
+                                                cx,
+                                            )
+                                        } else {
+                                            TextView::html(
+                                                ElementId::Name("reader-body".into()),
+                                                body_source.clone(),
+                                            )
+                                            .into_any_element()
+                                        }
+                                    }
                                     // Plain text is escaped before display, so it is
                                     // presented as HTML with explicit line breaks rather
                                     // than read as Markdown.
@@ -8239,8 +8288,49 @@ pub mod gpui_app {
                                                         cx.notify();
                                                     })),
                                             )
+                                            .when(self.selected_message_id.is_some(), |el| {
+                                                el.child(
+                                                    Button::new("add-rule-from-selected")
+                                                        .small()
+                                                        .outline()
+                                                        .label("Rule from selected")
+                                                        .on_click(cx.listener(|this, _, _, cx| {
+                                                            if let Some(sel_id) = &this.selected_message_id
+                                                                && let Some(msg) = this.messages.iter().find(|m| &m.id == sel_id)
+                                                            {
+                                                                use vespetrel_engine::{ConditionCombinator, FilterAction, FilterCondition, FilterField, FilterPredicate, FilterRule};
+                                                                let mut rule = FilterRule::new(
+                                                                    format!("From {}", msg.from_address),
+                                                                    ConditionCombinator::MatchAll,
+                                                                );
+                                                                rule.conditions.push(FilterCondition {
+                                                                    field: FilterField::FromAddress,
+                                                                    predicate: FilterPredicate::Equals(msg.from_address.clone()),
+                                                                });
+                                                                rule.actions.push(FilterAction::MarkFlagged);
+                                                                this.filter_engine.add_rule(rule);
+                                                                this.show_toast("Added rule for selected sender", false, cx);
+                                                                cx.notify();
+                                                            }
+                                                        })),
+                                                )
+                                            })
                                             .when(count > 0, |el| {
                                                 el.child(
+                                                    Button::new("run-filter-rules-now")
+                                                        .small()
+                                                        .primary()
+                                                        .label("Run on folder")
+                                                        .on_click(cx.listener(|this, _, _, cx| {
+                                                            let affected = this.apply_filter_rules_to_loaded_messages(cx);
+                                                            this.show_toast(
+                                                                format!("Applied rules: {affected} message(s) updated"),
+                                                                false,
+                                                                cx,
+                                                            );
+                                                        })),
+                                                )
+                                                .child(
                                                     Button::new("clear-filter-rules")
                                                         .ghost()
                                                         .small()

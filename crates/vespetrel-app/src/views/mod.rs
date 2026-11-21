@@ -1,6 +1,7 @@
 pub mod calendar;
 pub mod compose;
 pub mod contacts;
+pub mod html_renderer;
 pub mod login_wizard;
 pub mod message_list;
 pub mod message_viewer;

@@ -11,6 +11,8 @@ description = "HTML sanitization, tracker stripping, markdown render pipeline"
 tracing = { workspace = true }
 ammonia = { workspace = true }
 lol_html = { workspace = true }
+html5ever = "0.27"
+markup5ever_rcdom = "0.3"
 mail-parser = { workspace = true }
 serde = { workspace = true }
 anyhow = { workspace = true }

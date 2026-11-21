@@ -65,7 +65,7 @@ fn is_tracking_pixel(el: &lol_html::html_content::Element) -> bool {
     false
 }
 
-fn rewrite_html(input: &str, opts: &RewriteOptions) -> anyhow::Result<String> {
+pub(crate) fn rewrite_html(input: &str, opts: &RewriteOptions) -> anyhow::Result<String> {
     if input.len() > MAX_HTML_INPUT_BYTES {
         anyhow::bail!("HTML input exceeds maximum allowable size");
     }
